@@ -1,0 +1,216 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.21'
+  NODE_VERSION: '18'
+
+jobs:
+  # ============================================
+  # STAGE 1: Checking
+  # ============================================
+  checking:
+    name: 🔍 Checking
+    runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Verify config.json version
+        run: |
+          CONFIG_VERSION=$(grep '"version"' server-go/config.json | sed 's/.*"version": "\([^"]*\)".*/\1/')
+          TAG_VERSION="${{ steps.version.outputs.VERSION }}"
+
+          echo "Config version: $CONFIG_VERSION"
+          echo "Tag version: $TAG_VERSION"
+
+          if [ "$CONFIG_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ ERROR: config.json version ($CONFIG_VERSION) does not match tag ($TAG_VERSION)"
+            exit 1
+          fi
+          echo "✅ config.json version matches"
+
+      - name: Verify package.json version
+        run: |
+          PACKAGE_VERSION=$(grep '"version"' server-go/web/package.json | sed 's/.*"version": "\([^"]*\)".*/\1/')
+          TAG_VERSION="${{ steps.version.outputs.VERSION }}"
+
+          echo "Package version: $PACKAGE_VERSION"
+          echo "Tag version: $TAG_VERSION"
+
+          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ ERROR: package.json version ($PACKAGE_VERSION) does not match tag ($TAG_VERSION)"
+            exit 1
+          fi
+          echo "✅ package.json version matches"
+
+      - name: Version check summary
+        run: |
+          echo "=========================================="
+          echo "✅ All version checks passed!"
+          echo "   Release version: v${{ steps.version.outputs.VERSION }}"
+          echo "=========================================="
+
+  # ============================================
+  # STAGE 2: Compiling (parallel builds)
+  # ============================================
+  compiling:
+    name: 🔨 Compile ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    needs: checking
+
+    strategy:
+      matrix:
+        include:
+          - target: Windows
+            goos: windows
+            goarch: amd64
+            suffix: windows-amd64.exe
+          - target: Linux ARM64
+            goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: server-go/web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: server-go/web
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: server-go/web
+        run: npm run build
+
+      - name: Copy dist for embedding
+        run: |
+          rm -rf server-go/cmd/server/dist
+          cp -r server-go/web/dist server-go/cmd/server/dist
+
+      - name: Build ${{ matrix.target }}
+        working-directory: server-go
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          echo "Building ${{ matrix.target }}..."
+          go build -ldflags="-s -w" -o ../buzzcontrol-v${{ needs.checking.outputs.version }}-${{ matrix.suffix }} ./cmd/server
+          echo "✅ ${{ matrix.target }} build complete"
+
+      - name: Validate binary
+        run: |
+          FILE="buzzcontrol-v${{ needs.checking.outputs.version }}-${{ matrix.suffix }}"
+          SIZE=$(stat -c%s "$FILE")
+          echo "${{ matrix.target }} binary: $SIZE bytes ($(numfmt --to=iec $SIZE))"
+
+          MIN_SIZE=5242880
+          if [ "$SIZE" -lt "$MIN_SIZE" ]; then
+            echo "❌ ERROR: Binary too small ($SIZE < $MIN_SIZE)"
+            exit 1
+          fi
+          echo "✅ ${{ matrix.target }} binary validation passed"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: buzzcontrol-v${{ needs.checking.outputs.version }}-${{ matrix.suffix }}
+          retention-days: 1
+
+  # ============================================
+  # STAGE 3: Releasing
+  # ============================================
+  releasing:
+    name: 🚀 Releasing
+    runs-on: ubuntu-latest
+    needs: [checking, compiling]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          ls -lh artifacts/
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          VERSION="${{ needs.checking.outputs.version }}"
+
+          echo "Extracting release notes for v$VERSION from CHANGELOG.md..."
+
+          # Extract release notes from CHANGELOG.md
+          NOTES=$(awk "/## \[$VERSION\]/{flag=1; next} /## \[/{flag=0} flag" CHANGELOG.md)
+
+          if [ -z "$NOTES" ]; then
+            NOTES="Release v$VERSION"
+            echo "⚠️ No release notes found in CHANGELOG.md, using default"
+          else
+            echo "✅ Release notes extracted"
+          fi
+
+          # Save to file for multiline support
+          echo "$NOTES" > release_notes.md
+          echo "--- Release Notes ---"
+          cat release_notes.md
+          echo "---------------------"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: BuzzControl v${{ needs.checking.outputs.version }}
+          body_path: release_notes.md
+          files: artifacts/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        run: |
+          echo "=========================================="
+          echo "🎉 Release v${{ needs.checking.outputs.version }} published!"
+          echo ""
+          echo "📦 Assets:"
+          ls -1 artifacts/
+          echo ""
+          echo "🔗 https://github.com/${{ github.repository }}/releases/tag/v${{ needs.checking.outputs.version }}"
+          echo "=========================================="

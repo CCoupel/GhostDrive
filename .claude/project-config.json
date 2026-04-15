@@ -1,0 +1,75 @@
+{
+  "name": "GhostDrive",
+  "description": "Client de synchronisation Windows vers backends de stockage prives (WebDAV, MooseFS, S3...). Equivalent OneDrive open-source avec placeholders Files On-Demand, cache local et architecture plugin.",
+  "version": "0.1.0",
+  "initialized_at": "2026-04-15T00:00:00Z",
+  "initialized_from": "workshop",
+  "stack": {
+    "backend": {
+      "language": "go",
+      "version": "1.21",
+      "framework": "wails-backend",
+      "entry": "./cmd/ghostdrive",
+      "architecture": "plugin-interface"
+    },
+    "frontend": {
+      "language": "typescript",
+      "framework": "wails+react",
+      "path": "frontend/"
+    },
+    "mobile": null,
+    "firmware": null,
+    "database": null,
+    "plugins": {
+      "interface": "plugins/plugin.go",
+      "v1": ["webdav", "moosefs"],
+      "pattern": "go-interface-compiled"
+    }
+  },
+  "platform": {
+    "primary": "windows",
+    "secondary": ["linux"],
+    "windows_api": ["cloud-filter-api", "winfsp"],
+    "distribution": "binary-releases"
+  },
+  "infrastructure": {
+    "cicd": "github-actions",
+    "deploy": "binary-releases",
+    "targets": [
+      { "os": "windows", "arch": "amd64", "suffix": "windows-amd64.exe" },
+      { "os": "linux", "arch": "arm64", "suffix": "linux-arm64" }
+    ],
+    "versioning": "semantic",
+    "version_sources": ["server-go/config.json", "frontend/package.json", "git-tag"]
+  },
+  "testing": {
+    "backend": ["go-test", "testify"],
+    "frontend": ["vitest"],
+    "e2e": [],
+    "integration": ["webdav-in-memory"],
+    "coverage_threshold": 70
+  },
+  "security": {
+    "concerns": ["local-file-access", "backend-credentials", "private-storage"]
+  },
+  "versioning": {
+    "roadmap": {
+      "v1": "Sync + placeholders Files On-Demand + cache local (WebDAV + MooseFS)",
+      "v2": "Multi-client synchronise sur le meme backend",
+      "v3": "Chiffrement cote client + versioning"
+    }
+  },
+  "conventions": {
+    "branches": {
+      "feature": "feat/<name>",
+      "bugfix": "bug/<name>",
+      "hotfix": "hotfix/<name>"
+    },
+    "commits": "conventional-commits",
+    "issues": {
+      "epics": "parent-issues-with-checklist",
+      "milestones": ["V1", "V2", "V3"],
+      "workflow": "open -> in-progress (branch linked) -> PR -> done"
+    }
+  }
+}
