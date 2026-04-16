@@ -111,3 +111,13 @@ nul
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Fichiers TEMPLATE — fetches depuis GitHub via /init-project (ne pas modifier manuellement)
+TEMPLATE_claude/
+.claude/commands/
+!.claude/commands/init-project.md
+.claude/agents/*.template.md
+.claude/agents/context/
+.claude/CLAUDE_TEMPLATE.md
+.claude/INITIALIZATION.md
+.claude/templates/
