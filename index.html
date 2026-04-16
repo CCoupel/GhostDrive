@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="GhostDrive — Client de synchronisation Windows libre vers vos backends de stockage privés. Fin du vendor lock-in." />
+  <meta name="keywords" content="GhostDrive, sync, Windows, WebDAV, MooseFS, Files On-Demand, NAS, stockage privé, open source" />
+  <meta property="og:title" content="GhostDrive — Votre stockage privé, comme OneDrive" />
+  <meta property="og:description" content="Client de synchronisation Windows libre et open source vers vos backends de stockage privés." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://ccoupel.github.io/GhostDrive/" />
+  <meta name="theme-color" content="#0d1117" />
+  <title>GhostDrive — Votre stockage privé, comme OneDrive</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+
+  <!-- ================================================================
+       NAVIGATION
+  ================================================================ -->
+  <nav class="nav" role="navigation" aria-label="Navigation principale">
+    <div class="container nav-inner">
+
+      <a href="#hero" class="nav-logo">
+        <div class="logo-icon" aria-hidden="true">&#9760;</div>
+        GhostDrive
+      </a>
+
+      <ul class="nav-links" id="nav-links">
+        <li><a href="#problems" data-i18n="nav.problems">Problèmes</a></li>
+        <li><a href="#solutions" data-i18n="nav.solutions">Solutions</a></li>
+        <li><a href="#features" data-i18n="nav.features">Fonctionnalités</a></li>
+        <li><a href="#roadmap" data-i18n="nav.roadmap">Roadmap</a></li>
+        <li><a href="#install" data-i18n="nav.install">Installation</a></li>
+        <li><a href="#comparison" data-i18n="nav.comparison">Comparaison</a></li>
+      </ul>
+
+      <div class="nav-right">
+        <div class="lang-switcher" role="group" aria-label="Langue">
+          <button class="lang-btn active" data-lang="fr">FR</button>
+          <button class="lang-btn" data-lang="en">EN</button>
+        </div>
+
+        <a href="https://github.com/CCoupel/GhostDrive"
+           target="_blank"
+           rel="noopener noreferrer"
+           class="btn btn-secondary btn-sm"
+           data-i18n="nav.github">GitHub</a>
+
+        <button class="nav-hamburger"
+                id="hamburger"
+                aria-label="Menu"
+                aria-expanded="false"
+                aria-controls="nav-links">
+          <span></span><span></span><span></span>
+        </button>
+      </div>
+
+    </div>
+  </nav>
+
+  <!-- ================================================================
+       HERO
+  ================================================================ -->
+  <section id="hero" aria-labelledby="hero-title">
+    <div class="hero-glow" aria-hidden="true"></div>
+    <div class="container">
+
+      <div class="hero-badges">
+        <span class="badge badge-active">
+          <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 2s infinite;" aria-hidden="true"></span>
+          <span data-i18n="hero.badge">En développement actif</span>
+        </span>
+        <span class="badge badge-version" data-i18n="hero.version">v0.1.0</span>
+      </div>
+
+      <h1 id="hero-title" class="hero-title" data-i18n="hero.title">GhostDrive</h1>
+      <p class="hero-subtitle" data-i18n="hero.subtitle">Votre stockage privé, comme OneDrive</p>
+      <p class="hero-desc" data-i18n="hero.description">
+        Client de synchronisation Windows libre et open source vers vos backends de stockage privés.
+        Fin du vendor lock-in, vos données restent chez vous.
+      </p>
+
+      <div class="hero-actions">
+        <a href="https://github.com/CCoupel/GhostDrive"
+           target="_blank"
+           rel="noopener noreferrer"
+           class="btn btn-primary">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+          </svg>
+          <span data-i18n="hero.cta.github">Voir sur GitHub</span>
+        </a>
+        <a href="#install" class="btn btn-secondary">
+          <span data-i18n="hero.cta.install">Installer depuis les sources</span>
+        </a>
+      </div>
+
+      <div class="hero-tags">
+        <span class="hero-tag">
+          <span class="dot" aria-hidden="true"></span>
+          <span data-i18n="hero.tag.free">Libre et open source</span>
+        </span>
+        <span class="hero-tag">
+          <span class="dot" aria-hidden="true"></span>
+          <span data-i18n="hero.tag.windows">Windows natif</span>
+        </span>
+        <span class="hero-tag">
+          <span class="dot" aria-hidden="true"></span>
+          <span data-i18n="hero.tag.plugin">Architecture plugin</span>
+        </span>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ================================================================
+       PROBLEMS
+  ================================================================ -->
+  <section id="problems" class="section" aria-labelledby="problems-title">
+    <div class="container">
+      <span class="section-label">Pourquoi GhostDrive ?</span>
+      <h2 class="section-title" id="problems-title" data-i18n="problems.title">Le problème</h2>
+      <p class="section-subtitle" data-i18n="problems.subtitle">
+        Les solutions actuelles vous enferment dans un écosystème fermé
+      </p>
+
+      <div class="grid-3">
+
+        <article class="card" aria-label="Vendor lock-in">
+          <div class="card-icon red" aria-hidden="true">&#128274;</div>
+          <h3 data-i18n="problems.1.title">Vendor lock-in</h3>
+          <p data-i18n="problems.1.desc">
+            Google Drive, OneDrive, iDrive — vos données sont captives de leurs serveurs.
+            Changer de provider signifie tout migrer manuellement, avec des formats propriétaires et des API fermées.
+          </p>
+        </article>
+
+        <article class="card" aria-label="Quota limité et coûteux">
+          <div class="card-icon orange" aria-hidden="true">&#128184;</div>
+          <h3 data-i18n="problems.2.title">Quota limité et coûteux</h3>
+          <p data-i18n="problems.2.desc">
+            Quelques gigaoctets gratuits, puis des abonnements mensuels pour du stockage que vous possédez
+            déjà sur votre NAS ou votre serveur maison.
+          </p>
+        </article>
+
+        <article class="card" aria-label="Backends privés inaccessibles">
+          <div class="card-icon yellow" aria-hidden="true">&#128290;</div>
+          <h3 data-i18n="problems.3.title">Backends privés inaccessibles</h3>
+          <p data-i18n="problems.3.desc">
+            Vous avez un NAS, un MooseFS, un serveur WebDAV, un Ceph ? Windows ne sait pas les monter
+            nativement avec l'expérience Files On-Demand. Rclone est puissant mais sans interface,
+            sans placeholders, sans sync automatique.
+          </p>
+        </article>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================
+       SOLUTIONS
+  ================================================================ -->
+  <section id="solutions" class="section" aria-labelledby="solutions-title">
+    <div class="container">
+      <span class="section-label">Notre réponse</span>
+      <h2 class="section-title" id="solutions-title" data-i18n="solutions.title">La solution GhostDrive</h2>
+      <p class="section-subtitle" data-i18n="solutions.subtitle">
+        Même expérience qu'OneDrive, vers vos propres backends
+      </p>
+
+      <div style="display:flex;flex-direction:column;gap:0.85rem;">
+
+        <div class="solution-row">
+          <span class="sol-problem" data-i18n="solutions.1.problem">Dépendance aux clouds propriétaires</span>
+          <span class="sol-arrow" aria-hidden="true">&#8594;</span>
+          <span class="sol-solution" data-i18n="solutions.1.solution">Architecture plugin ouverte — WebDAV, MooseFS, S3, CephFS et plus</span>
+        </div>
+
+        <div class="solution-row">
+          <span class="sol-problem" data-i18n="solutions.2.problem">Coûts d'abonnement récurrents</span>
+          <span class="sol-arrow" aria-hidden="true">&#8594;</span>
+          <span class="sol-solution" data-i18n="solutions.2.solution">Open source, auto-hébergé — vous contrôlez votre infrastructure</span>
+        </div>
+
+        <div class="solution-row">
+          <span class="sol-problem" data-i18n="solutions.3.problem">Pas de Files On-Demand sur backends privés</span>
+          <span class="sol-arrow" aria-hidden="true">&#8594;</span>
+          <span class="sol-solution" data-i18n="solutions.3.solution">Cloud Filter API native Windows — placeholders réels, téléchargement à la demande</span>
+        </div>
+
+        <div class="solution-row">
+          <span class="sol-problem" data-i18n="solutions.4.problem">Outils complexes sans interface</span>
+          <span class="sol-arrow" aria-hidden="true">&#8594;</span>
+          <span class="sol-solution" data-i18n="solutions.4.solution">Interface Windows native avec icône systray, notifications et paramètres visuels</span>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================
+       FEATURES
+  ================================================================ -->
+  <section id="features" class="section" aria-labelledby="features-title">
+    <div class="container">
+      <span class="section-label">Ce que fait GhostDrive</span>
+      <h2 class="section-title" id="features-title" data-i18n="features.title">Fonctionnalités</h2>
+      <p class="section-subtitle" data-i18n="features.subtitle">
+        Tout ce qu'OneDrive offre, vers votre propre stockage
+      </p>
+
+      <div class="grid-3">
+
+        <article class="card">
+          <div class="card-icon blue" aria-hidden="true">&#128196;</div>
+          <h3 data-i18n="features.1.title">Files On-Demand</h3>
+          <p data-i18n="features.1.desc">
+            Les fichiers apparaissent dans l'Explorateur sans être téléchargés.
+            Accédez-y à la demande via Cloud Filter API — exactement comme OneDrive.
+          </p>
+        </article>
+
+        <article class="card">
+          <div class="card-icon green" aria-hidden="true">&#8651;</div>
+          <h3 data-i18n="features.2.title">Sync bidirectionnelle</h3>
+          <p data-i18n="features.2.desc">
+            Les modifications locales se propagent vers le backend, et vice versa.
+            Résolution de conflits intégrée.
+          </p>
+        </article>
+
+        <article class="card">
+          <div class="card-icon purple" aria-hidden="true">&#128190;</div>
+          <h3 data-i18n="features.3.title">Cache local</h3>
+          <p data-i18n="features.3.desc">
+            Activez le cache pour accéder à vos fichiers hors ligne.
+            Synchronisation automatique à la reconnexion.
+          </p>
+        </article>
+
+        <article class="card">
+          <div class="card-icon orange" aria-hidden="true">&#9883;</div>
+          <h3 data-i18n="features.4.title">Architecture plugin</h3>
+          <p data-i18n="features.4.desc">
+            Chaque backend de stockage est un plugin Go compilé. Ajoutez WebDAV, MooseFS, S3,
+            ou implémentez le vôtre via l'interface StorageBackend.
+          </p>
+        </article>
+
+        <article class="card">
+          <div class="card-icon blue" aria-hidden="true">&#128230;</div>
+          <h3 data-i18n="features.5.title">Distribution simple</h3>
+          <p data-i18n="features.5.desc">
+            Un binaire Windows, pas d'installation complexe.
+            Prérequis : WinFsp pour les placeholders système.
+          </p>
+        </article>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================
+       ROADMAP
+  ================================================================ -->
+  <section id="roadmap" class="section" aria-labelledby="roadmap-title">
+    <div class="container">
+      <span class="section-label">Vision</span>
+      <h2 class="section-title" id="roadmap-title" data-i18n="roadmap.title">Roadmap</h2>
+      <p class="section-subtitle" data-i18n="roadmap.subtitle">
+        Ce qui arrive, dans l'ordre
+      </p>
+
+      <div class="roadmap-grid">
+
+        <!-- V1 -->
+        <div class="roadmap-card active" aria-label="Version 1 — En cours">
+          <div class="roadmap-card-header">
+            <h3 data-i18n="roadmap.v1.title">V1 — Fondations</h3>
+            <span class="badge badge-active" data-i18n="roadmap.v1.status">En cours</span>
+          </div>
+          <ul class="roadmap-list" aria-label="Fonctionnalités V1">
+            <li>Sync bidirectionnelle</li>
+            <li>Placeholders Files On-Demand (Cloud Filter API)</li>
+            <li>Cache local activable</li>
+            <li>Plugin WebDAV</li>
+            <li>Plugin MooseFS</li>
+            <li>Interface systray Windows</li>
+            <li>Binaires GitHub Releases</li>
+          </ul>
+        </div>
+
+        <!-- V2 -->
+        <div class="roadmap-card planned-1" aria-label="Version 2 — Planifié">
+          <div class="roadmap-card-header">
+            <h3 data-i18n="roadmap.v2.title">V2 — Multi-client</h3>
+            <span class="badge badge-planned" data-i18n="roadmap.v2.status">Planifié</span>
+          </div>
+          <ul class="roadmap-list" aria-label="Fonctionnalités V2">
+            <li>Synchronisation multi-client sur le même backend</li>
+            <li>Gestion des conflits avancée</li>
+            <li>Tableau de bord d'état multi-appareils</li>
+          </ul>
+        </div>
+
+        <!-- V3 -->
+        <div class="roadmap-card" aria-label="Version 3 — Planifié">
+          <div class="roadmap-card-header">
+            <h3 data-i18n="roadmap.v3.title">V3 — Sécurité</h3>
+            <span class="badge badge-planned" data-i18n="roadmap.v3.status">Planifié</span>
+          </div>
+          <ul class="roadmap-list" aria-label="Fonctionnalités V3">
+            <li>Chiffrement côté client (zero-knowledge)</li>
+            <li>Versioning des fichiers</li>
+            <li>Historique et restauration</li>
+          </ul>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================
+       INSTALL
+  ================================================================ -->
+  <section id="install" class="section" aria-labelledby="install-title">
+    <div class="container">
+      <span class="section-label">Démarrer</span>
+      <h2 class="section-title" id="install-title" data-i18n="install.title">Installation depuis les sources</h2>
+      <p class="section-subtitle" data-i18n="install.subtitle">
+        Aucun binaire publié pour l'instant — le projet est en développement actif
+      </p>
+
+      <!-- Prérequis -->
+      <h3 style="margin-bottom:1rem;color:var(--text-secondary);font-size:0.9rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;"
+          data-i18n="install.prereq.title">Prérequis</h3>
+      <div class="prereq-grid">
+        <span class="prereq-item" data-i18n="install.prereq.go">Go 1.21+</span>
+        <span class="prereq-item" data-i18n="install.prereq.wails">Wails v2</span>
+        <span class="prereq-item" data-i18n="install.prereq.node">Node.js 18+ (frontend)</span>
+        <span class="prereq-item" data-i18n="install.prereq.winfsp">WinFsp (Windows — placeholders)</span>
+      </div>
+
+      <!-- Etapes -->
+      <div class="install-steps">
+
+        <div class="install-step">
+          <div class="step-num" aria-label="Etape 1">1</div>
+          <div class="step-content">
+            <label data-i18n="install.step1">Cloner le dépôt</label>
+            <div class="code-block" role="region" aria-label="Commande git clone">
+              <span style="color:var(--accent-blue)">git</span> clone https://github.com/CCoupel/GhostDrive.git<br>
+              <span style="color:var(--accent-blue)">cd</span> GhostDrive
+            </div>
+          </div>
+        </div>
+
+        <div class="install-step">
+          <div class="step-num" aria-label="Etape 2">2</div>
+          <div class="step-content">
+            <label data-i18n="install.step2">Installer les dépendances</label>
+            <div class="code-block" role="region" aria-label="Commandes d'installation">
+              <span class="comment"># Installer Wails v2</span><br>
+              <span style="color:var(--accent-blue)">go</span> install github.com/wailsapp/wails/v2/cmd/wails@latest<br>
+              <br>
+              <span class="comment"># Dépendances Go</span><br>
+              <span style="color:var(--accent-blue)">go</span> mod download<br>
+              <br>
+              <span class="comment"># Dépendances frontend</span><br>
+              <span style="color:var(--accent-blue)">cd</span> frontend &amp;&amp; npm install &amp;&amp; <span style="color:var(--accent-blue)">cd</span> ..
+            </div>
+          </div>
+        </div>
+
+        <div class="install-step">
+          <div class="step-num" aria-label="Etape 3">3</div>
+          <div class="step-content">
+            <label data-i18n="install.step3">Lancer en mode développement</label>
+            <div class="code-block" role="region" aria-label="Commande de démarrage">
+              <span style="color:var(--accent-blue)">wails</span> dev
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Note -->
+      <div class="install-note" role="note">
+        <span class="install-note-icon" aria-hidden="true">&#8505;</span>
+        <span>
+          <span data-i18n="install.note">Les binaires précompilés seront disponibles à la release V1 via GitHub Releases.</span>
+          &nbsp;
+          <a href="https://github.com/CCoupel/GhostDrive/releases"
+             target="_blank"
+             rel="noopener noreferrer"
+             data-i18n="install.releases">Suivre les releases sur GitHub</a>
+        </span>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ================================================================
+       COMPARISON
+  ================================================================ -->
+  <section id="comparison" class="section" aria-labelledby="comparison-title">
+    <div class="container">
+      <span class="section-label">Positionnement</span>
+      <h2 class="section-title" id="comparison-title" data-i18n="comparison.title">Comparaison</h2>
+      <p class="section-subtitle" data-i18n="comparison.subtitle">
+        Pourquoi GhostDrive ?
+      </p>
+
+      <div class="comparison-wrapper">
+        <table class="comparison-table" role="table" aria-label="Comparaison des solutions de synchronisation">
+          <thead>
+            <tr>
+              <th scope="col" data-i18n="comparison.col.solution">Solution</th>
+              <th scope="col" data-i18n="comparison.col.private">Backends privés</th>
+              <th scope="col" data-i18n="comparison.col.free">Libre</th>
+              <th scope="col" data-i18n="comparison.col.ondemand">Files On-Demand</th>
+              <th scope="col" data-i18n="comparison.col.multiclient">Multi-client</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>OneDrive</td>
+              <td><span class="chip-no" data-i18n="comparison.no">Non</span></td>
+              <td><span class="chip-no" data-i18n="comparison.no">Non</span></td>
+              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span></span></td>
+              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span></span></td>
+            </tr>
+            <tr>
+              <td>Google Drive</td>
+              <td><span class="chip-no" data-i18n="comparison.no">Non</span></td>
+              <td><span class="chip-no" data-i18n="comparison.no">Non</span></td>
+              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span></span></td>
+              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span></span></td>
+            </tr>
+            <tr>
+              <td>Rclone mount</td>
+              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span></span></td>
+              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span></span></td>
+              <td><span class="chip-no" data-i18n="comparison.no">Non</span></td>
+              <td><span class="chip-no" data-i18n="comparison.no">Non</span></td>
+            </tr>
+            <tr>
+              <td>Mountain Duck</td>
+              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span></span></td>
+              <td><span class="chip-no" data-i18n="comparison.no">Non</span></td>
+              <td><span class="chip-partial" data-i18n="comparison.partial">Partiel</span></td>
+              <td><span class="chip-no" data-i18n="comparison.no">Non</span></td>
+            </tr>
+            <tr class="highlight-row">
+              <td><strong>GhostDrive</strong></td>
+              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span></span></td>
+              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span></span></td>
+              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span> <small style="color:var(--text-muted)">(V1)</small></span></td>
+              <td><span class="chip-planned" data-i18n="comparison.planned">V2</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================
+       FOOTER
+  ================================================================ -->
+  <footer class="site-footer" role="contentinfo">
+    <div class="container">
+      <div class="footer-inner">
+
+        <div class="footer-brand">
+          <a href="#hero" class="nav-logo" style="display:inline-flex;margin-bottom:0.75rem;">
+            <div class="logo-icon" aria-hidden="true">&#9760;</div>
+            GhostDrive
+          </a>
+          <p class="footer-desc" data-i18n="footer.desc">
+            Client de synchronisation Windows libre vers vos backends de stockage privés.
+          </p>
+          <p class="footer-tagline" data-i18n="footer.tagline">Vos données, votre infrastructure.</p>
+        </div>
+
+        <nav class="footer-links" aria-label="Liens footer">
+          <a href="https://github.com/CCoupel/GhostDrive"
+             target="_blank"
+             rel="noopener noreferrer"
+             data-i18n="footer.github">GitHub</a>
+          <a href="https://github.com/CCoupel/GhostDrive/blob/main/LICENSE"
+             target="_blank"
+             rel="noopener noreferrer"
+             data-i18n="footer.license">Licence MIT</a>
+          <a href="https://github.com/CCoupel/GhostDrive/issues/new"
+             target="_blank"
+             rel="noopener noreferrer"
+             data-i18n="footer.issues">Signaler un bug</a>
+        </nav>
+
+      </div>
+
+      <p class="footer-bottom">
+        &copy; 2026 GhostDrive — Projet open source sous licence MIT
+      </p>
+    </div>
+  </footer>
+
+  <!-- ================================================================
+       SCRIPTS
+  ================================================================ -->
+  <script>
+    // Hamburger menu
+    const hamburger = document.getElementById('hamburger');
+    const navLinks  = document.getElementById('nav-links');
+
+    hamburger.addEventListener('click', () => {
+      const isOpen = navLinks.classList.toggle('open');
+      hamburger.setAttribute('aria-expanded', isOpen);
+    });
+
+    // Fermer le menu mobile sur clic d'un lien
+    navLinks.querySelectorAll('a').forEach((link) => {
+      link.addEventListener('click', () => {
+        navLinks.classList.remove('open');
+        hamburger.setAttribute('aria-expanded', 'false');
+      });
+    });
+
+    // Active nav badge pulse animation
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+    `;
+    document.head.appendChild(style);
+  </script>
+
+  <!-- i18n — charge APRES le DOM -->
+  <script src="assets/lang.js"></script>
+
+</body>
+</html>
