@@ -627,6 +627,12 @@ code, pre {
   box-shadow: 0 0 16px rgba(88,166,255,0.08);
 }
 
+.rm-group-badge.grey {
+  background: rgba(139,148,158,0.1);
+  color: var(--text-secondary);
+  border: 1px solid rgba(139,148,158,0.25);
+}
+
 .rm-group-badge.purple {
   background: rgba(188,140,255,0.1);
   color: var(--accent-purple);

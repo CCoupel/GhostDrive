@@ -284,13 +284,13 @@
         </div>
         <div class="rm-progress-wrap">
           <div class="rm-progress-meta">
-            <span data-i18n="roadmap.group.v1.title">Fondations</span>
-            <span class="rm-progress-count">1 / 7</span>
+            <span data-i18n="roadmap.group.v0.title">Fondations</span>
+            <span class="rm-progress-count">1 / 3</span>
           </div>
-          <div class="rm-progress-track" role="progressbar" aria-valuenow="14" aria-valuemin="0" aria-valuemax="100">
-            <div class="rm-progress-fill" style="width:14.3%"></div>
+          <div class="rm-progress-track" role="progressbar" aria-valuenow="33" aria-valuemin="0" aria-valuemax="100">
+            <div class="rm-progress-fill" style="width:33.3%"></div>
           </div>
-          <p class="rm-progress-caption" data-i18n="roadmap.progress.caption">V1 — 1 milestone livré sur 7</p>
+          <p class="rm-progress-caption" data-i18n="roadmap.progress.caption">V0 — 1 milestone livré sur 3</p>
         </div>
         <div class="rm-stat">
           <span class="rm-stat-value">9</span>
@@ -300,15 +300,15 @@
 
       <div class="rm-timeline">
 
-        <!-- ── V1 ──────────────────────────────────────── -->
+        <!-- ── V0 ──────────────────────────────────────── -->
         <div class="rm-group">
           <div class="rm-group-header">
-            <div class="rm-group-badge green">V1</div>
+            <div class="rm-group-badge grey">V0</div>
             <div class="rm-group-meta">
-              <strong data-i18n="roadmap.group.v1.title">Fondations</strong>
-              <span data-i18n="roadmap.group.v1.desc">Sync engine, UI, backends et distribution</span>
+              <strong data-i18n="roadmap.group.v0.title">Fondations</strong>
+              <span data-i18n="roadmap.group.v0.desc">Moteur, interface et pipeline de release — les briques invisibles</span>
             </div>
-            <div class="rm-group-count">7 milestones</div>
+            <div class="rm-group-count">3 milestones</div>
           </div>
 
           <div class="rm-rail">
@@ -320,11 +320,71 @@
               </div>
               <div class="rm-card active">
                 <div class="rm-card-header">
-                  <code class="rm-version" data-i18n="roadmap.v100.version">v1.0.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v100.title">Sync Engine</h4>
-                  <span class="badge badge-active" data-i18n="roadmap.v100.status">En cours</span>
+                  <code class="rm-version">v0.1.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v010.title">Sync Engine</h4>
+                  <span class="badge badge-active" data-i18n="roadmap.v010.status">En cours</span>
                 </div>
-                <p class="rm-desc" data-i18n="roadmap.v100.desc">Moteur de synchronisation bidirectionnelle — file watcher, queue, upload/download, gestion des conflits</p>
+                <p class="rm-desc" data-i18n="roadmap.v010.desc">Moteur de synchronisation bidirectionnelle — file watcher, queue, upload/download, gestion des conflits</p>
+              </div>
+            </div>
+
+            <div class="rm-entry">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v0.2.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v020.title">UI Systray</h4>
+                  <span class="badge badge-planned" data-i18n="roadmap.v020.status">Planifié</span>
+                </div>
+                <p class="rm-desc" data-i18n="roadmap.v020.desc">Interface Windows native — icône systray, configuration backends, points de synchronisation, état temps réel</p>
+              </div>
+            </div>
+
+            <div class="rm-entry last">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v0.3.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v030.title">CI/CD & Distribution</h4>
+                  <span class="badge badge-planned" data-i18n="roadmap.v030.status">Planifié</span>
+                </div>
+                <p class="rm-desc" data-i18n="roadmap.v030.desc">GitHub Actions — build automatisé Windows AMD64 + Linux ARM64, publication sur GitHub Releases</p>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- ── V1 ──────────────────────────────────────── -->
+        <div class="rm-group">
+          <div class="rm-group-header">
+            <div class="rm-group-badge green">V1</div>
+            <div class="rm-group-meta">
+              <strong data-i18n="roadmap.group.v1.title">Première version fonctionnelle</strong>
+              <span data-i18n="roadmap.group.v1.desc">Un backend opérationnel, sync end-to-end, Files On-Demand</span>
+            </div>
+            <div class="rm-group-count">4 milestones</div>
+          </div>
+
+          <div class="rm-rail">
+
+            <div class="rm-entry">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v1.0.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v100.title">Plugin WebDAV</h4>
+                  <span class="badge badge-planned" data-i18n="roadmap.v100.status">Planifié</span>
+                </div>
+                <p class="rm-desc" data-i18n="roadmap.v100.desc">Première version utilisable — sync bidirectionnelle vers NAS (Synology, TrueNAS, Nextcloud) via WebDAV</p>
               </div>
             </div>
 
@@ -336,10 +396,10 @@
               <div class="rm-card">
                 <div class="rm-card-header">
                   <code class="rm-version">v1.1.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v110.title">UI Systray</h4>
+                  <h4 class="rm-title" data-i18n="roadmap.v110.title">Placeholders Files On-Demand</h4>
                   <span class="badge badge-planned" data-i18n="roadmap.v110.status">Planifié</span>
                 </div>
-                <p class="rm-desc" data-i18n="roadmap.v110.desc">Interface Windows native — icône systray, configuration backends, points de synchronisation, état temps réel</p>
+                <p class="rm-desc" data-i18n="roadmap.v110.desc">Cloud Filter API + WinFsp — fichiers visibles dans l'Explorateur sans occupation disque, hydratation à la demande</p>
               </div>
             </div>
 
@@ -351,55 +411,10 @@
               <div class="rm-card">
                 <div class="rm-card-header">
                   <code class="rm-version">v1.2.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v120.title">Plugin WebDAV</h4>
+                  <h4 class="rm-title" data-i18n="roadmap.v120.title">Plugin MooseFS</h4>
                   <span class="badge badge-planned" data-i18n="roadmap.v120.status">Planifié</span>
                 </div>
-                <p class="rm-desc" data-i18n="roadmap.v120.desc">Premier backend de stockage — authentification Basic/Digest, compatible NAS Synology, TrueNAS, Nextcloud</p>
-              </div>
-            </div>
-
-            <div class="rm-entry">
-              <div class="rm-dot-col">
-                <div class="rm-dot"></div>
-                <div class="rm-line"></div>
-              </div>
-              <div class="rm-card">
-                <div class="rm-card-header">
-                  <code class="rm-version">v1.3.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v130.title">Plugin MooseFS</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v130.status">Planifié</span>
-                </div>
-                <p class="rm-desc" data-i18n="roadmap.v130.desc">Deuxième backend — client MooseFS natif Go pour les infrastructures de stockage distribué</p>
-              </div>
-            </div>
-
-            <div class="rm-entry">
-              <div class="rm-dot-col">
-                <div class="rm-dot"></div>
-                <div class="rm-line"></div>
-              </div>
-              <div class="rm-card">
-                <div class="rm-card-header">
-                  <code class="rm-version">v1.4.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v140.title">Placeholders Files On-Demand</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v140.status">Planifié</span>
-                </div>
-                <p class="rm-desc" data-i18n="roadmap.v140.desc">Cloud Filter API + WinFsp — fichiers visibles dans l'Explorateur sans occupation disque, hydratation à la demande</p>
-              </div>
-            </div>
-
-            <div class="rm-entry">
-              <div class="rm-dot-col">
-                <div class="rm-dot"></div>
-                <div class="rm-line"></div>
-              </div>
-              <div class="rm-card">
-                <div class="rm-card-header">
-                  <code class="rm-version">v1.5.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v150.title">Cache locale</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v150.status">Planifié</span>
-                </div>
-                <p class="rm-desc" data-i18n="roadmap.v150.desc">Architecture LRU, activable par point de sync — accès hors-ligne aux fichiers fréquemment utilisés</p>
+                <p class="rm-desc" data-i18n="roadmap.v120.desc">Deuxième backend — client MooseFS natif Go pour les infrastructures de stockage distribué</p>
               </div>
             </div>
 
@@ -409,11 +424,11 @@
               </div>
               <div class="rm-card">
                 <div class="rm-card-header">
-                  <code class="rm-version">v1.6.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v160.title">CI/CD & Distribution</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v160.status">Planifié</span>
+                  <code class="rm-version">v1.3.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v130.title">Cache locale</h4>
+                  <span class="badge badge-planned" data-i18n="roadmap.v130.status">Planifié</span>
                 </div>
-                <p class="rm-desc" data-i18n="roadmap.v160.desc">GitHub Actions — build automatisé Windows AMD64 + Linux ARM64, publication sur GitHub Releases</p>
+                <p class="rm-desc" data-i18n="roadmap.v130.desc">Architecture LRU, activable par point de sync — accès hors-ligne aux fichiers fréquemment utilisés</p>
               </div>
             </div>
 
