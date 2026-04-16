@@ -53,6 +53,9 @@
 
   "roadmap.title": "Roadmap",
   "roadmap.subtitle": "Chaque version livre une fonctionnalité complète et utilisable",
+  "roadmap.stat.active": "En cours",
+  "roadmap.stat.planned": "Planifiés",
+  "roadmap.progress.caption": "V1 — 1 milestone livré sur 7",
 
   "roadmap.group.v1.label": "V1",
   "roadmap.group.v1.title": "Fondations",

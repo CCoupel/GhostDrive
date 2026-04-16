@@ -53,6 +53,9 @@
 
   "roadmap.title": "Roadmap",
   "roadmap.subtitle": "Each version delivers one complete, usable feature",
+  "roadmap.stat.active": "In progress",
+  "roadmap.stat.planned": "Planned",
+  "roadmap.progress.caption": "V1 — 1 out of 7 milestones delivered",
 
   "roadmap.group.v1.label": "V1",
   "roadmap.group.v1.title": "Foundations",

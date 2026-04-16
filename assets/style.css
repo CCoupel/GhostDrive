@@ -502,130 +502,288 @@ code, pre {
   border-bottom: 1px solid var(--border);
 }
 
-/* ---------- Roadmap Timeline ---------- */
-.roadmap-timeline {
+/* ---------- Roadmap — Progress summary ---------- */
+.rm-summary {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem 1.75rem;
+  margin-bottom: 3rem;
+}
+
+.rm-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  flex-shrink: 0;
+}
+
+.rm-stat-value {
+  font-size: 2rem;
+  font-weight: 800;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.rm-stat-value.rm-stat-active { color: var(--accent-green); }
+
+.rm-stat-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.rm-progress-wrap { flex: 1; }
+
+.rm-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.rm-progress-count {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.rm-progress-track {
+  height: 6px;
+  background: var(--bg-tertiary);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.rm-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-green), #40d158);
+  border-radius: 999px;
+  box-shadow: 0 0 8px rgba(63,185,80,0.5);
+  transition: width 1s ease;
+}
+
+.rm-progress-caption {
+  margin-top: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* ---------- Roadmap — Timeline ---------- */
+.rm-timeline {
   display: flex;
   flex-direction: column;
   gap: 2.5rem;
 }
 
-.timeline-group {
-  background: var(--bg-card);
+/* Group */
+.rm-group {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
+  background: var(--bg-card);
 }
 
-.timeline-group-header {
+.rm-group-header {
   display: flex;
   align-items: center;
   gap: 1rem;
   padding: 1rem 1.5rem;
-  background: rgba(255,255,255,0.03);
+  background: rgba(255,255,255,0.025);
   border-bottom: 1px solid var(--border);
 }
 
-.timeline-major-badge {
-  display: inline-flex;
+.rm-group-badge {
+  flex-shrink: 0;
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: var(--radius);
+  display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 2.5rem;
-  padding: 0.25rem 0.6rem;
-  border-radius: var(--radius);
-  font-size: 0.8rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  background: rgba(63,185,80,0.15);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
+.rm-group-badge.green {
+  background: rgba(63,185,80,0.12);
   color: var(--accent-green);
   border: 1px solid rgba(63,185,80,0.3);
-  flex-shrink: 0;
+  box-shadow: 0 0 16px rgba(63,185,80,0.1);
 }
 
-.timeline-major-badge.planned {
+.rm-group-badge.blue {
   background: rgba(88,166,255,0.1);
   color: var(--accent-blue);
-  border-color: rgba(88,166,255,0.25);
+  border: 1px solid rgba(88,166,255,0.25);
+  box-shadow: 0 0 16px rgba(88,166,255,0.08);
 }
 
-.timeline-group-header strong {
-  font-size: 1rem;
-  color: var(--text-primary);
+.rm-group-badge.purple {
+  background: rgba(188,140,255,0.1);
+  color: var(--accent-purple);
+  border: 1px solid rgba(188,140,255,0.25);
+  box-shadow: 0 0 16px rgba(188,140,255,0.08);
+}
+
+.rm-group-meta {
+  flex: 1;
+}
+
+.rm-group-meta strong {
   display: block;
+  font-size: 0.95rem;
+  color: var(--text-primary);
 }
 
-.timeline-group-desc {
-  font-size: 0.82rem;
+.rm-group-meta span {
+  font-size: 0.8rem;
   color: var(--text-muted);
   display: block;
   margin-top: 0.1rem;
 }
 
-.timeline-items {
+.rm-group-count {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Rail */
+.rm-rail {
+  padding: 1rem 1.5rem 0.25rem;
   display: flex;
   flex-direction: column;
 }
 
-.timeline-item {
+/* Entry */
+.rm-entry {
   display: flex;
+  gap: 1rem;
   align-items: flex-start;
-  gap: 1.25rem;
-  padding: 1rem 1.5rem;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
-  transition: background var(--transition);
-  position: relative;
 }
 
-.timeline-item:last-child { border-bottom: none; }
-
-.timeline-item:hover { background: rgba(255,255,255,0.02); }
-
-.timeline-item.active {
-  background: rgba(63,185,80,0.04);
-}
-
-.timeline-version-pill {
+.rm-dot-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  font-weight: 600;
-  padding: 0.25rem 0.65rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  background: var(--bg-secondary);
-  min-width: 4.8rem;
-  text-align: center;
-  margin-top: 0.15rem;
+  width: 16px;
+  padding-top: 0.9rem;
 }
 
-.timeline-version-pill.active {
+.rm-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  border: 2px solid var(--border);
+  flex-shrink: 0;
+  z-index: 1;
+  transition: all var(--transition);
+}
+
+.rm-dot.active {
+  width: 14px;
+  height: 14px;
+  background: var(--accent-green);
+  border-color: var(--accent-green);
+  box-shadow: 0 0 0 3px rgba(63,185,80,0.15), 0 0 14px rgba(63,185,80,0.45);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(63,185,80,0.15), 0 0 14px rgba(63,185,80,0.45); }
+  50%       { box-shadow: 0 0 0 5px rgba(63,185,80,0.1),  0 0 22px rgba(63,185,80,0.6); }
+}
+
+.rm-line {
+  width: 2px;
+  flex: 1;
+  min-height: 1rem;
+  background: linear-gradient(to bottom, var(--border), transparent);
+  margin-top: 4px;
+}
+
+/* Card */
+.rm-card {
+  flex: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.5rem;
+  transition: all 0.2s ease;
+  cursor: default;
+}
+
+.rm-card:hover {
+  background: rgba(255,255,255,0.025);
+  border-color: rgba(88,166,255,0.2);
+  transform: translateX(4px);
+}
+
+.rm-card.active {
+  background: linear-gradient(135deg, rgba(63,185,80,0.06) 0%, rgba(63,185,80,0.02) 100%);
+  border-color: rgba(63,185,80,0.3);
+  box-shadow: 0 2px 16px rgba(63,185,80,0.08);
+}
+
+.rm-card.active:hover {
   border-color: rgba(63,185,80,0.5);
-  color: var(--accent-green);
-  background: rgba(63,185,80,0.08);
+  transform: translateX(4px);
 }
 
-.timeline-content { flex: 1; }
-
-.timeline-item-header {
+.rm-card-header {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.65rem;
   flex-wrap: wrap;
-  margin-bottom: 0.3rem;
+  margin-bottom: 0.35rem;
 }
 
-.timeline-item-title {
+.rm-version {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  padding: 0.1rem 0.5rem;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.rm-card.active .rm-version {
+  color: var(--accent-green);
+  background: rgba(63,185,80,0.08);
+  border-color: rgba(63,185,80,0.25);
+}
+
+.rm-title {
   font-size: 0.95rem;
   font-weight: 600;
   color: var(--text-primary);
+  flex: 1;
 }
 
-.timeline-item-desc {
-  font-size: 0.85rem;
+.rm-desc {
+  font-size: 0.84rem;
   color: var(--text-secondary);
-  line-height: 1.5;
+  line-height: 1.55;
   margin: 0;
 }
+
+/* remove bottom margin on last entry */
+.rm-entry.last .rm-card { margin-bottom: 0.75rem; }
 
 /* ---------- Install ---------- */
 #install {
@@ -917,7 +1075,8 @@ code, pre {
 /* ---------- Scroll reveal (simple CSS) ---------- */
 @media (prefers-reduced-motion: no-preference) {
   .card,
-  .timeline-group,
+  .rm-group,
+  .rm-summary,
   .solution-row,
   .install-step {
     opacity: 0;
@@ -927,16 +1086,17 @@ code, pre {
 
   .grid-2 .card:nth-child(1),
   .grid-3 .card:nth-child(1),
-  .roadmap-timeline .timeline-group:nth-child(1),
+  .rm-summary,
+  .rm-timeline .rm-group:nth-child(1),
   .install-steps .install-step:nth-child(1) { animation-delay: 0.05s; }
 
   .grid-2 .card:nth-child(2),
   .grid-3 .card:nth-child(2),
-  .roadmap-timeline .timeline-group:nth-child(2),
+  .rm-timeline .rm-group:nth-child(2),
   .install-steps .install-step:nth-child(2) { animation-delay: 0.12s; }
 
   .grid-3 .card:nth-child(3),
-  .roadmap-timeline .timeline-group:nth-child(3),
+  .rm-timeline .rm-group:nth-child(3),
   .install-steps .install-step:nth-child(3) { animation-delay: 0.19s; }
 
   .grid-3 .card:nth-child(4) { animation-delay: 0.26s; }

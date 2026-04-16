@@ -273,164 +273,227 @@
       <span class="section-label">Vision</span>
       <h2 class="section-title" id="roadmap-title" data-i18n="roadmap.title">Roadmap</h2>
       <p class="section-subtitle" data-i18n="roadmap.subtitle">
-        Ce qui arrive, dans l'ordre
+        Chaque version livre une fonctionnalité complète et utilisable
       </p>
 
-      <div class="roadmap-timeline">
-
-        <!-- V1.x -->
-        <div class="timeline-group">
-          <div class="timeline-group-header">
-            <span class="timeline-major-badge" data-i18n="roadmap.group.v1.label">V1</span>
-            <div>
-              <strong data-i18n="roadmap.group.v1.title">Fondations</strong>
-              <span class="timeline-group-desc" data-i18n="roadmap.group.v1.desc">Sync engine, UI, backends et distribution</span>
-            </div>
+      <!-- Progress summary -->
+      <div class="rm-summary">
+        <div class="rm-stat">
+          <span class="rm-stat-value rm-stat-active">1</span>
+          <span class="rm-stat-label" data-i18n="roadmap.stat.active">En cours</span>
+        </div>
+        <div class="rm-progress-wrap">
+          <div class="rm-progress-meta">
+            <span data-i18n="roadmap.group.v1.title">Fondations</span>
+            <span class="rm-progress-count">1 / 7</span>
           </div>
-          <div class="timeline-items">
+          <div class="rm-progress-track" role="progressbar" aria-valuenow="14" aria-valuemin="0" aria-valuemax="100">
+            <div class="rm-progress-fill" style="width:14.3%"></div>
+          </div>
+          <p class="rm-progress-caption" data-i18n="roadmap.progress.caption">V1 — 1 milestone livré sur 7</p>
+        </div>
+        <div class="rm-stat">
+          <span class="rm-stat-value">9</span>
+          <span class="rm-stat-label" data-i18n="roadmap.stat.planned">Planifiés</span>
+        </div>
+      </div>
 
-            <div class="timeline-item active">
-              <div class="timeline-version-pill active">v1.0.0</div>
-              <div class="timeline-content">
-                <div class="timeline-item-header">
-                  <span class="timeline-item-title" data-i18n="roadmap.v100.title">Sync Engine</span>
+      <div class="rm-timeline">
+
+        <!-- ── V1 ──────────────────────────────────────── -->
+        <div class="rm-group">
+          <div class="rm-group-header">
+            <div class="rm-group-badge green">V1</div>
+            <div class="rm-group-meta">
+              <strong data-i18n="roadmap.group.v1.title">Fondations</strong>
+              <span data-i18n="roadmap.group.v1.desc">Sync engine, UI, backends et distribution</span>
+            </div>
+            <div class="rm-group-count">7 milestones</div>
+          </div>
+
+          <div class="rm-rail">
+
+            <div class="rm-entry active">
+              <div class="rm-dot-col">
+                <div class="rm-dot active" aria-hidden="true"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card active">
+                <div class="rm-card-header">
+                  <code class="rm-version" data-i18n="roadmap.v100.version">v1.0.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v100.title">Sync Engine</h4>
                   <span class="badge badge-active" data-i18n="roadmap.v100.status">En cours</span>
                 </div>
-                <p class="timeline-item-desc" data-i18n="roadmap.v100.desc">Moteur de synchronisation bidirectionnelle — file watcher, queue, upload/download, gestion des conflits</p>
+                <p class="rm-desc" data-i18n="roadmap.v100.desc">Moteur de synchronisation bidirectionnelle — file watcher, queue, upload/download, gestion des conflits</p>
               </div>
             </div>
 
-            <div class="timeline-item">
-              <div class="timeline-version-pill">v1.1.0</div>
-              <div class="timeline-content">
-                <div class="timeline-item-header">
-                  <span class="timeline-item-title" data-i18n="roadmap.v110.title">UI Systray</span>
+            <div class="rm-entry">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v1.1.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v110.title">UI Systray</h4>
                   <span class="badge badge-planned" data-i18n="roadmap.v110.status">Planifié</span>
                 </div>
-                <p class="timeline-item-desc" data-i18n="roadmap.v110.desc">Interface Windows native — icône systray, configuration backends, points de synchronisation, état temps réel</p>
+                <p class="rm-desc" data-i18n="roadmap.v110.desc">Interface Windows native — icône systray, configuration backends, points de synchronisation, état temps réel</p>
               </div>
             </div>
 
-            <div class="timeline-item">
-              <div class="timeline-version-pill">v1.2.0</div>
-              <div class="timeline-content">
-                <div class="timeline-item-header">
-                  <span class="timeline-item-title" data-i18n="roadmap.v120.title">Plugin WebDAV</span>
+            <div class="rm-entry">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v1.2.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v120.title">Plugin WebDAV</h4>
                   <span class="badge badge-planned" data-i18n="roadmap.v120.status">Planifié</span>
                 </div>
-                <p class="timeline-item-desc" data-i18n="roadmap.v120.desc">Premier backend de stockage — authentification Basic/Digest, compatible NAS Synology, TrueNAS, Nextcloud</p>
+                <p class="rm-desc" data-i18n="roadmap.v120.desc">Premier backend de stockage — authentification Basic/Digest, compatible NAS Synology, TrueNAS, Nextcloud</p>
               </div>
             </div>
 
-            <div class="timeline-item">
-              <div class="timeline-version-pill">v1.3.0</div>
-              <div class="timeline-content">
-                <div class="timeline-item-header">
-                  <span class="timeline-item-title" data-i18n="roadmap.v130.title">Plugin MooseFS</span>
+            <div class="rm-entry">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v1.3.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v130.title">Plugin MooseFS</h4>
                   <span class="badge badge-planned" data-i18n="roadmap.v130.status">Planifié</span>
                 </div>
-                <p class="timeline-item-desc" data-i18n="roadmap.v130.desc">Deuxième backend — client MooseFS natif Go pour les infrastructures de stockage distribué</p>
+                <p class="rm-desc" data-i18n="roadmap.v130.desc">Deuxième backend — client MooseFS natif Go pour les infrastructures de stockage distribué</p>
               </div>
             </div>
 
-            <div class="timeline-item">
-              <div class="timeline-version-pill">v1.4.0</div>
-              <div class="timeline-content">
-                <div class="timeline-item-header">
-                  <span class="timeline-item-title" data-i18n="roadmap.v140.title">Placeholders Files On-Demand</span>
+            <div class="rm-entry">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v1.4.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v140.title">Placeholders Files On-Demand</h4>
                   <span class="badge badge-planned" data-i18n="roadmap.v140.status">Planifié</span>
                 </div>
-                <p class="timeline-item-desc" data-i18n="roadmap.v140.desc">Cloud Filter API + WinFsp — fichiers visibles dans l'Explorateur sans occupation disque, hydratation à la demande</p>
+                <p class="rm-desc" data-i18n="roadmap.v140.desc">Cloud Filter API + WinFsp — fichiers visibles dans l'Explorateur sans occupation disque, hydratation à la demande</p>
               </div>
             </div>
 
-            <div class="timeline-item">
-              <div class="timeline-version-pill">v1.5.0</div>
-              <div class="timeline-content">
-                <div class="timeline-item-header">
-                  <span class="timeline-item-title" data-i18n="roadmap.v150.title">Cache locale</span>
+            <div class="rm-entry">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v1.5.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v150.title">Cache locale</h4>
                   <span class="badge badge-planned" data-i18n="roadmap.v150.status">Planifié</span>
                 </div>
-                <p class="timeline-item-desc" data-i18n="roadmap.v150.desc">Architecture LRU, activable par point de sync — accès hors-ligne aux fichiers fréquemment utilisés</p>
+                <p class="rm-desc" data-i18n="roadmap.v150.desc">Architecture LRU, activable par point de sync — accès hors-ligne aux fichiers fréquemment utilisés</p>
               </div>
             </div>
 
-            <div class="timeline-item">
-              <div class="timeline-version-pill">v1.6.0</div>
-              <div class="timeline-content">
-                <div class="timeline-item-header">
-                  <span class="timeline-item-title" data-i18n="roadmap.v160.title">CI/CD & Distribution</span>
+            <div class="rm-entry last">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v1.6.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v160.title">CI/CD & Distribution</h4>
                   <span class="badge badge-planned" data-i18n="roadmap.v160.status">Planifié</span>
                 </div>
-                <p class="timeline-item-desc" data-i18n="roadmap.v160.desc">GitHub Actions — build automatisé Windows AMD64 + Linux ARM64, publication sur GitHub Releases</p>
+                <p class="rm-desc" data-i18n="roadmap.v160.desc">GitHub Actions — build automatisé Windows AMD64 + Linux ARM64, publication sur GitHub Releases</p>
               </div>
             </div>
 
           </div>
         </div>
 
-        <!-- V2.x -->
-        <div class="timeline-group">
-          <div class="timeline-group-header">
-            <span class="timeline-major-badge planned" data-i18n="roadmap.group.v2.label">V2</span>
-            <div>
+        <!-- ── V2 ──────────────────────────────────────── -->
+        <div class="rm-group">
+          <div class="rm-group-header">
+            <div class="rm-group-badge blue">V2</div>
+            <div class="rm-group-meta">
               <strong data-i18n="roadmap.group.v2.title">Multi-client</strong>
-              <span class="timeline-group-desc" data-i18n="roadmap.group.v2.desc">Synchronisation de plusieurs machines vers le même backend</span>
+              <span data-i18n="roadmap.group.v2.desc">Synchronisation de plusieurs machines vers le même backend</span>
             </div>
+            <div class="rm-group-count">1 milestone</div>
           </div>
-          <div class="timeline-items">
 
-            <div class="timeline-item">
-              <div class="timeline-version-pill">v2.0.0</div>
-              <div class="timeline-content">
-                <div class="timeline-item-header">
-                  <span class="timeline-item-title" data-i18n="roadmap.v200.title">Multi-client</span>
+          <div class="rm-rail">
+            <div class="rm-entry last">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v2.0.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v200.title">Multi-client</h4>
                   <span class="badge badge-planned" data-i18n="roadmap.v200.status">Planifié</span>
                 </div>
-                <p class="timeline-item-desc" data-i18n="roadmap.v200.desc">Protocole de lock distribué, gestion des conflits multi-appareils, tableau de bord d'état centralisé</p>
+                <p class="rm-desc" data-i18n="roadmap.v200.desc">Protocole de lock distribué, gestion des conflits multi-appareils, tableau de bord d'état centralisé</p>
               </div>
             </div>
-
           </div>
         </div>
 
-        <!-- V3.x -->
-        <div class="timeline-group">
-          <div class="timeline-group-header">
-            <span class="timeline-major-badge planned" data-i18n="roadmap.group.v3.label">V3</span>
-            <div>
+        <!-- ── V3 ──────────────────────────────────────── -->
+        <div class="rm-group">
+          <div class="rm-group-header">
+            <div class="rm-group-badge purple">V3</div>
+            <div class="rm-group-meta">
               <strong data-i18n="roadmap.group.v3.title">Sécurité avancée</strong>
-              <span class="timeline-group-desc" data-i18n="roadmap.group.v3.desc">Chiffrement zero-knowledge et versioning des fichiers</span>
+              <span data-i18n="roadmap.group.v3.desc">Chiffrement zero-knowledge et versioning des fichiers</span>
             </div>
+            <div class="rm-group-count">2 milestones</div>
           </div>
-          <div class="timeline-items">
 
-            <div class="timeline-item">
-              <div class="timeline-version-pill">v3.0.0</div>
-              <div class="timeline-content">
-                <div class="timeline-item-header">
-                  <span class="timeline-item-title" data-i18n="roadmap.v300.title">Chiffrement zero-knowledge</span>
+          <div class="rm-rail">
+
+            <div class="rm-entry">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v3.0.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v300.title">Chiffrement zero-knowledge</h4>
                   <span class="badge badge-planned" data-i18n="roadmap.v300.status">Planifié</span>
                 </div>
-                <p class="timeline-item-desc" data-i18n="roadmap.v300.desc">AES-256-GCM + Argon2id, clés dans Windows Credential Manager — le backend ne voit jamais vos données en clair</p>
+                <p class="rm-desc" data-i18n="roadmap.v300.desc">AES-256-GCM + Argon2id, clés dans Windows Credential Manager — le backend ne voit jamais vos données en clair</p>
               </div>
             </div>
 
-            <div class="timeline-item">
-              <div class="timeline-version-pill">v3.1.0</div>
-              <div class="timeline-content">
-                <div class="timeline-item-header">
-                  <span class="timeline-item-title" data-i18n="roadmap.v310.title">Versioning des fichiers</span>
+            <div class="rm-entry last">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <code class="rm-version">v3.1.0</code>
+                  <h4 class="rm-title" data-i18n="roadmap.v310.title">Versioning des fichiers</h4>
                   <span class="badge badge-planned" data-i18n="roadmap.v310.status">Planifié</span>
                 </div>
-                <p class="timeline-item-desc" data-i18n="roadmap.v310.desc">Historique versionné par fichier, restauration d'une version antérieure depuis l'interface systray</p>
+                <p class="rm-desc" data-i18n="roadmap.v310.desc">Historique versionné par fichier, restauration d'une version antérieure depuis l'interface systray</p>
               </div>
             </div>
 
           </div>
         </div>
 
-      </div>
+      </div><!-- /rm-timeline -->
     </div>
   </section>
 
