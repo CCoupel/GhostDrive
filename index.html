@@ -276,49 +276,158 @@
         Ce qui arrive, dans l'ordre
       </p>
 
-      <div class="roadmap-grid">
+      <div class="roadmap-timeline">
 
-        <!-- V1 -->
-        <div class="roadmap-card active" aria-label="Version 1 — En cours">
-          <div class="roadmap-card-header">
-            <h3 data-i18n="roadmap.v1.title">V1 — Fondations</h3>
-            <span class="badge badge-active" data-i18n="roadmap.v1.status">En cours</span>
+        <!-- V1.x -->
+        <div class="timeline-group">
+          <div class="timeline-group-header">
+            <span class="timeline-major-badge" data-i18n="roadmap.group.v1.label">V1</span>
+            <div>
+              <strong data-i18n="roadmap.group.v1.title">Fondations</strong>
+              <span class="timeline-group-desc" data-i18n="roadmap.group.v1.desc">Sync engine, UI, backends et distribution</span>
+            </div>
           </div>
-          <ul class="roadmap-list" aria-label="Fonctionnalités V1">
-            <li>Sync bidirectionnelle</li>
-            <li>Placeholders Files On-Demand (Cloud Filter API)</li>
-            <li>Cache local activable</li>
-            <li>Plugin WebDAV</li>
-            <li>Plugin MooseFS</li>
-            <li>Interface systray Windows</li>
-            <li>Binaires GitHub Releases</li>
-          </ul>
+          <div class="timeline-items">
+
+            <div class="timeline-item active">
+              <div class="timeline-version-pill active">v1.0.0</div>
+              <div class="timeline-content">
+                <div class="timeline-item-header">
+                  <span class="timeline-item-title" data-i18n="roadmap.v100.title">Sync Engine</span>
+                  <span class="badge badge-active" data-i18n="roadmap.v100.status">En cours</span>
+                </div>
+                <p class="timeline-item-desc" data-i18n="roadmap.v100.desc">Moteur de synchronisation bidirectionnelle — file watcher, queue, upload/download, gestion des conflits</p>
+              </div>
+            </div>
+
+            <div class="timeline-item">
+              <div class="timeline-version-pill">v1.1.0</div>
+              <div class="timeline-content">
+                <div class="timeline-item-header">
+                  <span class="timeline-item-title" data-i18n="roadmap.v110.title">UI Systray</span>
+                  <span class="badge badge-planned" data-i18n="roadmap.v110.status">Planifié</span>
+                </div>
+                <p class="timeline-item-desc" data-i18n="roadmap.v110.desc">Interface Windows native — icône systray, configuration backends, points de synchronisation, état temps réel</p>
+              </div>
+            </div>
+
+            <div class="timeline-item">
+              <div class="timeline-version-pill">v1.2.0</div>
+              <div class="timeline-content">
+                <div class="timeline-item-header">
+                  <span class="timeline-item-title" data-i18n="roadmap.v120.title">Plugin WebDAV</span>
+                  <span class="badge badge-planned" data-i18n="roadmap.v120.status">Planifié</span>
+                </div>
+                <p class="timeline-item-desc" data-i18n="roadmap.v120.desc">Premier backend de stockage — authentification Basic/Digest, compatible NAS Synology, TrueNAS, Nextcloud</p>
+              </div>
+            </div>
+
+            <div class="timeline-item">
+              <div class="timeline-version-pill">v1.3.0</div>
+              <div class="timeline-content">
+                <div class="timeline-item-header">
+                  <span class="timeline-item-title" data-i18n="roadmap.v130.title">Plugin MooseFS</span>
+                  <span class="badge badge-planned" data-i18n="roadmap.v130.status">Planifié</span>
+                </div>
+                <p class="timeline-item-desc" data-i18n="roadmap.v130.desc">Deuxième backend — client MooseFS natif Go pour les infrastructures de stockage distribué</p>
+              </div>
+            </div>
+
+            <div class="timeline-item">
+              <div class="timeline-version-pill">v1.4.0</div>
+              <div class="timeline-content">
+                <div class="timeline-item-header">
+                  <span class="timeline-item-title" data-i18n="roadmap.v140.title">Placeholders Files On-Demand</span>
+                  <span class="badge badge-planned" data-i18n="roadmap.v140.status">Planifié</span>
+                </div>
+                <p class="timeline-item-desc" data-i18n="roadmap.v140.desc">Cloud Filter API + WinFsp — fichiers visibles dans l'Explorateur sans occupation disque, hydratation à la demande</p>
+              </div>
+            </div>
+
+            <div class="timeline-item">
+              <div class="timeline-version-pill">v1.5.0</div>
+              <div class="timeline-content">
+                <div class="timeline-item-header">
+                  <span class="timeline-item-title" data-i18n="roadmap.v150.title">Cache locale</span>
+                  <span class="badge badge-planned" data-i18n="roadmap.v150.status">Planifié</span>
+                </div>
+                <p class="timeline-item-desc" data-i18n="roadmap.v150.desc">Architecture LRU, activable par point de sync — accès hors-ligne aux fichiers fréquemment utilisés</p>
+              </div>
+            </div>
+
+            <div class="timeline-item">
+              <div class="timeline-version-pill">v1.6.0</div>
+              <div class="timeline-content">
+                <div class="timeline-item-header">
+                  <span class="timeline-item-title" data-i18n="roadmap.v160.title">CI/CD & Distribution</span>
+                  <span class="badge badge-planned" data-i18n="roadmap.v160.status">Planifié</span>
+                </div>
+                <p class="timeline-item-desc" data-i18n="roadmap.v160.desc">GitHub Actions — build automatisé Windows AMD64 + Linux ARM64, publication sur GitHub Releases</p>
+              </div>
+            </div>
+
+          </div>
         </div>
 
-        <!-- V2 -->
-        <div class="roadmap-card planned-1" aria-label="Version 2 — Planifié">
-          <div class="roadmap-card-header">
-            <h3 data-i18n="roadmap.v2.title">V2 — Multi-client</h3>
-            <span class="badge badge-planned" data-i18n="roadmap.v2.status">Planifié</span>
+        <!-- V2.x -->
+        <div class="timeline-group">
+          <div class="timeline-group-header">
+            <span class="timeline-major-badge planned" data-i18n="roadmap.group.v2.label">V2</span>
+            <div>
+              <strong data-i18n="roadmap.group.v2.title">Multi-client</strong>
+              <span class="timeline-group-desc" data-i18n="roadmap.group.v2.desc">Synchronisation de plusieurs machines vers le même backend</span>
+            </div>
           </div>
-          <ul class="roadmap-list" aria-label="Fonctionnalités V2">
-            <li>Synchronisation multi-client sur le même backend</li>
-            <li>Gestion des conflits avancée</li>
-            <li>Tableau de bord d'état multi-appareils</li>
-          </ul>
+          <div class="timeline-items">
+
+            <div class="timeline-item">
+              <div class="timeline-version-pill">v2.0.0</div>
+              <div class="timeline-content">
+                <div class="timeline-item-header">
+                  <span class="timeline-item-title" data-i18n="roadmap.v200.title">Multi-client</span>
+                  <span class="badge badge-planned" data-i18n="roadmap.v200.status">Planifié</span>
+                </div>
+                <p class="timeline-item-desc" data-i18n="roadmap.v200.desc">Protocole de lock distribué, gestion des conflits multi-appareils, tableau de bord d'état centralisé</p>
+              </div>
+            </div>
+
+          </div>
         </div>
 
-        <!-- V3 -->
-        <div class="roadmap-card" aria-label="Version 3 — Planifié">
-          <div class="roadmap-card-header">
-            <h3 data-i18n="roadmap.v3.title">V3 — Sécurité</h3>
-            <span class="badge badge-planned" data-i18n="roadmap.v3.status">Planifié</span>
+        <!-- V3.x -->
+        <div class="timeline-group">
+          <div class="timeline-group-header">
+            <span class="timeline-major-badge planned" data-i18n="roadmap.group.v3.label">V3</span>
+            <div>
+              <strong data-i18n="roadmap.group.v3.title">Sécurité avancée</strong>
+              <span class="timeline-group-desc" data-i18n="roadmap.group.v3.desc">Chiffrement zero-knowledge et versioning des fichiers</span>
+            </div>
           </div>
-          <ul class="roadmap-list" aria-label="Fonctionnalités V3">
-            <li>Chiffrement côté client (zero-knowledge)</li>
-            <li>Versioning des fichiers</li>
-            <li>Historique et restauration</li>
-          </ul>
+          <div class="timeline-items">
+
+            <div class="timeline-item">
+              <div class="timeline-version-pill">v3.0.0</div>
+              <div class="timeline-content">
+                <div class="timeline-item-header">
+                  <span class="timeline-item-title" data-i18n="roadmap.v300.title">Chiffrement zero-knowledge</span>
+                  <span class="badge badge-planned" data-i18n="roadmap.v300.status">Planifié</span>
+                </div>
+                <p class="timeline-item-desc" data-i18n="roadmap.v300.desc">AES-256-GCM + Argon2id, clés dans Windows Credential Manager — le backend ne voit jamais vos données en clair</p>
+              </div>
+            </div>
+
+            <div class="timeline-item">
+              <div class="timeline-version-pill">v3.1.0</div>
+              <div class="timeline-content">
+                <div class="timeline-item-header">
+                  <span class="timeline-item-title" data-i18n="roadmap.v310.title">Versioning des fichiers</span>
+                  <span class="badge badge-planned" data-i18n="roadmap.v310.status">Planifié</span>
+                </div>
+                <p class="timeline-item-desc" data-i18n="roadmap.v310.desc">Historique versionné par fichier, restauration d'une version antérieure depuis l'interface systray</p>
+              </div>
+            </div>
+
+          </div>
         </div>
 
       </div>
