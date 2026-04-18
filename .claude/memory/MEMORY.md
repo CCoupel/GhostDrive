@@ -1,9 +1,7 @@
 # MEMORY.md — Memoire Projet
 
 > **Usage** : Ce fichier est la source de verite pour demarrer une nouvelle session.
-> Mis a jour par `/end-session` et par le CDP apres chaque changement significatif.
-> Ne pas versionner d'informations ephemeres (taches en cours, logs) — uniquement
-> ce qui est utile pour la PROCHAINE session.
+> Mis a jour par `/end-session`.
 
 ---
 
@@ -11,10 +9,10 @@
 
 | Parametre | Valeur |
 |-----------|--------|
-| Nom | `{PROJECT_NAME}` |
-| Repository | `{REPO_URL}` |
-| Version actuelle | `{CURRENT_VERSION}` |
-| Derniere mise a jour | `{LAST_UPDATED}` |
+| Nom | `GhostDrive` |
+| Repository | `https://github.com/CCoupel/GhostDrive` |
+| Version actuelle | `0.1.0` |
+| Derniere mise a jour | `2026-04-18` |
 
 ---
 
@@ -22,14 +20,8 @@
 
 | Environnement | Version | Date deploy |
 |---------------|---------|-------------|
-| Production | `{PROD_VERSION}` | `{PROD_DATE}` |
-| Staging / Qualif | `{STAGING_VERSION}` | `{STAGING_DATE}` |
-| En developpement | `{DEV_VERSION}` | — |
-
-**Schema versioning** : `X.Y.Z`
-- X : Breaking change (migration requise)
-- Y : Nouvelle feature (incremente par PLAN)
-- Z : Bugfix / patch (incremente par DEV)
+| Production (GitHub Release) | `0.1.0` | `2026-04-18` |
+| En developpement | `0.2.0` | — |
 
 ---
 
@@ -37,106 +29,77 @@
 
 ### Phase Actuelle
 
-**Phase** : `{CURRENT_PHASE}` _(ex: DEV, REVIEW, QA, DEPLOY)_
-**Branche** : `{CURRENT_BRANCH}`
-**Description** : `{CURRENT_TASK}`
+**Phase** : IDLE — v0.1.0 livre, pret pour v0.2.0
+**Branche** : `main` (feat/sync-engine-v0.1.0 mergee et close)
+**Description** : Milestone v0.1.0 complete — moteur de sync Go livré en prod
 
-### Issues GitHub Actives
+### Issues GitHub Actives (v0.2.0)
 
-| # | Titre | Labels | Priorite |
-|---|-------|--------|----------|
-| — | — | — | — |
+| # | Titre | Labels |
+|---|-------|--------|
+| #28 | Icône systray + menu contextuel (Wails) | frontend |
+| #29 | Page configuration backend (WebDAV / MooseFS) | frontend |
+| #30 | Page configuration points de synchronisation | frontend |
+| #31 | Vue état synchronisation en temps réel | frontend |
+| #46 | ci: upgrade softprops/action-gh-release (Node.js 24) | infra |
 
 ### Prochaines Etapes
 
-1. `{NEXT_STEP_1}`
-2. `{NEXT_STEP_2}`
+1. Creer branche `feat/ui-v0.2.0`
+2. Implémenter systray + pages config (issues #28-#31)
+3. Corriger `softprops/action-gh-release@v1` → v2 (#46)
 
 ---
 
 ## Architecture
 
-> Completer selon le projet. Supprimer les sections non applicables.
-
 ### Stack Technique
 
 | Composant | Technologie | Version |
 |-----------|-------------|---------|
-| Backend | `{BACKEND}` | `{VERSION}` |
-| Frontend | `{FRONTEND}` | `{VERSION}` |
-| Base de donnees | `{DATABASE}` | `{VERSION}` |
-| Infrastructure | `{INFRA}` | — |
-
-### Environnements
-
-| Env | URL / Acces | Notes |
-|-----|-------------|-------|
-| Dev local | `localhost:{PORT}` | — |
-| Staging | `{STAGING_URL}` | — |
-| Production | `{PROD_URL}` | — |
+| Backend | Go + Wails v2 | 1.21 |
+| Frontend | React + TypeScript | Vite 5 |
+| Plugins V1 | WebDAV + MooseFS | — |
+| CI/CD | GitHub Actions | — |
 
 ### Fichiers Cles
 
 | Fichier | Role |
 |---------|------|
-| `{VERSION_FILE}` | Source de verite pour la version |
-| `CHANGELOG.md` | Historique des versions |
-| `CLAUDE.md` | Architecture et regles du projet |
+| `config.json` | Config runtime (version patchée par CI au tag) |
+| `frontend/package.json` | Version frontend (patchée par CI au tag) |
+| `CHANGELOG.md` | Historique — source des release notes GitHub |
+| `.github/workflows/ci.yml` | CI légère push/PR |
+| `.github/workflows/build.yml` | Pipeline complet sur tag v* |
 
 ---
 
 ## Decisions Techniques
 
-> Decisions importantes prises — utile pour ne pas revenir dessus.
-
 | Decision | Raison | Date |
 |----------|--------|------|
-| `{DECISION_1}` | `{REASON_1}` | `{DATE_1}` |
+| Tag = source de vérité version | config.json + package.json patchés par CI au build | 2026-04-18 |
+| workflow_call : ci.yml réutilisé dans build.yml | Pas de duplication de la définition des tests | 2026-04-18 |
+| first-event-wins dans watcher debounce | create+write sur Linux/WSL2 reportait "modified" au lieu de "created" | 2026-04-18 |
+| Plugins = interfaces Go compilées (pas .dll/gRPC) | Pragmatique pour projet solo | 2026-04-15 |
+| Frontend Wails (pas systray manuel) | Meilleure DX, installer Windows intégré | 2026-04-15 |
+| Tests backends : serveurs in-memory | Pas d'infra réelle requise en CI | 2026-04-15 |
 
 ---
 
 ## Regles Critiques du Projet
 
-> Regles non-negociables specifiques a CE projet. Completer lors de l'init.
-
-- `{RULE_1}` _(ex: Toujours builder le frontend avant le backend Go)_
-- `{RULE_2}` _(ex: Tests obligatoires pour tout nouveau endpoint)_
-- `{RULE_3}` _(ex: Jamais de secrets dans le code)_
+- Contract-first : créer les contrats dans `contracts/` AVANT le code
+- Plugin-first : toute interaction backend passe par `StorageBackend`
+- Jamais de push sur main sans CI verte
+- Le tag git est la seule source de vérité pour la version
+- `frontend/package-lock.json` commité (reproductibilité CI)
+- `coverage.out` et `.remember/` ne pas commiter
 
 ---
 
 ## Points d'Attention
 
-> Elements a surveiller ou risques identifies.
-
-- `{ATTENTION_1}` _(ex: Migration DB planifiee pour v3.0.0)_
-- `{ATTENTION_2}`
-
----
-
-## Corrections de Comportement Claude
-
-> Retours utilisateur sur la facon de travailler — ne pas reproduire les erreurs listees.
-
-| Comportement a eviter | Comportement attendu |
-|-----------------------|----------------------|
-| `{AVOID_1}` | `{EXPECTED_1}` |
-
----
-
-## Comment Utiliser ce Fichier
-
-### Au demarrage d'une session
-
-1. Lire ce fichier en entier
-2. Verifier la version courante dans `{VERSION_FILE}`
-3. Verifier l'etat git (`git status`, `git log --oneline -5`)
-4. Reprendre depuis "Travail en Cours"
-
-### En fin de session (`/end-session`)
-
-1. Mettre a jour "Version actuelle" si elle a change
-2. Mettre a jour "Travail en Cours"
-3. Ajouter les nouvelles decisions techniques
-4. Mettre a jour les "Issues GitHub Actives"
-5. Commiter : `chore(memory): Update session state`
+- `softprops/action-gh-release@v1` dépréciée Node.js 20 → corriger en v0.2.0 (#46)
+- `cmd/ghostdrive/main.go` non implémenté → build Wails pas encore actif (TODO dans build.yml)
+- v0.2.0 = premier milestone avec UI Wails → tester le build Wails en CI (libgtk-3-dev requis)
