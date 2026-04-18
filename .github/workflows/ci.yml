@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+env:
+  GO_VERSION: '1.21'
+  NODE_VERSION: '18'
+
+jobs:
+  # ============================================
+  # Go : vet + build + tests + coverage
+  # ============================================
+  go-checks:
+    name: Go Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build (compile check)
+        run: go build ./...
+
+      - name: go test with coverage
+        run: go test ./... -v -coverprofile=coverage.out -covermode=atomic
+
+      - name: Enforce 70% coverage threshold
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${COVERAGE}%"
+          if awk "BEGIN {exit !($COVERAGE < 70)}"; then
+            echo "❌ Coverage ${COVERAGE}% is below the 70% threshold"
+            exit 1
+          fi
+          echo "✅ Coverage ${COVERAGE}% passes the 70% threshold"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.out
+          retention-days: 7
+
+  # ============================================
+  # Frontend : install + build
+  # ============================================
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        working-directory: frontend
+        # npm ci requires package-lock.json — use npm install until lock file is committed
+        run: npm install
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build

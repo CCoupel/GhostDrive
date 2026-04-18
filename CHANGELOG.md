@@ -1,0 +1,46 @@
+# Changelog
+
+All notable changes to GhostDrive will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] - Unreleased
+
+### Added
+- Go module initialization with Wails v2 framework
+- StorageBackend plugin interface (WebDAV, MooseFS)
+- Internal types: SyncState, SyncError, BackendStatus, ProgressEvent, CacheStats
+- Configuration management (Load/Save AppConfig, XDG/AppData path resolution)
+- WebDAV storage backend with full StorageBackend implementation
+- MooseFS storage backend via FUSE mount point
+- Local file cache with LRU eviction
+- Bidirectional sync engine with watcher, queue, reconciler, and dispatcher
+- File watcher with 500ms debounce (fsnotify)
+- Sync queue with exponential backoff retry (max 5 attempts)
+- Conflict resolution: last-write-wins strategy (V1)
+- Placeholder manager interface (Files On-Demand)
+- Linux placeholder fallback (.ghost files)
+- Wails App bindings: GetConfig, SaveConfig, AddBackend, RemoveBackend, TestBackendConnection
+- Wails App bindings: GetSyncState, StartSync, StopSync, PauseSync, ForceSync
+- Wails App bindings: ListFiles, DownloadFile, OpenSyncFolder
+- Wails App bindings: GetCacheStats, ClearCache, GetBackendStatuses, GetVersion, Quit
+- Wails events: sync:state-changed, sync:progress, sync:file-event, sync:error
+- Wails events: backend:status-changed, app:ready
+- Backend manager for lifecycle management of storage backends
+- `internal/sync/upload.go` — bidirectional local→backend upload with progress events (sync:progress) and 100ms throttle (#6)
+- `internal/sync/download.go` — backend→local download with atomic write (tmp+rename) and progress events (#7)
+- `internal/sync/conflict.go` — last-write-wins conflict resolution with sync:conflict-resolved event and sync.log journal (#8)
+- `contracts/wails-events.md` — new event sync:conflict-resolved (path, winner, localModTime, remoteModTime, time) (#8)
+
+### Fixed
+- Path traversal vulnerability in Upload/Download (filepath.Clean + prefix check) (#9)
+- Dispatcher now routes all downloads through the atomic write wrapper (#7)
+- Deadlock in Pause()/Resume() caused by double-lock on mu (#6)
+- Naming collision between SyncError constant and SyncErrorInfo struct — struct renamed to SyncErrorInfo (#6)
+- Removed dead code resumeCh/pauseCh channels (#6)
+- Watcher debounce now uses first-event-wins: `create+write` sequence correctly reports `created` instead of `modified` on Linux/WSL2 (#4)
+
+[0.1.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.1.0

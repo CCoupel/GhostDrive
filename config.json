@@ -1,0 +1,9 @@
+{
+  "version": "0.1.0",
+  "backends": [],
+  "cacheEnabled": false,
+  "cacheDir": "",
+  "cacheSizeMaxMB": 512,
+  "startMinimized": false,
+  "autoStart": false
+}
