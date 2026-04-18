@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-04-18
 
 ### Added
 - Go module initialization with Wails v2 framework
@@ -42,5 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Naming collision between SyncError constant and SyncErrorInfo struct — struct renamed to SyncErrorInfo (#6)
 - Removed dead code resumeCh/pauseCh channels (#6)
 - Watcher debounce now uses first-event-wins: `create+write` sequence correctly reports `created` instead of `modified` on Linux/WSL2 (#4)
+- Missing `frontend/src/main.tsx` entry point added (Vite build was failing in CI)
+
+### CI/CD
+- `ci.yml` — pipeline léger sur chaque push/PR : go vet, go build, go test (seuil 70%), frontend build
+- `build.yml` — pipeline complet sur tag `v*` : CI → inject version → cross-compile (windows/amd64 + linux/arm64) → GitHub Release
+- Le tag est la source de vérité de version : `config.json` et `frontend/package.json` patchés automatiquement au build
+- `ci.yml` réutilisé dans `build.yml` via `workflow_call` (pas de duplication)
+- Actions upgradées vers les versions compatibles Node.js 24 : checkout@v6, setup-go@v6, setup-node@v6, upload-artifact@v7, download-artifact@v8
 
 [0.1.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.1.0
