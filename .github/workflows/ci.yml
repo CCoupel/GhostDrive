@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: ['**']
     tags-ignore: ['v*']
   pull_request:
     branches: [main]
+  workflow_call:
 
 env:
   GO_VERSION: '1.21'
@@ -16,8 +16,8 @@ jobs:
     name: Go
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -29,13 +29,19 @@ jobs:
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
           echo "Coverage: ${COVERAGE}%"
           awk "BEGIN {exit !($COVERAGE < 70)}" && echo "❌ Below 70%" && exit 1 || echo "✅ OK"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.out
+          retention-days: 7
 
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
       - run: npm install
