@@ -32,7 +32,7 @@ GhostDrive est un client Windows libre qui transforme n'importe quel backend de 
 
 ## Fonctionnalites
 
-### V1 — Disponible (v0.2.0)
+### V1 — Disponible (v0.3.0)
 - Synchronisation bidirectionnelle de dossiers locaux vers backends distants
 - Placeholders Windows (Cloud Filter API) — Files On-Demand
 - Cache local activable par point de sync
@@ -104,9 +104,8 @@ Telecharger le dernier binaire depuis les [Releases GitHub](https://github.com/C
 | Plateforme | Fichier |
 |------------|---------|
 | Windows (x64) | `ghostdrive-vX.Y.Z-windows-amd64.exe` |
-| Linux (ARM64) | `ghostdrive-vX.Y.Z-linux-arm64` |
 
-**Windows** : executer l'installeur, GhostDrive se lance automatiquement au demarrage.
+**Windows** : executer le binaire, GhostDrive se lance automatiquement au demarrage.
 
 **Prerequis Windows** : [WinFsp](https://github.com/winfsp/winfsp/releases) doit etre installe pour les placeholders Files On-Demand.
 
@@ -122,11 +121,8 @@ Telecharger le dernier binaire depuis les [Releases GitHub](https://github.com/C
 git clone https://github.com/CCoupel/GhostDrive.git
 cd GhostDrive
 
-# Build complet (binaire Windows depuis WSL/Linux)
+# Build Windows depuis WSL/Linux
 wails build -platform windows/amd64
-
-# ou build Linux
-wails build -platform linux/arm64
 ```
 
 ---

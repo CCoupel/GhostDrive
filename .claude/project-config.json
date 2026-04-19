@@ -36,8 +36,7 @@
     "cicd": "github-actions",
     "deploy": "binary-releases",
     "targets": [
-      { "os": "windows", "arch": "amd64", "suffix": "windows-amd64.exe" },
-      { "os": "linux", "arch": "arm64", "suffix": "linux-arm64" }
+      { "os": "windows", "arch": "amd64", "suffix": "windows-amd64.exe" }
     ],
     "versioning": "semantic",
     "version_sources": ["server-go/config.json", "frontend/package.json", "git-tag"]

@@ -13,7 +13,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CI : pipeline de tests frontend avec vitest (issue #32)
 - CI : build Windows AMD64 via cross-compilation MinGW + wails build (issue #33)
-- CI : build Linux ARM64 via cross-compilation gcc-aarch64 + wails build (issue #34)
 - CI : publication automatique GitHub Release au push d'un tag vX.Y.Z (issue #34)
 - CI : version Wails épinglée à v2.12.0 dans les workflows
 
