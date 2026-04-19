@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Utilitaires `formatBytes` et `formatRelative` (formatage taille fichiers et dates relatives)
 - 13 tests vitest, 9 tests Go supplémentaires (internal/config, internal/backends)
 
+### Fixed
+- Prevent multiple GhostDrive instances from launching simultaneously via named mutex `Local\GhostDrive` (Windows) and flock (Unix)
+- Systray menu items Ouvrir, Paramètres, Quitter now functional — call `WindowShow`/`Quit` directly instead of relying on unhandled frontend events
+- `App.Quit()` — add mutex RLock + nil check (consistent with `Emit()` and `Context()`)
+- Remove dead `EventsOn("tray:open-window")` handler in `Startup` (Go-side listener never triggered by Go-emitted events)
+
 ### Notes techniques
 - `main.go` placé à la racine du projet (contrainte Wails v2 — co-localisé avec wails.json)
 - API SystemTray absente de Wails v2.12.0 — menu tray implémenté via `options.Menu` + `HideWindowOnClose: true` (icône tray native prévue en v0.3.0)
@@ -70,4 +76,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ci.yml` réutilisé dans `build.yml` via `workflow_call` (pas de duplication)
 - Actions upgradées vers les versions compatibles Node.js 24 : checkout@v6, setup-go@v6, setup-node@v6, upload-artifact@v7, download-artifact@v8
 
+[0.2.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.2.0
 [0.1.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.1.0
