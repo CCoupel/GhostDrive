@@ -10,6 +10,7 @@ permissions:
 env:
   GO_VERSION: '1.24'
   NODE_VERSION: '18'
+  WAILS_VERSION: 'v2.12.0'
 
 jobs:
   # ============================================
@@ -66,10 +67,12 @@ jobs:
             goos: windows
             goarch: amd64
             suffix: windows-amd64.exe
+            cc: x86_64-w64-mingw32-gcc
           - target: linux-arm64
             goos: linux
             goarch: arm64
             suffix: linux-arm64
+            cc: aarch64-linux-gnu-gcc
     steps:
       - uses: actions/checkout@v6
 
@@ -90,32 +93,54 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Install MinGW toolchain (Windows AMD64)
+        if: matrix.target == 'windows-amd64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Install ARM64 toolchain + webkit2gtk (Linux ARM64)
+        if: matrix.target == 'linux-arm64'
+        run: |
+          sudo dpkg --add-architecture arm64
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs) main restricted universe multiverse" \
+            | sudo tee /etc/apt/sources.list.d/arm64-ports.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs)-updates main restricted universe multiverse" \
+            | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libgtk-3-dev:arm64 libwebkit2gtk-4.0-dev:arm64
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
       - name: Build frontend
         working-directory: frontend
         run: npm install && npm run build
 
-      # TODO(#33,#34): remplacer par `wails build -platform ${{ matrix.goos }}/${{ matrix.goarch }}`
-      # une fois cmd/ghostdrive/main.go implémenté.
-      # Linux CI requiert : libgtk-3-dev, libwebkit2gtk-4.0-dev
-      - name: Cross-compile Go
+      - name: Wails cross-compile
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          go build ./internal/... ./plugins/...
-          echo "✅ ${{ matrix.goos }}/${{ matrix.goarch }} OK"
-
-      - name: Create artifact
+          CGO_ENABLED: 1
+          CC: ${{ matrix.cc }}
         run: |
           FILE="ghostdrive-v${{ needs.version.outputs.version }}-${{ matrix.suffix }}"
-          printf "GhostDrive v%s — %s/%s\nTODO: Wails binary (cmd/ghostdrive/main.go pending)\n" \
-            "${{ needs.version.outputs.version }}" "${{ matrix.goos }}" "${{ matrix.goarch }}" > "$FILE"
+          wails build -platform ${{ matrix.goos }}/${{ matrix.goarch }} -o "$FILE"
+          echo "✅ ${{ matrix.goos }}/${{ matrix.goarch }} → $FILE"
+
+      - name: Locate binary
+        id: bin
+        run: |
+          FILE="ghostdrive-v${{ needs.version.outputs.version }}-${{ matrix.suffix }}"
+          # wails build outputs to build/bin/ by default when -o has no path separator
+          if [ -f "build/bin/$FILE" ]; then
+            echo "path=build/bin/$FILE" >> $GITHUB_OUTPUT
+          else
+            echo "path=$FILE" >> $GITHUB_OUTPUT
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.target }}
-          path: ghostdrive-v${{ needs.version.outputs.version }}-${{ matrix.suffix }}
+          path: ${{ steps.bin.outputs.path }}
           retention-days: 1
 
   # ============================================
@@ -134,7 +159,6 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
-          merge-multiple: true
 
       - name: Extract release notes from CHANGELOG.md
         run: |

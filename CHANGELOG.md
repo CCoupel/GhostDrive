@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-19
+
+### Added
+
+- CI : pipeline de tests frontend avec vitest (issue #32)
+- CI : build Windows AMD64 via cross-compilation MinGW + wails build (issue #33)
+- CI : build Linux ARM64 via cross-compilation gcc-aarch64 + wails build (issue #34)
+- CI : publication automatique GitHub Release au push d'un tag vX.Y.Z (issue #34)
+- CI : version Wails épinglée à v2.12.0 dans les workflows
+
+### Fixed
+
+- CI : suppression des dépendances GTK inutiles dans le step Windows AMD64
+- CI : correction du mismatch merge-multiple/glob dans le job release (artifacts n'étaient pas attachés)
+
 ## [0.2.0] - 2026-04-18
 
 ### Added
@@ -76,5 +91,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ci.yml` réutilisé dans `build.yml` via `workflow_call` (pas de duplication)
 - Actions upgradées vers les versions compatibles Node.js 24 : checkout@v6, setup-go@v6, setup-node@v6, upload-artifact@v7, download-artifact@v8
 
+[0.3.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.3.0
 [0.2.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.2.0
 [0.1.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.1.0
