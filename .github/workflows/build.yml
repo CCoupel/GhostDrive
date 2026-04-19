@@ -58,7 +58,7 @@ jobs:
   # ============================================
   build:
     name: Build ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     needs: [ci, version]
     strategy:
       matrix:
@@ -68,11 +68,13 @@ jobs:
             goarch: amd64
             suffix: windows-amd64.exe
             cc: x86_64-w64-mingw32-gcc
+            runner: ubuntu-latest
           - target: linux-arm64
             goos: linux
             goarch: arm64
             suffix: linux-arm64
             cc: aarch64-linux-gnu-gcc
+            runner: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
 
