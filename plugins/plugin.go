@@ -43,7 +43,8 @@ type BackendConfig struct {
 	Type    string            `json:"type"` // "webdav" | "moosefs"
 	Enabled bool              `json:"enabled"`
 	Params  map[string]string `json:"params"`
-	SyncDir string            `json:"syncDir"`
+	SyncDir    string            `json:"syncDir"`
+	RemotePath string            `json:"remotePath"` // root path on remote (e.g. "/GhostDrive")
 }
 
 // ProgressCallback is called during transfers to report progress.

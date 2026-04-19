@@ -1,6 +1,6 @@
-import { Settings, FolderOpen, Play, Pause, RefreshCw, X } from 'lucide-react';
+import { Play, Pause, RefreshCw } from 'lucide-react';
 import { TrayStatus } from './TrayStatus';
-import { ghostdriveApi, hideWindow } from '../../services/wails';
+import { ghostdriveApi } from '../../services/wails';
 import type { SyncState, BackendConfig } from '../../types/ghostdrive';
 
 interface TrayMenuProps {
@@ -12,6 +12,7 @@ interface TrayMenuProps {
 export function TrayMenu({ syncState, backends, onOpenSettings }: TrayMenuProps) {
   const isSyncing = syncState.status === 'syncing';
   const isPaused  = syncState.status === 'paused';
+  const hasBackends = backends.length > 0;
 
   const handleSyncToggle = async () => {
     for (const b of backends) {
@@ -25,88 +26,49 @@ export function TrayMenu({ syncState, backends, onOpenSettings }: TrayMenuProps)
   };
 
   return (
-    <div className="w-[360px] bg-white rounded-lg shadow-lg overflow-hidden">
-      <TrayStatus
-        status={syncState.status}
-        pending={syncState.pending}
-        currentFile={syncState.currentFile}
-      />
+    <div className="flex items-center justify-between px-3 py-2 bg-white border-b border-surface-border shrink-0">
+      <TrayStatus syncState={syncState} onNavigateToSettings={onOpenSettings} />
 
-      <div className="border-t border-surface-border" />
-
-      <div className="py-1">
-        <MenuItem
-          icon={isSyncing ? <Pause size={15} /> : <Play size={15} />}
-          label={isSyncing ? 'Mettre en pause' : isPaused ? 'Reprendre' : 'Démarrer la sync'}
+      <div className="flex items-center gap-1">
+        <ToolbarButton
+          icon={isSyncing ? <Pause size={14} /> : <Play size={14} />}
+          label={isSyncing ? 'Pause' : isPaused ? 'Reprendre' : 'Sync'}
           onClick={handleSyncToggle}
-          disabled={backends.length === 0}
+          disabled={!hasBackends}
         />
-        <MenuItem
-          icon={<RefreshCw size={15} />}
-          label="Synchronisation forcée"
+        <ToolbarButton
+          icon={<RefreshCw size={14} />}
+          label="Forcer"
           onClick={handleForceSync}
-          disabled={backends.length === 0}
+          disabled={!hasBackends}
         />
-
-        {backends.slice(0, 3).map(b => (
-          <MenuItem
-            key={b.id}
-            icon={<FolderOpen size={15} />}
-            label={`Ouvrir "${b.name}"`}
-            onClick={() => ghostdriveApi.openSyncFolder(b.id)}
-          />
-        ))}
-      </div>
-
-      <div className="border-t border-surface-border" />
-
-      <div className="py-1">
-        <MenuItem
-          icon={<Settings size={15} />}
-          label="Paramètres"
-          onClick={onOpenSettings}
-        />
-        <MenuItem
-          icon={<X size={15} />}
-          label="Quitter GhostDrive"
-          onClick={() => ghostdriveApi.quit()}
-          danger
-        />
-      </div>
-
-      <div className="px-3 py-1.5 bg-surface-secondary border-t border-surface-border">
-        <button
-          className="text-xs text-gray-400 hover:text-gray-600 w-full text-right"
-          onClick={hideWindow}
-        >
-          Masquer
-        </button>
       </div>
     </div>
   );
 }
 
-interface MenuItemProps {
+function ToolbarButton({
+  icon,
+  label,
+  onClick,
+  disabled,
+}: {
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
   disabled?: boolean;
-  danger?: boolean;
-}
-
-function MenuItem({ icon, label, onClick, disabled, danger }: MenuItemProps) {
+}) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`
-        w-full flex items-center gap-2.5 px-3 py-1.5 text-sm text-left transition-colors
-        disabled:opacity-40 disabled:cursor-not-allowed
-        ${danger ? 'text-red-600 hover:bg-red-50' : 'text-gray-800 hover:bg-surface-secondary'}
-      `.trim()}
+      title={label}
+      className="flex items-center gap-1 px-2 py-1 text-xs rounded text-gray-600
+        hover:bg-surface-secondary transition-colors
+        disabled:opacity-40 disabled:cursor-not-allowed"
     >
-      <span className="shrink-0">{icon}</span>
-      {label}
+      {icon}
+      <span className="hidden sm:inline">{label}</span>
     </button>
   );
 }

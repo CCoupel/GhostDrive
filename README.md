@@ -32,12 +32,15 @@ GhostDrive est un client Windows libre qui transforme n'importe quel backend de 
 
 ## Fonctionnalites
 
-### V1 — Disponible
+### V1 — Disponible (v0.2.0)
 - Synchronisation bidirectionnelle de dossiers locaux vers backends distants
 - Placeholders Windows (Cloud Filter API) — Files On-Demand
 - Cache local activable par point de sync
 - Plugins inclus : **WebDAV** et **MooseFS**
-- Interface tray Windows — lancement au demarrage, configuration simple
+- Interface tray Windows avec menu natif — lancement au demarrage, fenetre cachee au lieu de quittee
+- Configuration backends WebDAV et MooseFS avec validation et test de connexion en direct
+- Points de synchronisation configurables (dossier local ↔ chemin distant) par backend
+- Vue etat de synchronisation en temps reel — barres de progression par fichier, erreurs, historique
 
 ### V2 — Roadmap
 - Multi-client — plusieurs machines synchronisees vers le meme backend

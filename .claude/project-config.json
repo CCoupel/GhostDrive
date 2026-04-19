@@ -1,7 +1,7 @@
 {
   "name": "GhostDrive",
   "description": "Client de synchronisation Windows vers backends de stockage prives (WebDAV, MooseFS, S3...). Equivalent OneDrive open-source avec placeholders Files On-Demand, cache local et architecture plugin.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "initialized_at": "2026-04-15T00:00:00Z",
   "initialized_from": "workshop",
   "stack": {

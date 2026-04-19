@@ -19,14 +19,36 @@ type SyncErrorInfo struct {
 	Time    time.Time `json:"time"`
 }
 
+// BackendSyncError is the event payload for sync:error events (includes backendId).
+type BackendSyncError struct {
+	BackendID string    `json:"backendId"`
+	Path      string    `json:"path"`
+	Message   string    `json:"message"`
+	Time      time.Time `json:"time"`
+}
+
+// BackendSyncState represents the sync state for a single backend.
+type BackendSyncState struct {
+	BackendID   string             `json:"backendId"`
+	BackendName string             `json:"backendName"`
+	Status      SyncStatus         `json:"status"`
+	Progress    float64            `json:"progress"`
+	CurrentFile string             `json:"currentFile"`
+	Pending     int                `json:"pending"`
+	Errors      []BackendSyncError `json:"errors"`
+	LastSync    time.Time          `json:"lastSync"`
+}
+
 // SyncState represents the global sync state exposed to the frontend.
 type SyncState struct {
-	Status      SyncStatus      `json:"status"`
-	Progress    float64         `json:"progress"`
-	CurrentFile string          `json:"currentFile"`
-	Pending     int             `json:"pending"`
-	Errors      []SyncErrorInfo `json:"errors"`
-	LastSync    time.Time       `json:"lastSync"`
+	Status          SyncStatus         `json:"status"`
+	Progress        float64            `json:"progress"`
+	CurrentFile     string             `json:"currentFile"`
+	Pending         int                `json:"pending"`
+	Errors          []SyncErrorInfo    `json:"errors"`
+	LastSync        time.Time          `json:"lastSync"`
+	Backends        []BackendSyncState `json:"backends"`
+	ActiveTransfers []ProgressEvent    `json:"activeTransfers"`
 }
 
 // BackendStatus represents the connection status of a backend.

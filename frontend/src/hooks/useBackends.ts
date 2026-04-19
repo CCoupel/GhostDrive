@@ -59,11 +59,16 @@ export function useBackends() {
     }));
   }, []);
 
+  const testConnection = useCallback(
+    (config: BackendConfig) => ghostdriveApi.testBackendConnection(config),
+    [],
+  );
+
   const getStatus = useCallback(
     (backendId: string): BackendStatus | undefined =>
       state.statuses.find(s => s.backendId === backendId),
     [state.statuses],
   );
 
-  return { ...state, reload: load, addBackend, removeBackend, getStatus };
+  return { ...state, reload: load, addBackend, removeBackend, testConnection, getStatus };
 }

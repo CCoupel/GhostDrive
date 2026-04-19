@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-18
+
+### Added
+- Icône systray et menu contextuel natif (Wails v2) — fenêtre cachée au lieu de quittée (#28)
+- Page de configuration backends WebDAV et MooseFS avec validation et test de connexion (#29)
+- Configuration des points de synchronisation (SyncDir local + RemotePath distant) (#30)
+- Vue état de synchronisation en temps réel avec barres de progression par fichier (#31)
+- `BackendSyncState` : état de sync individuel par backend (statut, progression, fichier courant, erreurs)
+- `BackendManager` : gestionnaire du cycle de vie des backends (Add/Remove/Connect/Disconnect)
+- Hook `useSyncStatus` : écoute temps réel des événements `sync:state-changed`, `sync:progress`, `sync:error`
+- Hook `useBackends` : gestion CRUD backends + polling statut toutes les 10s
+- Utilitaires `formatBytes` et `formatRelative` (formatage taille fichiers et dates relatives)
+- 13 tests vitest, 9 tests Go supplémentaires (internal/config, internal/backends)
+
+### Notes techniques
+- `main.go` placé à la racine du projet (contrainte Wails v2 — co-localisé avec wails.json)
+- API SystemTray absente de Wails v2.12.0 — menu tray implémenté via `options.Menu` + `HideWindowOnClose: true` (icône tray native prévue en v0.3.0)
+- `SyncDir` : champ texte libre (`runtime.OpenDirectoryDialog` absent du runtime JS Wails v2)
+
 ## [0.1.0] - 2026-04-18
 
 ### Added

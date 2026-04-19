@@ -1,12 +1,12 @@
 // GhostDrive — Types TypeScript partagés (Go ↔ Frontend)
-// Source : contracts/typescript-types.ts — ne pas modifier manuellement.
-// Version : 0.1.0
+// Version : 0.2.0
 
 export type FileEventType = 'created' | 'modified' | 'deleted' | 'renamed';
 export type SyncStatus = 'idle' | 'syncing' | 'paused' | 'error';
 export type TransferDirection = 'upload' | 'download';
 export type FileSource = 'local' | 'remote';
 export type BackendType = 'webdav' | 'moosefs';
+export type TrayAction = 'open' | 'settings' | 'pause' | 'sync' | 'quit';
 
 export interface FileInfo {
   name: string;
@@ -25,12 +25,25 @@ export interface FileEvent {
   oldPath?: string;
   timestamp: string;
   source: FileSource;
+  backendId?: string;
 }
 
 export interface SyncError {
+  backendId?: string;
   path: string;
   message: string;
   time: string;
+}
+
+export interface BackendSyncState {
+  backendId: string;
+  backendName: string;
+  status: SyncStatus;
+  progress: number;
+  currentFile: string;
+  pending: number;
+  errors: SyncError[];
+  lastSync: string;
 }
 
 export interface SyncState {
@@ -40,6 +53,8 @@ export interface SyncState {
   pending: number;
   errors: SyncError[];
   lastSync: string;
+  backends: BackendSyncState[];
+  activeTransfers: ProgressEvent[];
 }
 
 export interface BackendConfig {
@@ -49,6 +64,7 @@ export interface BackendConfig {
   enabled: boolean;
   params: Record<string, string>;
   syncDir: string;
+  remotePath: string;
 }
 
 export interface BackendStatus {
@@ -92,6 +108,8 @@ export type WailsEventMap = {
   'placeholder:hydration-started': { path: string; size: number };
   'placeholder:hydration-done': { path: string };
   'app:ready': { version: string; backendsCount: number };
+  'tray:open-settings': undefined;
+  'tray:action': { action: TrayAction };
 };
 
 export type WailsEventName = keyof WailsEventMap;

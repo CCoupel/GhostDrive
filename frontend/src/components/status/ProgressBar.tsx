@@ -1,3 +1,6 @@
+import type { ProgressEvent } from '../../types/ghostdrive';
+import { formatBytes } from '../../utils/formatBytes';
+
 interface ProgressBarProps {
   value: number;
   max?: number;
@@ -34,6 +37,48 @@ export function ProgressBar({
         <div
           className="h-full bg-brand rounded-full transition-all duration-300 ease-out"
           style={{ width: `${percent}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+
+interface TransferProgressBarProps {
+  transfer: ProgressEvent;
+  className?: string;
+}
+
+export function TransferProgressBar({ transfer, className = '' }: TransferProgressBarProps) {
+  const { path, direction, bytesDone, bytesTotal, percent } = transfer;
+  const filename = path.split(/[/\\]/).pop() ?? path;
+  const arrow    = direction === 'upload' ? '↑' : '↓';
+
+  return (
+    <div className={`w-full ${className}`}>
+      <div className="flex justify-between text-xs text-gray-500 mb-1">
+        <span className="truncate">
+          <span className={direction === 'upload' ? 'text-brand' : 'text-status-syncing'}>
+            {arrow}
+          </span>
+          {' '}
+          <span title={path}>{filename}</span>
+        </span>
+        <span className="shrink-0 ml-2 tabular-nums">
+          {formatBytes(bytesDone)} / {formatBytes(bytesTotal)}
+        </span>
+      </div>
+      <div
+        role="progressbar"
+        aria-valuenow={percent}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={`${arrow} ${filename}`}
+        className="h-1.5 w-full rounded-full bg-surface-border overflow-hidden"
+      >
+        <div
+          className="h-full bg-brand rounded-full transition-all duration-300 ease-out"
+          style={{ width: `${Math.min(100, percent)}%` }}
         />
       </div>
     </div>

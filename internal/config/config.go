@@ -24,7 +24,7 @@ type AppConfig struct {
 // DefaultConfig returns a new AppConfig with sensible defaults.
 func DefaultConfig() AppConfig {
 	return AppConfig{
-		Version:        "0.1.0",
+		Version:        "0.2.0",
 		Backends:       []plugins.BackendConfig{},
 		CacheEnabled:   false,
 		CacheDir:       "",

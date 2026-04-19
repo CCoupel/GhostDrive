@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Plus, HardDrive, Sliders } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Plus, HardDrive, Sliders, Database } from 'lucide-react';
 import { BackendConfigCard } from './BackendConfig';
 import { SyncPointForm } from './SyncPointForm';
 import { Modal } from '../ui/Modal';
@@ -7,7 +7,9 @@ import { Button } from '../ui/Button';
 import { ghostdriveApi } from '../../services/wails';
 import { useBackends } from '../../hooks/useBackends';
 import { useSyncStatus } from '../../hooks/useSyncStatus';
-import type { AppConfig, BackendConfig } from '../../types/ghostdrive';
+import type { AppConfig, BackendConfig, CacheStats } from '../../types/ghostdrive';
+
+type Tab = 'backends' | 'prefs' | 'cache';
 
 interface SettingsPageProps {
   appConfig: AppConfig | null;
@@ -15,32 +17,31 @@ interface SettingsPageProps {
 }
 
 export function SettingsPage({ appConfig, onConfigChange }: SettingsPageProps) {
-  const [tab, setTab] = useState<'backends' | 'app'>('backends');
+  const [tab, setTab] = useState<Tab>('backends');
   const [showAddModal, setShowAddModal] = useState(false);
-  const { configs, statuses, removeBackend, reload } = useBackends();
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const { configs, statuses, loading: backendsLoading, removeBackend, reload } = useBackends();
   const { syncState } = useSyncStatus();
 
-  const handleAddSuccess = (config: BackendConfig) => {
+  const handleAddSuccess = (_config: BackendConfig) => {
     reload();
     setShowAddModal(false);
-    void config;
   };
 
   const handleRemove = async (id: string) => {
-    if (!window.confirm('Supprimer ce backend ?')) return;
-    await removeBackend(id);
+    setRemoveError(null);
+    try {
+      await removeBackend(id);
+    } catch (e) {
+      setRemoveError((e as Error).message ?? 'Erreur lors de la suppression.');
+    }
   };
 
-  const handleCacheToggle = async () => {
+  const handleSavePrefs = async (updates: Partial<AppConfig>) => {
     if (!appConfig) return;
-    const next: AppConfig = { ...appConfig, cacheEnabled: !appConfig.cacheEnabled };
+    const next: AppConfig = { ...appConfig, ...updates };
     await ghostdriveApi.saveConfig(next);
     onConfigChange(next);
-  };
-
-  const handleClearCache = async () => {
-    if (!window.confirm('Vider le cache local ?')) return;
-    await ghostdriveApi.clearCache();
   };
 
   return (
@@ -49,26 +50,37 @@ export function SettingsPage({ appConfig, onConfigChange }: SettingsPageProps) {
         <TabButton active={tab === 'backends'} onClick={() => setTab('backends')}>
           <HardDrive size={13} /> Backends
         </TabButton>
-        <TabButton active={tab === 'app'} onClick={() => setTab('app')}>
-          <Sliders size={13} /> Application
+        <TabButton active={tab === 'prefs'} onClick={() => setTab('prefs')}>
+          <Sliders size={13} /> Préférences
+        </TabButton>
+        <TabButton active={tab === 'cache'} onClick={() => setTab('cache')}>
+          <Database size={13} /> Cache
         </TabButton>
       </div>
 
       <div className="flex-1 overflow-y-auto p-3">
         {tab === 'backends' && (
           <div className="flex flex-col gap-2">
-            {configs.length === 0 && (
+            {removeError && (
+              <p role="alert" className="text-xs text-red-500 bg-red-50 rounded px-2 py-1.5">
+                {removeError}
+              </p>
+            )}
+            {backendsLoading && (
+              <p className="text-sm text-gray-400 text-center py-6">Chargement...</p>
+            )}
+            {!backendsLoading && configs.length === 0 && (
               <p className="text-sm text-gray-400 text-center py-6">
                 Aucun backend configuré.<br />Ajoutez-en un pour commencer.
               </p>
             )}
 
-            {configs.map(cfg => (
+            {!backendsLoading && configs.map(cfg => (
               <BackendConfigCard
                 key={cfg.id}
                 config={cfg}
                 status={statuses.find(s => s.backendId === cfg.id)}
-                syncStatus={syncState.status}
+                syncState={syncState.backends.find(b => b.backendId === cfg.id)}
                 onRemove={handleRemove}
               />
             ))}
@@ -83,12 +95,12 @@ export function SettingsPage({ appConfig, onConfigChange }: SettingsPageProps) {
           </div>
         )}
 
-        {tab === 'app' && appConfig && (
-          <AppSettingsPanel
-            config={appConfig}
-            onCacheToggle={handleCacheToggle}
-            onClearCache={handleClearCache}
-          />
+        {tab === 'prefs' && appConfig && (
+          <PrefsPanel config={appConfig} onSave={handleSavePrefs} />
+        )}
+
+        {tab === 'cache' && (
+          <CachePanel />
         )}
       </div>
 
@@ -127,44 +139,81 @@ function TabButton({
   );
 }
 
-interface AppSettingsPanelProps {
-  config: AppConfig;
-  onCacheToggle: () => void;
-  onClearCache: () => void;
+function ToggleRow({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center justify-between py-1 cursor-pointer">
+      <span className="text-sm text-gray-800">{label}</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={e => onChange(e.target.checked)}
+        className="accent-brand w-4 h-4"
+        aria-label={label}
+      />
+    </label>
+  );
 }
 
-function AppSettingsPanel({ config, onCacheToggle, onClearCache }: AppSettingsPanelProps) {
+function PrefsPanel({
+  config,
+  onSave,
+}: {
+  config: AppConfig;
+  onSave: (updates: Partial<AppConfig>) => void;
+}) {
   return (
     <div className="flex flex-col gap-4">
       <section>
-        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Cache local</h3>
-        <div className="flex flex-col gap-2">
-          <label className="flex items-center justify-between py-1.5 cursor-pointer">
-            <span className="text-sm text-gray-800">Activer le cache</span>
-            <input
-              type="checkbox"
-              checked={config.cacheEnabled}
-              onChange={onCacheToggle}
-              className="accent-brand w-4 h-4"
-              aria-label="Activer le cache local"
-            />
-          </label>
-          {config.cacheEnabled && (
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-gray-500">Taille max : {config.cacheSizeMaxMB} Mo</span>
-              <Button size="sm" variant="secondary" onClick={onClearCache}>
-                Vider le cache
-              </Button>
-            </div>
-          )}
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Démarrage</h3>
+        <div className="space-y-1">
+          <ToggleRow
+            label="Démarrer avec Windows"
+            checked={config.autoStart}
+            onChange={v => onSave({ autoStart: v })}
+          />
+          <ToggleRow
+            label="Démarrer minimisé"
+            checked={config.startMinimized}
+            onChange={v => onSave({ startMinimized: v })}
+          />
         </div>
       </section>
 
       <section>
-        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Démarrage</h3>
-        <div className="space-y-2">
-          <ToggleRow label="Démarrer avec Windows" checked={config.autoStart} onChange={() => {}} />
-          <ToggleRow label="Démarrer minimisé" checked={config.startMinimized} onChange={() => {}} />
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Cache local</h3>
+        <div className="space-y-1">
+          <ToggleRow
+            label="Activer le cache"
+            checked={config.cacheEnabled}
+            onChange={v => onSave({ cacheEnabled: v })}
+          />
+          {config.cacheEnabled && (
+            <div className="flex items-center justify-between py-1">
+              <label htmlFor="cache-max" className="text-sm text-gray-800">
+                Taille max (Mo)
+              </label>
+              <input
+                id="cache-max"
+                type="number"
+                min={64}
+                max={102400}
+                step={64}
+                defaultValue={config.cacheSizeMaxMB}
+                onBlur={e => onSave({ cacheSizeMaxMB: Number(e.target.value) })}
+                className="w-24 rounded border border-surface-border px-2 py-1 text-sm text-right
+                  focus:outline-none focus:ring-2 focus:ring-brand"
+                aria-label="Taille maximale du cache en Mo"
+              />
+            </div>
+          )}
         </div>
       </section>
 
@@ -176,17 +225,65 @@ function AppSettingsPanel({ config, onCacheToggle, onClearCache }: AppSettingsPa
   );
 }
 
-function ToggleRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: () => void }) {
+function CachePanel() {
+  const [stats, setStats] = useState<CacheStats | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [clearing, setClearing] = useState(false);
+
+  useEffect(() => {
+    ghostdriveApi.getCacheStats()
+      .then(s => { setStats(s); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const handleClear = async () => {
+    if (!window.confirm('Vider le cache local ? Les fichiers placeholders devront être re-téléchargés.')) return;
+    setClearing(true);
+    try {
+      await ghostdriveApi.clearCache();
+      const s = await ghostdriveApi.getCacheStats();
+      setStats(s);
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  if (loading) {
+    return <p className="text-sm text-gray-400 py-4 text-center">Chargement...</p>;
+  }
+
   return (
-    <label className="flex items-center justify-between py-1 cursor-pointer">
-      <span className="text-sm text-gray-800">{label}</span>
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={onChange}
-        className="accent-brand w-4 h-4"
-        aria-label={label}
-      />
-    </label>
+    <div className="flex flex-col gap-4">
+      <section>
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Statistiques</h3>
+        {stats ? (
+          <dl className="space-y-1">
+            <Row label="Taille utilisée" value={`${stats.sizeMB} Mo`} />
+            <Row label="Fichiers en cache" value={String(stats.fileCount)} />
+            <Row label="Limite configurée" value={`${stats.maxSizeMB} Mo`} />
+          </dl>
+        ) : (
+          <p className="text-sm text-gray-400">Statistiques indisponibles.</p>
+        )}
+      </section>
+
+      <Button
+        variant="secondary"
+        onClick={handleClear}
+        disabled={clearing || !stats || stats.fileCount === 0}
+        className="w-full justify-center"
+      >
+        {clearing ? 'Vidage...' : 'Vider le cache'}
+      </Button>
+    </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between py-0.5">
+      <dt className="text-sm text-gray-600">{label}</dt>
+      <dd className="text-sm font-medium text-gray-900">{value}</dd>
+    </div>
   );
 }
