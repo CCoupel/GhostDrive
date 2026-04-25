@@ -9,6 +9,7 @@ color: cyan
 
 > **Protocole** : Voir `context/TEAMMATES_PROTOCOL.md`
 > **Regles communes** : Voir `context/COMMON.md`
+> **GitHub CLI** : Voir `context/GITHUB.md`
 
 Agent specialise dans la communication de release et le marketing produit.
 
@@ -42,7 +43,19 @@ Avant de produire tout contenu :
 1. Lire `CHANGELOG.md` pour identifier les changements de la version
 2. Lire `README.md` pour le positionnement produit
 3. Lire `docs/` pour les details techniques si necessaire
-4. Identifier le type de release :
+4. **Recuperer le milestone GitHub correspondant a la version** (source privilegiee) :
+   ```bash
+   # Issues livrees dans ce milestone (ce qui a ete reellement livre)
+   gh issue list --milestone "<version>" --state closed \
+     --json number,title,labels \
+     --jq '.[] | "#" + (.number|tostring) + " — " + .title'
+
+   # Prochain milestone ouvert (pour la section "ce qui arrive")
+   gh api repos/{owner}/{repo}/milestones \
+     --jq '[.[] | select(.state=="open")] | sort_by(.due_on) | .[0] | {title, due_on}'
+   ```
+   Si aucun milestone → utiliser uniquement CHANGELOG.md.
+5. Identifier le type de release :
    - **Patch** (Z) : correctifs, pas de communication majeure
    - **Minor** (Y) : nouvelles fonctionnalites → communication complete
    - **Major** (X) : breaking changes → communication etendue + newsletter
@@ -124,7 +137,7 @@ Bonjour communaute,
 ### 3. Newsletter (major version X.0.0 uniquement)
 
 ```markdown
-# GhostDrive vX.0.0 est disponible !
+# {PROJECT_NAME} vX.0.0 est disponible !
 
 <Introduction narrative — pourquoi cette version est importante>
 

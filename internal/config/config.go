@@ -12,13 +12,17 @@ import (
 
 // AppConfig represents the global application configuration (config.json).
 type AppConfig struct {
-	Version        string                `json:"version"`
+	Version        string                  `json:"version"`
 	Backends       []plugins.BackendConfig `json:"backends"`
-	CacheEnabled   bool                  `json:"cacheEnabled"`
-	CacheDir       string                `json:"cacheDir"`
-	CacheSizeMaxMB int                   `json:"cacheSizeMaxMB"`
-	StartMinimized bool                  `json:"startMinimized"`
-	AutoStart      bool                  `json:"autoStart"`
+	CacheEnabled   bool                    `json:"cacheEnabled"`
+	CacheDir       string                  `json:"cacheDir"`
+	CacheSizeMaxMB int                     `json:"cacheSizeMaxMB"`
+	StartMinimized bool                    `json:"startMinimized"`
+	AutoStart      bool                    `json:"autoStart"`
+	// GhostDriveRoot is the root directory under which per-backend sync
+	// folders are created in Auto mode.  Empty means use the platform default
+	// (C:\GhostDrive on Windows, ~/GhostDrive elsewhere).
+	GhostDriveRoot string `json:"ghostDriveRoot,omitempty"`
 }
 
 // DefaultConfig returns a new AppConfig with sensible defaults.

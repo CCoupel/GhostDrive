@@ -9,6 +9,7 @@ color: magenta
 
 > **Protocole** : Voir `context/TEAMMATES_PROTOCOL.md`
 > **Regles communes** : Voir `context/COMMON.md`
+> **GitHub CLI** : Voir `context/GITHUB.md`
 
 Agent specialise dans la validation des Pull Requests externes avant merge.
 

@@ -34,6 +34,9 @@ Initialisation interactive du projet pour configurer l'environnement Claude Code
 [GENERATION] --> project-config.json + agents dev-*
     |
     v
+[PLACEHOLDERS] --> Substituer {VAR} dans commandes et agents deployes
+    |
+    v
 [FINALISATION] --> CLAUDE.md + .gitignore + CI/CD workflow
 ```
 
@@ -68,8 +71,8 @@ puis deploiera les commandes et agents dans `.claude/`.
 | Categorie | Emplacement | Comportement |
 |-----------|-------------|--------------|
 | **TEMPLATE** | `TEMPLATE_claude/` (racine projet) | Fetche depuis GitHub, gitignore, jamais edite manuellement |
-| **COMMANDES** | `.claude/commands/` | Copies depuis `TEMPLATE_claude/commands/`, gitignore (sauf `init-project.md`) |
-| **AGENTS TEMPLATE** | `.claude/agents/*.template.md` + `.claude/agents/context/` | Copies depuis `TEMPLATE_claude/agents/`, gitignore |
+| **COMMANDES** | `.claude/commands/` | Depuis `TEMPLATE_claude/commands/*.md`, copie directe — gitignore (sauf `init-project.md`) |
+| **AGENTS TEMPLATE** | `.claude/agents/*.md` + `.claude/agents/context/` | Depuis `TEMPLATE_claude/agents/*.md`, copie directe — gitignore |
 | **PROJET** | `.claude/CLAUDE.md`, `project-config.json`, `memory/`, `agents/dev-*.md` | Trackes dans git, jamais ecrases |
 
 ---
@@ -134,14 +137,25 @@ gh api repos/$TEMPLATE_REPO/git/trees/$TEMPLATE_BRANCH?recursive=1 \
 
 #### 4. Deployer dans .claude/
 
-```bash
-# Commandes (lues par Claude Code depuis .claude/commands/)
-mkdir -p .claude/commands
-cp -r TEMPLATE_claude/commands/. .claude/commands/
+Les fichiers source sont nommés directement `feature.md`, `cdp.md`, etc.
+La copie est directe — aucun renommage nécessaire.
 
-# Agents template
-mkdir -p .claude/agents
-cp TEMPLATE_claude/agents/*.template.md .claude/agents/ 2>/dev/null || true
+```bash
+mkdir -p .claude/commands .claude/agents
+
+# Commandes : copie directe
+for src in TEMPLATE_claude/commands/*.md; do
+  cp "$src" ".claude/commands/$(basename $src)"
+  echo "  ✓ .claude/commands/$(basename $src)"
+done
+
+# Agents : copie directe
+for src in TEMPLATE_claude/agents/*.md; do
+  cp "$src" ".claude/agents/$(basename $src)"
+  echo "  ✓ .claude/agents/$(basename $src)"
+done
+
+# Contextes partagés
 cp -r TEMPLATE_claude/agents/context .claude/agents/context
 ```
 
@@ -207,7 +221,7 @@ Executer la procedure "Fetch du Template depuis GitHub" ci-dessus.
 ```bash
 git rm --cached -r .claude/commands/ 2>/dev/null || true
 git rm --cached -r .claude/agents/context/ 2>/dev/null || true
-git rm --cached .claude/agents/*.template.md 2>/dev/null || true
+git rm --cached .claude/agents/*.md 2>/dev/null || true
 git rm --cached -r .claude/templates/ 2>/dev/null || true
 git rm --cached .claude/.template-source.json 2>/dev/null || true
 git rm --cached .claude/INITIALIZATION.md 2>/dev/null || true
@@ -530,6 +544,9 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ```json
 {
   "name": "<PROJECT_NAME>",
+  "team_name": "<PROJECT_NAME>-team",
+  "org": "<GITHUB_ORG>",
+  "project": "<REPO_NAME>",
   "description": "<DESCRIPTION>",
   "version": "0.1.0",
   "initialized_at": "<TIMESTAMP>",
@@ -552,9 +569,29 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
   },
   "security": {
     "concerns": ["auth", "api-public"]
+  },
+  "commands": {
+    "build": "<BUILD_CMD>",
+    "test": "<TEST_CMD>",
+    "lint": "<LINT_CMD>",
+    "audit": "<AUDIT_CMD>",
+    "typecheck": "<TYPECHECK_CMD>"
   }
 }
 ```
+
+Valeurs a deriver si elles ne sont pas fournies explicitement :
+
+| Champ | Derivation |
+|-------|-----------|
+| `team_name` | `<PROJECT_NAME>-team` (minuscules, tirets) |
+| `org` | `git remote get-url origin` → extraire l'organisation GitHub |
+| `project` | `git remote get-url origin` → extraire le nom du repo (sans `.git`) |
+| `commands.build` | Stack backend : `go build ./...` / `npm run build` / `python -m build` |
+| `commands.test` | Stack : `go test ./...` / `npm test` / `pytest` |
+| `commands.lint` | Stack : `golangci-lint run` / `npm run lint` / `ruff check .` |
+| `commands.audit` | Stack : `govulncheck ./...` / `npm audit` / `pip-audit` |
+| `commands.typecheck` | Frontend TS : `npm run typecheck` / `tsc --noEmit` — vide sinon |
 
 ### 2. Agents dev-*
 
@@ -590,7 +627,48 @@ et remplacer les placeholders :
 | `{NODE_VERSION}` | `20` |
 | `{MIN_BINARY_SIZE}` | `5242880` |
 
-### 4. Finalisation
+### 4. Application des placeholders dans les commandes et agents deployes
+
+A executer **apres** la creation de `project-config.json`.
+
+Lire les valeurs :
+
+```bash
+PROJECT_NAME=$(jq -r '.name'                         .claude/project-config.json)
+TEAM_NAME=$(jq -r '.team_name'                       .claude/project-config.json)
+ORG=$(jq -r '.org'                                   .claude/project-config.json)
+PROJECT=$(jq -r '.project'                           .claude/project-config.json)
+BUILD_CMD=$(jq -r '.commands.build     // ""'        .claude/project-config.json)
+TEST_CMD=$(jq -r '.commands.test      // ""'         .claude/project-config.json)
+LINT_CMD=$(jq -r '.commands.lint      // ""'         .claude/project-config.json)
+AUDIT_CMD=$(jq -r '.commands.audit    // ""'         .claude/project-config.json)
+TYPECHECK_CMD=$(jq -r '.commands.typecheck // ""'    .claude/project-config.json)
+```
+
+Appliquer la substitution sur les fichiers deployes (commandes + agents generiques) :
+
+```bash
+for f in .claude/commands/*.md .claude/agents/*.md; do
+  name=$(basename "$f")
+  # Ne pas toucher aux fichiers projet
+  [[ "$name" == "init-project.md" ]] && continue
+  [[ "$name" =~ ^dev- ]]             && continue
+  sed -i \
+    -e "s|{PROJECT_NAME}|${PROJECT_NAME}|g" \
+    -e "s|{TEAM_NAME}|${TEAM_NAME}|g"       \
+    -e "s|{ORG}|${ORG}|g"                   \
+    -e "s|{PROJECT}|${PROJECT}|g"            \
+    -e "s|{BUILD_CMD}|${BUILD_CMD}|g"        \
+    -e "s|{TEST_CMD}|${TEST_CMD}|g"          \
+    -e "s|{LINT_CMD}|${LINT_CMD}|g"          \
+    -e "s|{AUDIT_CMD}|${AUDIT_CMD}|g"        \
+    -e "s|{TYPECHECK_CMD}|${TYPECHECK_CMD}|g" \
+    "$f"
+  echo "  ✓ placeholders appliques dans $name"
+done
+```
+
+### 5. Finalisation
 
 ```bash
 # CLAUDE.md depuis le template
@@ -647,27 +725,154 @@ d) Synchroniser le template depuis GitHub
 e) Annuler
 ```
 
-### Option d : Synchronisation
+### Option d : Synchronisation avec diff et nettoyage
 
-Afficher le rapport avant action :
+#### Etape d1 — Fetcher le nouveau template depuis GitHub
+
+Executer la procedure "Fetch du Template depuis GitHub" pour mettre a jour `TEMPLATE_claude/`.
+
+#### Etape d1b — Migration : renommer les fichiers legacy *.template.md
+
+Avant tout calcul, renommer tous les fichiers `*.template.md` residuels
+dans `.claude/commands/` et `.claude/agents/` (deployes avant la v2.4.0).
+
+```bash
+for f in .claude/commands/*.template.md .claude/agents/*.template.md; do
+  [[ -f "$f" ]] || continue
+  mv "$f" "${f/.template.md/.md}"
+  echo "  ✓ migration : $(basename $f) → $(basename ${f/.template.md/.md})"
+done
+```
+
+#### Etape d2 — Calculer les noms deployes attendus
+
+```bash
+# Noms attendus pour les commandes (strip .template)
+EXPECTED_COMMANDS=$(for f in TEMPLATE_claude/commands/*.md; do
+  basename "$f" .md
+done)
+
+# Noms attendus pour les agents, hors dev-*
+EXPECTED_AGENTS=$(for f in TEMPLATE_claude/agents/*.md; do
+  basename "$f" .md
+done)
+```
+
+#### Etape d3 — Comparer avec les fichiers deployes
+
+```bash
+# Commandes actuellement deployees (hors init-project.md)
+DEPLOYED_COMMANDS=$(ls .claude/commands/*.md 2>/dev/null \
+  | xargs -I{} basename {} .md \
+  | grep -v "^init-project$")
+
+# Agents deployes (hors dev-* qui sont des fichiers projet)
+DEPLOYED_AGENTS=$(ls .claude/agents/*.md 2>/dev/null \
+  | xargs -I{} basename {} .md \
+  | grep -v "^dev-")
+```
+
+Pour chaque fichier compare, determiner le statut :
+
+| Statut | Critere |
+|--------|---------|
+| `NOUVEAU` | Present dans EXPECTED, absent de DEPLOYED |
+| `MODIFIE` | Present dans les deux, contenu different |
+| `INCHANGE` | Present dans les deux, contenu identique |
+| `RELIQUAT` | Present dans DEPLOYED, absent de EXPECTED |
+
+#### Etape d4 — Presenter le rapport
 
 ```
 Synchronisation depuis github.com/<repo>
 
   Commit actuel  : abc1234  (synced: 2026-03-01)
-  Dernier commit : def5678  (2026-04-16) ← mise a jour disponible
+  Dernier commit : def5678  (2026-04-16)
 
-  NOUVEAUX : 1 fichier
-  MODIFIES : 2 fichiers
-  INCHANGES : 18 fichiers
+  Commandes :
+  [+] feature          ← nouveau
+  [~] bugfix           ← modifie
+  [=] backlog          ← inchange (x12...)
+  [!] old-command      ← RELIQUAT (absent du nouveau template)
 
-  [A] Tout appliquer   [B] Nouveaux uniquement   [C] Annuler
+  Agents :
+  [~] cdp              ← modifie
+  [=] code-reviewer    ← inchange (x7...)
+  [!] old-agent        ← RELIQUAT (absent du nouveau template)
+
+  Nouveaux   : N
+  Modifies   : N
+  Inchanges  : N
+  Reliquats  : N  ← a supprimer
+
+Actions :
+  [A] Tout appliquer (nouveaux + modifies) et supprimer les reliquats
+  [B] Appliquer uniquement les nouveaux et modifies (garder les reliquats)
+  [C] Annuler
 ```
 
-Apres application, re-deployer dans `.claude/` :
+#### Etape d5 — Appliquer selon le choix
+
+**Option A ou B — Deployer les fichiers nouveaux et modifies :**
 
 ```bash
-cp -r TEMPLATE_claude/commands/. .claude/commands/
-cp TEMPLATE_claude/agents/*.template.md .claude/agents/
+for src in TEMPLATE_claude/commands/*.md; do
+  dest=".claude/commands/$(basename $src)"
+  if ! cmp -s "$src" "$dest" 2>/dev/null; then
+    cp "$src" "$dest"
+    echo "  ✓ $(basename $src) mis a jour"
+  fi
+done
+
+for src in TEMPLATE_claude/agents/*.md; do
+  dest=".claude/agents/$(basename $src)"
+  if ! cmp -s "$src" "$dest" 2>/dev/null; then
+    cp "$src" "$dest"
+    echo "  ✓ agents/$(basename $src) mis a jour"
+  fi
+done
+
 cp -r TEMPLATE_claude/agents/context .claude/agents/context
+```
+
+**Etape systematique — Appliquer les placeholders sur TOUS les fichiers deployes :**
+
+Scanner l'integralite de `.claude/commands/` et `.claude/agents/` et appliquer
+la procedure "Application des placeholders" (section 4 ci-dessus) sur tous les fichiers,
+en lisant les valeurs depuis `.claude/project-config.json` existant.
+
+**Option A uniquement — Supprimer les reliquats :**
+
+```bash
+# Supprimer les commandes reliquats
+for name in $DEPLOYED_COMMANDS; do
+  if ! echo "$EXPECTED_COMMANDS" | grep -q "^${name}$"; then
+    rm ".claude/commands/${name}.md"
+    echo "  ✗ .claude/commands/${name}.md supprime (reliquat)"
+  fi
+done
+
+# Supprimer les agents reliquats
+for name in $DEPLOYED_AGENTS; do
+  if ! echo "$EXPECTED_AGENTS" | grep -q "^${name}$"; then
+    rm ".claude/agents/${name}.md"
+    echo "  ✗ .claude/agents/${name}.md supprime (reliquat)"
+  fi
+done
+```
+
+#### Etape d6 — Rapport final
+
+```
+Synchronisation terminee.
+
+  Commandes mises a jour : N
+  Agents mis a jour      : N
+  Reliquats supprimes    : N
+
+  Fichiers PROJET preserves (non touches) :
+    ✓ .claude/CLAUDE.md
+    ✓ .claude/project-config.json
+    ✓ .claude/memory/
+    ✓ .claude/agents/dev-*.md
 ```

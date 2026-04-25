@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — TBD
+
+### Added
+
+- Stabilisation interface `StorageBackend` — sentinelles partagées (`ErrNotConnected`, `ErrFileNotFound`) et Godoc complets sur tous les types et méthodes (#45)
+- Template de plugin vierge (`plugins/template/template.go`) implémentant l'interface `StorageBackend` — base pour les nouveaux backends (#45)
+- Guide complet d'implémentation de plugin (`docs/plugin-development.md`) — architecture, interface, conventions, tests, checklist PR (#45)
+- Support du backend type `"local"` (v0.4.0) — paramètre `rootPath` documenté dans `contracts/backend-config.md` (#45, implémenté dans #47)
+- `plugins/local` : nouveau backend LOCAL — synchronisation vers répertoire local ou monté (NAS, disque réseau) (#47)
+- `plugins/registry` : registre dynamique de plugins (`Register`, `Get`, `ListBackends`) — remplace le switch hardcodé (#50)
+- `internal/backends/manager` : délégation vers le registry pour `InstantiateBackend` et `AvailableTypes` (#50)
+- Binding Wails `GetAvailableBackendTypes()` désormais alimenté dynamiquement par le registry (#50)
+- `BackendConfig` enrichi : champ `LocalPath string` — point de synchronisation local configurable (#51)
+- `AppConfig` enrichi : champ `GhostDriveRoot string` — racine GhostDrive configurable (défaut `C:\GhostDrive\`) (#51)
+- Binding Wails `GetGhostDriveRoot()` — expose la racine au frontend (#51)
+- `AddBackend()` mode Auto — `LocalPath` calculé automatiquement si vide (`<racine>\<nom>`) (#51)
+- `SyncPointForm` restructuré en 2 zones Local/Remote — champ Nom avec preview temps réel, radio Auto/Manuel (#51)
+- Champ `AutoSync bool` dans `BackendConfig` — contrôle le démarrage automatique de la synchronisation (default: false, opt-in) (#53)
+- Bindings Wails `SetBackendEnabled(id, enabled)` et `SetAutoSync(id, autoSync)` — activation/désactivation persistée (#53)
+- Boutons toggle Enabled (`Power`/`PowerOff`) et AutoSync (`RefreshCw`) sur chaque BackendConfigCard (#53)
+- Indicateur 3 états sur les cards (gris: désactivé, vert: connecté, rouge: erreur) (#53)
+- Badges "Désactivé" et "Manuel" sur les cards backend (#53)
+- Navigation simplifiée — 2 vues uniquement : "Configuration" et "À propos" (#53)
+- Page "À propos" avec version, préférences (autoStart, startMinimized) et gestion du cache (#53)
+
+### Changed
+
+- Navigation restructurée en 3 onglets — "Backends" (liste des backends + ajout), "Configuration" (démarrage + cache), "À propos" (version + vérification mises à jour)
+- Page "À propos" avec vérification des mises à jour via GitHub Releases API
+
+### Fixed
+
+- Sécurité : protection contre le path traversal dans `plugins/local` — `absPath()` vérifie le containment avec `strings.HasPrefix` + `filepath.Clean` (#47)
+- Race condition : capture atomique de `connected` + `rootPath` sous un seul `RLock` dans `plugins/local` (#47)
+- `plugins/local` : erreurs fsnotify dans `Watch` désormais loggées au lieu d'être silencieusement ignorées (#47)
+- Path traversal via `Name=".."` bloqué dans `validateBackendConfig` + containment check dans `AddBackend` (#51)
+- `os.MkdirAll` déplacé après `validateBackendConfig` — plus de répertoires orphelins sur erreur (#51)
+- `os.Stat(SyncDir)` tolère `ErrNotExist` en mode Auto — régression corrigée (#51)
+- Boucle de rendu infinie dans `SyncPointForm` lors de la saisie d'un nom dupliqué — freeze complet de l'application (menus React + systray) résolu par guards anti-boucle et stabilisation des dépendances useEffect
+- `useMemo` sur `existingNames` dans `SettingsPage` pour éviter les re-renders en cascade
+- `useCallback` sur `onOpenSettings` dans `App.tsx` pour stabiliser l'écouteur Wails
+- Libération de `e.mu` avant `Emit("sync:error")` dans `engine.go` — élimination d'un deadlock potentiel
+- Initialisation des slices nil à `[]` dans les payloads Emit du sync engine — empêche la sérialisation JSON `null` qui causait un crash React au lancement de la synchronisation
+- Normalisation défensive des payloads `sync:state-changed` dans `useSyncStatus` (`errors ?? []`, `backends ?? []`, `activeTransfers ?? []`)
+- Ajout d'un `ErrorBoundary` global dans `main.tsx` — affiche un message d'erreur récupérable au lieu d'un écran vide en cas d'exception React non catchée
+- `SetBackendEnabled` — `config.Save` déplacé après le succès de `manager.Add` (prévention incohérence disque/mémoire sur échec de reconnexion) (#53)
+- Gestion d'erreur ajoutée sur les toggles Enabled/AutoSync — feedback inline `role="alert"` au lieu d'absorption silencieuse (#53)
+- Suppression de la barre de menu Windows native de la fenêtre Wails (`buildTrayMenu` retiré de `main.go`)
+- Systray simplifié — "Ouvrir GhostDrive" et "Quitter" uniquement (suppression des items Synchroniser / Pause / Paramètres)
+
+### Tests
+
+- 34 tests unitaires pour `plugins/local` — coverage 78.1% (#48)
+- 7 tests pour `plugins/registry` — coverage 100% (#50)
+- 14 tests unitaires pour `validateBackendConfig` et `AddBackend` auto-mode (`internal/app/app_test.go`) (#51)
+
+---
+
 ## [0.3.0] - 2026-04-19
 
 ### Added

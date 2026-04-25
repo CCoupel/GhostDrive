@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -73,11 +74,17 @@ func (a *App) Startup(ctx context.Context) {
 	a.manager = backends.NewBackendManager(a)
 	a.mu.Unlock()
 
-	// Reconnect saved backends
+	// Reconnect saved backends and auto-start sync where configured.
 	for _, bc := range cfg.Backends {
 		if bc.Enabled {
 			if err := a.manager.Add(bc); err != nil {
 				a.emitError(fmt.Sprintf("app: reconnect backend %s: %v", bc.Name, err))
+				continue
+			}
+			if bc.AutoSync {
+				if err := a.StartSync(bc.ID); err != nil {
+					a.emitError(fmt.Sprintf("app: auto-start sync %s: %v", bc.Name, err))
+				}
 			}
 		}
 	}
@@ -132,9 +139,43 @@ func (a *App) GetAvailableBackendTypes() []string {
 // ─── Backends ────────────────────────────────────────────────────────────────
 
 // AddBackend validates, saves and connects a new backend.
+// If bc.LocalPath is empty (Auto mode), a sub-directory is created under
+// GetGhostDriveRoot() using the backend Name.
 func (a *App) AddBackend(bc plugins.BackendConfig) (plugins.BackendConfig, error) {
-	if err := validateBackendConfig(bc); err != nil {
+	// ── Auto LocalPath ────────────────────────────────────────────────────
+	if bc.LocalPath == "" {
+		ghostDriveRoot := a.GetGhostDriveRoot()
+		localPath := filepath.Clean(filepath.Join(ghostDriveRoot, bc.Name))
+		root := filepath.Clean(ghostDriveRoot)
+		// Fix B — containment check: block path traversal via Name (e.g. "..")
+		if !strings.HasPrefix(localPath, root+string(os.PathSeparator)) {
+			return bc, fmt.Errorf("sync-point invalide : %q s'échappe de GhostDriveRoot", bc.Name)
+		}
+		bc.LocalPath = localPath
+	}
+	// Keep SyncDir in sync with LocalPath (SyncDir is what the engine uses).
+	if bc.SyncDir == "" {
+		bc.SyncDir = bc.LocalPath
+	}
+
+	// ── Validate BEFORE MkdirAll — avoid orphan directories on error ──────
+	warning, err := a.validateBackendConfig(bc)
+	if err != nil {
 		return bc, fmt.Errorf("validation: %w", err)
+	}
+	bc.Warning = warning
+
+	// Create the local sync directory only after validation passes.
+	if err := os.MkdirAll(bc.SyncDir, 0755); err != nil {
+		return bc, fmt.Errorf("creation dossier local: %w", err)
+	}
+
+	// Assign the definitive ID before calling manager.Add so the returned
+	// BackendConfig (and the persisted config) carry the same ID.
+	// manager.Add also generates an ID on its local copy, but that copy is
+	// not returned to the caller, leaving bc.ID == "" without this guard.
+	if bc.ID == "" {
+		bc.ID = backends.GenerateID()
 	}
 
 	if err := a.manager.Add(bc); err != nil {
@@ -154,13 +195,124 @@ func (a *App) AddBackend(bc plugins.BackendConfig) (plugins.BackendConfig, error
 	return bc, nil
 }
 
+// SetBackendEnabled enables or disables a backend by ID.
+// Disabling stops any running sync engine and disconnects the backend.
+// Enabling reconnects the backend and auto-starts sync when AutoSync=true.
+func (a *App) SetBackendEnabled(id string, enabled bool) error {
+	a.mu.Lock()
+	idx := -1
+	for i, bc := range a.cfg.Backends {
+		if bc.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		a.mu.Unlock()
+		return fmt.Errorf("not found: %s", id)
+	}
+	a.cfg.Backends[idx].Enabled = enabled
+	bc := a.cfg.Backends[idx]
+	path := a.cfgPath
+	a.mu.Unlock()
+
+	if !enabled {
+		// Disable path: persist first (state is definitive), then side-effects.
+		a.mu.RLock()
+		cfg := a.cfg
+		a.mu.RUnlock()
+		if err := config.Save(cfg, path); err != nil {
+			return err
+		}
+		_ = a.StopSync(id)
+		_ = a.manager.Remove(id)
+	} else {
+		// Enable path: connect first — only persist on success to avoid disk/memory
+		// divergence if manager.Add fails.
+		if err := a.manager.Add(bc); err != nil {
+			// Rollback in-memory flag (disk was never written).
+			a.mu.Lock()
+			if idx2 := indexByID(a.cfg.Backends, id); idx2 >= 0 {
+				a.cfg.Backends[idx2].Enabled = false
+			}
+			a.mu.Unlock()
+			return fmt.Errorf("reconnect: %w", err)
+		}
+		a.mu.RLock()
+		cfg := a.cfg
+		a.mu.RUnlock()
+		if err := config.Save(cfg, path); err != nil {
+			return err
+		}
+		if bc.AutoSync {
+			_ = a.StartSync(id)
+		}
+	}
+
+	b, _ := a.manager.Get(id)
+	connected := b != nil && b.IsConnected()
+	a.emit("backend:status-changed", types.BackendStatus{BackendID: id, Connected: connected})
+	return nil
+}
+
+// SetAutoSync enables or disables automatic sync for a backend.
+// autoSync=false stops any running engine; autoSync=true starts the engine
+// immediately if the backend is connected.
+func (a *App) SetAutoSync(id string, autoSync bool) error {
+	a.mu.Lock()
+	idx := -1
+	for i, bc := range a.cfg.Backends {
+		if bc.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		a.mu.Unlock()
+		return fmt.Errorf("not found: %s", id)
+	}
+	a.cfg.Backends[idx].AutoSync = autoSync
+	cfg := a.cfg
+	path := a.cfgPath
+	a.mu.Unlock()
+
+	if err := config.Save(cfg, path); err != nil {
+		return err
+	}
+
+	if !autoSync {
+		_ = a.StopSync(id)
+	} else {
+		if b, ok := a.manager.Get(id); ok && b.IsConnected() {
+			_ = a.StartSync(id)
+		}
+	}
+
+	a.emitSyncState()
+	return nil
+}
+
+// indexByID returns the index of the BackendConfig with the given ID, or -1.
+func indexByID(bcs []plugins.BackendConfig, id string) int {
+	for i, bc := range bcs {
+		if bc.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
 // RemoveBackend stops sync and removes the backend with the given ID.
 func (a *App) RemoveBackend(backendID string) error {
 	// Stop sync if running
 	_ = a.StopSync(backendID)
 
 	if err := a.manager.Remove(backendID); err != nil {
-		return err
+		// Ignore "not found" — the backend may not be in memory (never connected,
+		// or after a restart) but must still be removed from the persisted config.
+		if !strings.Contains(err.Error(), "not found") {
+			return err
+		}
 	}
 
 	// Remove from config
@@ -193,9 +345,9 @@ func (a *App) TestBackendConnection(bc plugins.BackendConfig) (types.BackendStat
 	}
 	defer b.Disconnect()
 
-	info, err := b.Stat(context.Background(), "/")
-	if err == nil && info != nil {
-		status.TotalSpace = info.Size
+	if free, total, err := b.GetQuota(context.Background()); err == nil {
+		status.FreeSpace = free
+		status.TotalSpace = total
 	}
 	status.Connected = true
 	return status, nil
@@ -245,6 +397,21 @@ func (a *App) OpenSyncFolder(backendID string) error {
 	return openFolder(bc.SyncDir)
 }
 
+// SelectDirectory ouvre un dialog natif de sélection de dossier.
+// Retourne le chemin sélectionné, ou "" si l'utilisateur annule ou en cas d'erreur.
+func (a *App) SelectDirectory() string {
+	if a.ctx == nil {
+		return ""
+	}
+	dir, err := wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title: "Sélectionner le répertoire de synchronisation",
+	})
+	if err != nil {
+		return ""
+	}
+	return dir
+}
+
 // ─── Sync ─────────────────────────────────────────────────────────────────────
 
 // GetSyncState returns the aggregated sync state across all backends.
@@ -271,6 +438,7 @@ func (a *App) GetSyncState() types.SyncState {
 			CurrentFile: s.CurrentFile,
 			Pending:     s.Pending,
 			LastSync:    s.LastSync,
+			Errors:      []types.BackendSyncError{}, // never nil → never "null" in JSON
 		})
 	}
 
@@ -287,6 +455,7 @@ func (a *App) GetSyncState() types.SyncState {
 	return types.SyncState{
 		Status:          global,
 		Progress:        progress,
+		Errors:          []types.SyncErrorInfo{},    // never nil → never "null" in JSON
 		Backends:        backendStates,
 		ActiveTransfers: []types.ProgressEvent{},
 	}
@@ -422,46 +591,143 @@ func aggregateStatus(states []types.BackendSyncState) types.SyncStatus {
 	return types.SyncIdle
 }
 
-// validateBackendConfig checks required fields.
-func validateBackendConfig(bc plugins.BackendConfig) error {
+// GetGhostDriveRoot returns the configurable root directory under which
+// GhostDrive creates per-backend sync folders in Auto mode.
+// Default: C:\GhostDrive\ on Windows, ~/GhostDrive on other platforms.
+// Persistent preference configuration is out of scope for v0.4.0.
+func (a *App) GetGhostDriveRoot() string {
+	a.mu.RLock()
+	root := a.cfg.GhostDriveRoot
+	a.mu.RUnlock()
+	if root != "" {
+		return root
+	}
+	// Platform-specific default.
+	if runtime.GOOS == "windows" {
+		return `C:\GhostDrive`
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "GhostDrive")
+	}
+	return filepath.Join(home, "GhostDrive")
+}
+
+// windowsInvalidNameChars are the characters forbidden in Windows folder names.
+const windowsInvalidNameChars = `\/:*?"<>|`
+
+// validateBackendConfig checks required fields and cross-backend uniqueness
+// rules.  It returns a (possibly empty) non-blocking warning message alongside
+// any blocking error.
+//
+// Blocking rules:
+//  1. Name: non-empty, ≤64 chars, no Windows-invalid chars, unique
+//     case-insensitively among existing backends.
+//  2. LocalPath: unique among existing backends (no two backends may share
+//     the same local sync folder).
+//
+// Non-blocking rule:
+//  3. rootPath (local plugin): if another backend already uses the same
+//     remote source, a warning is returned but no error.
+func (a *App) validateBackendConfig(bc plugins.BackendConfig) (warning string, err error) {
+	// ── Name ─────────────────────────────────────────────────────────────
 	if bc.Name == "" || len(bc.Name) > 64 {
-		return fmt.Errorf("name requis, max 64 chars")
+		return "", fmt.Errorf("name requis, max 64 chars")
 	}
-	if bc.Type != "webdav" && bc.Type != "moosefs" {
-		return fmt.Errorf("type invalide: %q", bc.Type)
+	// Fix A — block "." and ".." explicitly (not caught by windowsInvalidNameChars
+	// but would escape GhostDriveRoot in auto-mode path construction).
+	if bc.Name == "." || bc.Name == ".." {
+		return "", fmt.Errorf("nom invalide : %q", bc.Name)
 	}
+	if strings.ContainsAny(bc.Name, windowsInvalidNameChars) {
+		return "", fmt.Errorf("nom invalide (caractères interdits : %s)", windowsInvalidNameChars)
+	}
+
+	// ── Type ─────────────────────────────────────────────────────────────
+	if _, err := plugins.Get(bc.Type); err != nil {
+		return "", fmt.Errorf("type invalide: %q", bc.Type)
+	}
+
+	// ── SyncDir ──────────────────────────────────────────────────────────
 	if !filepath.IsAbs(bc.SyncDir) {
-		return fmt.Errorf("syncDir doit être un chemin absolu")
+		return "", fmt.Errorf("syncDir doit être un chemin absolu")
 	}
-	if _, err := os.Stat(bc.SyncDir); err != nil {
-		return fmt.Errorf("syncDir inaccessible: %w", err)
+	// Tolerate ErrNotExist: in auto-mode the directory does not yet exist when
+	// validateBackendConfig runs; MkdirAll creates it immediately after.
+	if _, err := os.Stat(bc.SyncDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("syncDir inaccessible: %w", err)
 	}
+
+	// ── RemotePath ───────────────────────────────────────────────────────
 	if len(bc.RemotePath) == 0 || bc.RemotePath[0] != '/' {
-		return fmt.Errorf("remotePath doit commencer par /")
+		return "", fmt.Errorf("remotePath doit commencer par /")
 	}
 	if strings.Contains(filepath.ToSlash(filepath.Clean(bc.RemotePath)), "..") {
-		return fmt.Errorf("remotePath ne doit pas contenir de segments ..")
+		return "", fmt.Errorf("remotePath ne doit pas contenir de segments ..")
 	}
+
+	// ── Plugin-specific params ────────────────────────────────────────────
 	switch bc.Type {
 	case "webdav":
 		if bc.Params["url"] == "" {
-			return fmt.Errorf("url requis pour WebDAV")
+			return "", fmt.Errorf("url requis pour WebDAV")
 		}
 		if bc.Params["username"] == "" {
-			return fmt.Errorf("username requis pour WebDAV")
+			return "", fmt.Errorf("username requis pour WebDAV")
 		}
 		if bc.Params["password"] == "" {
-			return fmt.Errorf("password requis pour WebDAV")
+			return "", fmt.Errorf("password requis pour WebDAV")
 		}
 	case "moosefs":
 		if bc.Params["master"] == "" {
-			return fmt.Errorf("master requis pour MooseFS")
+			return "", fmt.Errorf("master requis pour MooseFS")
 		}
 		if bc.Params["mountPath"] == "" {
-			return fmt.Errorf("mountPath requis pour MooseFS")
+			return "", fmt.Errorf("mountPath requis pour MooseFS")
+		}
+	case "local":
+		if bc.Params["rootPath"] == "" {
+			return "", fmt.Errorf("rootPath requis pour Local")
 		}
 	}
-	return nil
+
+	// ── Cross-backend uniqueness checks ───────────────────────────────────
+	a.mu.RLock()
+	existing := make([]plugins.BackendConfig, len(a.cfg.Backends))
+	copy(existing, a.cfg.Backends)
+	a.mu.RUnlock()
+
+	nameLower := strings.ToLower(bc.Name)
+	localPathClean := filepath.Clean(bc.LocalPath)
+
+	for _, ex := range existing {
+		// Skip self when editing (same ID).
+		if ex.ID != "" && ex.ID == bc.ID {
+			continue
+		}
+
+		// Rule 1 — name uniqueness (case-insensitive, blocking).
+		if strings.ToLower(ex.Name) == nameLower {
+			return "", fmt.Errorf("un backend avec ce nom existe déjà : %q", ex.Name)
+		}
+
+		// Rule 2 — LocalPath uniqueness (blocking).
+		if bc.LocalPath != "" && filepath.Clean(ex.LocalPath) == localPathClean {
+			return "", fmt.Errorf("ce dossier local est déjà utilisé par le backend %q", ex.Name)
+		}
+
+		// Rule 3 — rootPath duplicate (non-blocking warning).
+		// Minor 2: use filepath.Clean before comparison (normalises trailing slashes).
+		// Minor 3: break after first match so the warning is not overwritten.
+		if bc.Type == "local" && ex.Type == "local" &&
+			bc.Params["rootPath"] != "" &&
+			filepath.Clean(ex.Params["rootPath"]) == filepath.Clean(bc.Params["rootPath"]) {
+			warning = fmt.Sprintf("ce dossier source est déjà utilisé par le backend %q", ex.Name)
+			break
+		}
+	}
+
+	return warning, nil
 }
 
 // openFolder opens a directory in the OS file manager.

@@ -16,6 +16,16 @@ const INITIAL_STATE: SyncState = {
 const MAX_ERRORS = 50;
 const MAX_EVENTS = 100;
 
+/** Normalize a raw SyncState from Go — nil slices serialize as JSON null. */
+function normalizeSyncState(state: SyncState): SyncState {
+  return {
+    ...state,
+    errors:          state.errors          ?? [],
+    backends:        state.backends        ?? [],
+    activeTransfers: state.activeTransfers ?? [],
+  };
+}
+
 export function useSyncStatus() {
   const [syncState, setSyncState] = useState<SyncState>(INITIAL_STATE);
   const [activeTransfers, setActiveTransfers] = useState<Map<string, ProgressEvent>>(new Map());
@@ -27,13 +37,19 @@ export function useSyncStatus() {
     let mounted = true;
 
     ghostdriveApi.getSyncState()
-      .then(state => { if (mounted) { setSyncState(state); setLoading(false); } })
+      .then(state => {
+        if (mounted) {
+          setSyncState(normalizeSyncState(state));
+          setLoading(false);
+        }
+      })
       .catch(() => { if (mounted) setLoading(false); });
 
     const unsubState = onEvent('sync:state-changed', (state) => {
       if (!mounted) return;
-      setSyncState(state);
-      if (state.status === 'idle') {
+      const normalized = normalizeSyncState(state);
+      setSyncState(normalized);
+      if (normalized.status === 'idle') {
         setActiveTransfers(new Map());
       }
     });

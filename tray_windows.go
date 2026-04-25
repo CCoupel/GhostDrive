@@ -40,11 +40,6 @@ func onSystrayReady(ghostApp *app.App) {
 
 	mOpen := systray.AddMenuItem("Ouvrir GhostDrive", "")
 	systray.AddSeparator()
-	mSync := systray.AddMenuItem("Synchroniser maintenant", "")
-	mPause := systray.AddMenuItem("Pause / Reprendre", "")
-	systray.AddSeparator()
-	mSettings := systray.AddMenuItem("Paramètres", "")
-	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quitter", "")
 
 	// State watcher: update icon + tooltip every 3s
@@ -67,36 +62,6 @@ func onSystrayReady(ghostApp *app.App) {
 			if ctx := ghostApp.Context(); ctx != nil {
 				wailsruntime.WindowShow(ctx)
 			}
-
-		case <-mSync.ClickedCh:
-			cfg := ghostApp.GetConfig()
-			for _, bc := range cfg.Backends {
-				if bc.Enabled {
-					_ = ghostApp.ForceSync(bc.ID)
-				}
-			}
-			ghostApp.Emit("tray:action", map[string]any{"action": "sync"})
-
-		case <-mPause.ClickedCh:
-			state := ghostApp.GetSyncState()
-			cfg := ghostApp.GetConfig()
-			for _, bc := range cfg.Backends {
-				if bc.Enabled {
-					if state.Status == types.SyncPaused {
-						_ = ghostApp.StartSync(bc.ID)
-					} else {
-						_ = ghostApp.PauseSync(bc.ID)
-					}
-				}
-			}
-			ghostApp.Emit("tray:action", map[string]any{"action": "pause"})
-
-		case <-mSettings.ClickedCh:
-			if ctx := ghostApp.Context(); ctx != nil {
-				wailsruntime.WindowShow(ctx)
-			}
-			ghostApp.Emit("tray:open-settings", nil)
-			ghostApp.Emit("tray:action", map[string]any{"action": "settings"})
 
 		case <-mQuit.ClickedCh:
 			systray.Quit()

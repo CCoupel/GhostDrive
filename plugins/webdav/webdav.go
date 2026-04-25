@@ -410,6 +410,13 @@ func (b *Backend) Watch(ctx context.Context, remotePath string) (<-chan plugins.
 	return ch, nil
 }
 
+// ─── Quota ────────────────────────────────────────────────────────────────────
+
+// GetQuota is not supported by the WebDAV backend; returns (-1, -1, nil).
+func (b *Backend) GetQuota(_ context.Context) (int64, int64, error) {
+	return -1, -1, nil
+}
+
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 func (b *Backend) remoteURL(remotePath string) string {

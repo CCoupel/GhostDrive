@@ -34,6 +34,7 @@ func (m *mockBackend) CreateDir(_ context.Context, _ string) error              
 func (m *mockBackend) Watch(_ context.Context, _ string) (<-chan plugins.FileEvent, error) {
 	return make(chan plugins.FileEvent), nil
 }
+func (m *mockBackend) GetQuota(_ context.Context) (int64, int64, error) { return -1, -1, nil }
 
 // mockBackendFactory temporarily overrides InstantiateBackend for tests.
 func withMockFactory(t *testing.T) func() {
@@ -154,18 +155,49 @@ func TestInstantiateBackendUnknownType(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown type")
 }
 
-func TestInstantiateBackendWebDAV(t *testing.T) {
-	bc := plugins.BackendConfig{Type: "webdav"}
+// TestInstantiateBackendLocal verifies that the "local" plugin is available via
+// the registry (plugins/local registers itself in its init()).
+func TestInstantiateBackendLocal(t *testing.T) {
+	bc := plugins.BackendConfig{Type: "local"}
 	b, err := InstantiateBackend(bc)
 	require.NoError(t, err)
 	assert.NotNil(t, b)
+	assert.Equal(t, "local", b.Name())
 }
 
-func TestInstantiateBackendMooseFS(t *testing.T) {
-	bc := plugins.BackendConfig{Type: "moosefs"}
-	b, err := InstantiateBackend(bc)
-	require.NoError(t, err)
-	assert.NotNil(t, b)
+// TestAvailableTypes verifies that AvailableTypes returns at least the "local"
+// backend (the only one registered at this milestone).
+func TestAvailableTypes(t *testing.T) {
+	types := AvailableTypes()
+	assert.Contains(t, types, "local")
+}
+
+// TestAvailableTypes_NameConsistency verifies that, for every type returned by
+// AvailableTypes(), the registry key matches the value returned by Name() on a
+// freshly instantiated backend.  This catches mismatches between the key passed
+// to plugins.Register() and the Name() implementation.
+func TestAvailableTypes_NameConsistency(t *testing.T) {
+	for _, typeName := range AvailableTypes() {
+		t.Run(typeName, func(t *testing.T) {
+			b, err := InstantiateBackend(plugins.BackendConfig{Type: typeName})
+			require.NoError(t, err, "type %q must be instantiable", typeName)
+			assert.Equal(t, typeName, b.Name(),
+				"registry key %q must match backend.Name()", typeName)
+		})
+	}
+}
+
+// TestGetAvailableBackendTypes_NoDelegationBreak verifies the full delegation
+// chain: GetAvailableBackendTypes (Wails binding) → AvailableTypes (manager)
+// → ListBackends (registry).  The list must not be empty and must not be
+// produced by a hardcoded fallback.
+func TestGetAvailableBackendTypes_NoDelegationBreak(t *testing.T) {
+	// AvailableTypes() is the Go equivalent of the Wails GetAvailableBackendTypes().
+	types := AvailableTypes()
+	assert.NotEmpty(t, types, "at least one plugin must be registered")
+	// Verify the list comes from the live registry, not a hardcoded fallback.
+	assert.Equal(t, types, plugins.ListBackends(),
+		"AvailableTypes() must equal plugins.ListBackends() exactly")
 }
 
 func TestGenerateID(t *testing.T) {

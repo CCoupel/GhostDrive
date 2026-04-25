@@ -99,6 +99,50 @@ type StorageBackend interface {
 - Template et documentation dans `docs/plugin-development.md`
 - Tests unitaires obligatoires avec mock ou serveur in-memory
 
+### États de synchronisation et Icônes
+
+Definis dans `contracts/sync-icons.md`. Deux niveaux :
+
+**États fichier** (10 états) : `synced`, `pending_upload`, `pending_download`, `uploading`, `downloading`, `conflict`, `error`, `placeholder` (v1.2.0), `excluded`, `offline`
+
+**Icônes UI GhostDrive** : librairie Lucide React uniquement — couleurs standardisees (vert #22c55e, bleu #3b82f6, ambre #f59e0b, rouge #ef4444, gris #94a3b8)
+
+**Icônes Explorateur Windows** (v1.2.0) : Cloud Filter API overlay icons — voir `contracts/sync-icons.md` section 3
+
+**Priorite d'agregation dossier** : `error > conflict > uploading|downloading > pending_* > synced > placeholder > excluded`
+
+### Concept Backend + Point de Sync
+
+La configuration d'un backend implique **deux notions distinctes** :
+
+| Notion | Definition | Exemple |
+|--------|-----------|---------|
+| **Backend** | Source des donnees (ou vivent les fichiers) | Dossier local, serveur WebDAV, MooseFS |
+| **Point de sync** | Destination locale (ou apparaissent les fichiers sur le PC) | `C:\GhostDrive\MonNAS\` |
+
+Le formulaire de configuration d'un backend est divise en **2 zones distinctes** :
+
+**Zone 1 — Local (Point de sync)**
+Ou GhostDrive cree la copie synchronisee sur le PC de l'utilisateur (et dans `GhD:`).
+- Nom du backend : unique, insensible a la casse, chars Windows valides (pas `\ / : * ? " < > |`)
+- Mode Auto : sous-dossier `<RacineGhostDrive>\<nom-backend>\` (ex: `C:\GhostDrive\MonNAS\`)
+- Mode Manuel : chemin libre via bouton "Parcourir" (SelectDirectory)
+- Racine GhostDrive configurable dans les preferences globales (defaut : `C:\GhostDrive\`)
+- Stocke dans `BackendConfig.LocalPath` + `BackendConfig.Name`
+
+**Zone 2 — Remote (Configuration plugin)**
+La source des donnees — varie selon le plugin :
+- `local` : `rootPath` (dossier source, bouton Parcourir)
+- `webdav` : URL + credentials
+- `moosefs` : adresse master + port + chemin
+
+> Distinction cle : pour le plugin LOCAL, Zone 1 = destination sur le PC, Zone 2 = source a synchroniser. Les deux sont des chemins locaux mais ont des roles opposes.
+
+**Regles de validation (`validateBackendConfig`) :**
+1. **Nom unique** (insensible a la casse, chars Windows valides) — erreur bloquante
+2. **LocalPath unique** parmi tous les backends — erreur bloquante (evite melange fichiers dans `GhD:`)
+3. **rootPath Remote identique** a un backend existant — warning non bloquant (cas valide : meme source, destinations differentes)
+
 ---
 
 ## Configuration Projet

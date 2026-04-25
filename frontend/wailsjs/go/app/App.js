@@ -6,8 +6,16 @@ export function AddBackend(arg1) {
   return window['go']['app']['App']['AddBackend'](arg1);
 }
 
+export function ClearCache() {
+  return window['go']['app']['App']['ClearCache']();
+}
+
 export function Context() {
   return window['go']['app']['App']['Context']();
+}
+
+export function DownloadFile(arg1, arg2) {
+  return window['go']['app']['App']['DownloadFile'](arg1, arg2);
 }
 
 export function Emit(arg1, arg2) {
@@ -18,12 +26,24 @@ export function ForceSync(arg1) {
   return window['go']['app']['App']['ForceSync'](arg1);
 }
 
+export function GetAvailableBackendTypes() {
+  return window['go']['app']['App']['GetAvailableBackendTypes']();
+}
+
 export function GetBackendStatuses() {
   return window['go']['app']['App']['GetBackendStatuses']();
 }
 
+export function GetCacheStats() {
+  return window['go']['app']['App']['GetCacheStats']();
+}
+
 export function GetConfig() {
   return window['go']['app']['App']['GetConfig']();
+}
+
+export function GetGhostDriveRoot() {
+  return window['go']['app']['App']['GetGhostDriveRoot']();
 }
 
 export function GetSyncState() {
@@ -32,6 +52,10 @@ export function GetSyncState() {
 
 export function GetVersion() {
   return window['go']['app']['App']['GetVersion']();
+}
+
+export function ListFiles(arg1, arg2) {
+  return window['go']['app']['App']['ListFiles'](arg1, arg2);
 }
 
 export function OpenSyncFolder(arg1) {
@@ -52,6 +76,18 @@ export function RemoveBackend(arg1) {
 
 export function SaveConfig(arg1) {
   return window['go']['app']['App']['SaveConfig'](arg1);
+}
+
+export function SelectDirectory() {
+  return window['go']['app']['App']['SelectDirectory']();
+}
+
+export function SetAutoSync(arg1, arg2) {
+  return window['go']['app']['App']['SetAutoSync'](arg1, arg2);
+}
+
+export function SetBackendEnabled(arg1, arg2) {
+  return window['go']['app']['App']['SetBackendEnabled'](arg1, arg2);
 }
 
 export function StartSync(arg1) {

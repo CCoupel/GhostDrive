@@ -8,6 +8,7 @@ export namespace config {
 	    cacheSizeMaxMB: number;
 	    startMinimized: boolean;
 	    autoStart: boolean;
+	    ghostDriveRoot?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppConfig(source);
@@ -22,6 +23,7 @@ export namespace config {
 	        this.cacheSizeMaxMB = source["cacheSizeMaxMB"];
 	        this.startMinimized = source["startMinimized"];
 	        this.autoStart = source["autoStart"];
+	        this.ghostDriveRoot = source["ghostDriveRoot"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -52,9 +54,12 @@ export namespace plugins {
 	    name: string;
 	    type: string;
 	    enabled: boolean;
+	    autoSync: boolean;
 	    params: Record<string, string>;
 	    syncDir: string;
 	    remotePath: string;
+	    localPath: string;
+	    warning?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new BackendConfig(source);
@@ -66,10 +71,58 @@ export namespace plugins {
 	        this.name = source["name"];
 	        this.type = source["type"];
 	        this.enabled = source["enabled"];
+	        this.autoSync = source["autoSync"];
 	        this.params = source["params"];
 	        this.syncDir = source["syncDir"];
 	        this.remotePath = source["remotePath"];
+	        this.localPath = source["localPath"];
+	        this.warning = source["warning"];
 	    }
+	}
+	export class FileInfo {
+	    name: string;
+	    path: string;
+	    size: number;
+	    isDir: boolean;
+	    // Go type: time
+	    modTime: any;
+	    etag: string;
+	    isPlaceholder: boolean;
+	    isCached: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new FileInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.path = source["path"];
+	        this.size = source["size"];
+	        this.isDir = source["isDir"];
+	        this.modTime = this.convertValues(source["modTime"], null);
+	        this.etag = source["etag"];
+	        this.isPlaceholder = source["isPlaceholder"];
+	        this.isCached = source["isCached"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }
@@ -177,6 +230,22 @@ export namespace types {
 		    }
 		    return a;
 		}
+	}
+	export class CacheStats {
+	    sizeMB: number;
+	    fileCount: number;
+	    maxSizeMB: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new CacheStats(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sizeMB = source["sizeMB"];
+	        this.fileCount = source["fileCount"];
+	        this.maxSizeMB = source["maxSizeMB"];
+	    }
 	}
 	export class ProgressEvent {
 	    path: string;

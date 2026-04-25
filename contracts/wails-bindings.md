@@ -197,6 +197,21 @@ Frontend  : window.go.App.ClearCache()
 
 ## Système
 
+### GetAvailableBackendTypes
+
+```
+Signature : GetAvailableBackendTypes() []string
+Frontend  : window.go.App.GetAvailableBackendTypes()
+Retour    : []string — noms triés des plugins compilés (ex: ["local", "webdav"])
+Erreur    : –
+```
+
+Retourne la liste des types de backends disponibles dans le binaire courant.
+Utilisé par le frontend pour alimenter le sélecteur "Type" du formulaire d'ajout de backend.
+La liste est dynamique : tout plugin qui appelle `plugins.Register` dans son `init()` apparaît ici.
+
+---
+
 ### GetBackendStatuses
 
 ```
@@ -204,6 +219,39 @@ Signature : GetBackendStatuses() []BackendStatus
 Frontend  : window.go.App.GetBackendStatuses()
 Retour    : []BackendStatus
 ```
+
+---
+
+### SetBackendEnabled
+
+```
+Signature : SetBackendEnabled(id string, enabled bool) error
+Frontend  : window.go.App.SetBackendEnabled(id, enabled)
+Retour    : null en cas de succès
+Erreur    : "not found: <id>"
+```
+
+Comportement :
+- `enabled=false` : StopSync(id) → manager.Remove(id) → cfg.Backends[i].Enabled=false → Save
+- `enabled=true`  : cfg.Backends[i].Enabled=true → Save → manager.Add(bc)
+                    → si `AutoSync=true` : StartSync(id)
+- Émet `backend:status-changed`
+
+---
+
+### SetAutoSync
+
+```
+Signature : SetAutoSync(id string, autoSync bool) error
+Frontend  : window.go.App.SetAutoSync(id, autoSync)
+Retour    : null en cas de succès
+Erreur    : "not found: <id>"
+```
+
+Comportement :
+- `autoSync=false` : cfg.Backends[i].AutoSync=false → Save → StopSync(id) si engine actif
+- `autoSync=true`  : cfg.Backends[i].AutoSync=true → Save → StartSync(id) si backend connecté
+- Émet `sync:state-changed`
 
 ---
 

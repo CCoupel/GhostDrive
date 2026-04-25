@@ -58,6 +58,12 @@ export const ghostdriveApi = {
   getAvailableBackendTypes: (): Promise<string[]> =>
     (App as any).GetAvailableBackendTypes() as Promise<string[]>,
 
+  setBackendEnabled: (backendId: string, enabled: boolean): Promise<void> =>
+    App.SetBackendEnabled(backendId, enabled),
+
+  setAutoSync: (backendId: string, autoSync: boolean): Promise<void> =>
+    App.SetAutoSync(backendId, autoSync),
+
   getVersion: (): Promise<string> => App.GetVersion(),
   quit: (): Promise<void> => App.Quit(),
 };

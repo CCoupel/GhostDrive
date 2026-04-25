@@ -48,8 +48,10 @@ func NewEngine(
 		cfg:        cfg,
 		emitter:    emitter,
 		state: types.SyncState{
-			Status: types.SyncIdle,
-			Errors: []types.SyncErrorInfo{},
+			Status:          types.SyncIdle,
+			Errors:          []types.SyncErrorInfo{},
+			Backends:        []types.BackendSyncState{},
+			ActiveTransfers: []types.ProgressEvent{},
 		},
 	}
 }
@@ -120,10 +122,23 @@ func (e *Engine) ForceSync(ctx context.Context) error {
 }
 
 // GetState returns the current sync state (safe for concurrent access).
+// Nil slices are replaced with empty slices so JSON serialisation always
+// produces "[]" rather than "null", preventing frontend .map() crashes.
 func (e *Engine) GetState() types.SyncState {
 	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.state
+	s := e.state
+	e.mu.RUnlock()
+
+	if s.Errors == nil {
+		s.Errors = []types.SyncErrorInfo{}
+	}
+	if s.Backends == nil {
+		s.Backends = []types.BackendSyncState{}
+	}
+	if s.ActiveTransfers == nil {
+		s.ActiveTransfers = []types.ProgressEvent{}
+	}
+	return s
 }
 
 // ─── Internal ────────────────────────────────────────────────────────────────
@@ -297,14 +312,18 @@ func (e *Engine) isPaused() bool {
 }
 
 func (e *Engine) recordError(path, message string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	// Build and record the error under lock, then emit without holding the lock.
+	// Holding the lock during Emit() risks deadlock: if the Wails event buffer
+	// is full the Emit blocks, and any concurrent GetState() call (e.g. from the
+	// systray icon-update goroutine) would then also block waiting for the lock.
 	syncErr := types.SyncErrorInfo{
 		Path:    path,
 		Message: message,
 		Time:    time.Now(),
 	}
+	e.mu.Lock()
 	e.state.Errors = append(e.state.Errors, syncErr)
 	e.state.Status = types.SyncError
+	e.mu.Unlock()
 	e.emitter.Emit("sync:error", syncErr)
 }

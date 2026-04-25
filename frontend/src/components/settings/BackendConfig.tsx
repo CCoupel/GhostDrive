@@ -1,5 +1,8 @@
 import { useState } from 'react';
-import { Wifi, WifiOff, Trash2, FolderOpen, RefreshCw, Play, Pause, Square } from 'lucide-react';
+import {
+  Trash2, FolderOpen, RefreshCw, Play, Pause, Square,
+  AlertTriangle, Power, PowerOff,
+} from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Modal } from '../ui/Modal';
 import { ghostdriveApi } from '../../services/wails';
@@ -11,17 +14,29 @@ interface BackendConfigCardProps {
   status?: BackendStatus;
   syncState?: BackendSyncState;
   onRemove: (id: string) => void;
+  onToggleEnabled: (id: string, enabled: boolean) => Promise<void>;
+  onToggleAutoSync: (id: string, autoSync: boolean) => Promise<void>;
 }
 
-
-export function BackendConfigCard({ config, status, syncState, onRemove }: BackendConfigCardProps) {
+export function BackendConfigCard({
+  config, status, syncState, onRemove, onToggleEnabled, onToggleAutoSync,
+}: BackendConfigCardProps) {
   const [busy, setBusy] = useState(false);
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  const [toggleError, setToggleError] = useState<string | null>(null);
 
-  const isConnected = status?.connected ?? false;
+  const isEnabled   = config.enabled;
+  const isConnected = isEnabled && (status?.connected ?? false);
   const syncStatus  = syncState?.status ?? 'idle';
   const isSyncing   = syncStatus === 'syncing';
   const isPaused    = syncStatus === 'paused';
+
+  // 3-state status dot: grey = disabled, green = connected, red = error
+  const dotClass = !isEnabled
+    ? 'status-dot bg-gray-300'
+    : isConnected
+    ? 'status-dot status-dot-idle'
+    : 'status-dot status-dot-error';
 
   const handleSyncToggle = async () => {
     setBusy(true);
@@ -45,7 +60,31 @@ export function BackendConfigCard({ config, status, syncState, onRemove }: Backe
     finally { setBusy(false); }
   };
 
-  const handleConfirmRemove = async () => {
+  const handleToggleEnabled = async () => {
+    setBusy(true);
+    setToggleError(null);
+    try {
+      await onToggleEnabled(config.id, !config.enabled);
+    } catch (e) {
+      setToggleError(e instanceof Error ? e.message : 'Erreur activation backend');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleToggleAutoSync = async () => {
+    setBusy(true);
+    setToggleError(null);
+    try {
+      await onToggleAutoSync(config.id, !config.autoSync);
+    } catch (e) {
+      setToggleError(e instanceof Error ? e.message : 'Erreur modification sync auto');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConfirmRemove = () => {
     setShowConfirmDelete(false);
     onRemove(config.id);
   };
@@ -55,16 +94,33 @@ export function BackendConfigCard({ config, status, syncState, onRemove }: Backe
 
   return (
     <>
-      <div className="border border-surface-border rounded-lg p-3 bg-white">
+      <div className={`border border-surface-border rounded-lg p-3 bg-white${!isEnabled ? ' opacity-70' : ''}`}>
         <div className="flex items-start justify-between gap-2">
+          {/* ── Left: info ─────────────────────────────────── */}
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className={`status-dot ${isConnected ? 'status-dot-idle' : 'status-dot-error'}`} />
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={dotClass} />
               <h3 className="font-medium text-gray-900 truncate">{config.name}</h3>
               <span className="text-xs px-1.5 py-0.5 rounded bg-surface-secondary text-gray-500 uppercase">
                 {config.type}
               </span>
-              {syncStatus !== 'idle' && (
+
+              {/* Disabled badge */}
+              {!isEnabled && (
+                <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-400 font-medium">
+                  Désactivé
+                </span>
+              )}
+
+              {/* Manual badge (enabled but autoSync off and not actively syncing) */}
+              {isEnabled && !config.autoSync && syncStatus === 'idle' && (
+                <span className="text-xs px-1.5 py-0.5 rounded bg-gray-50 text-gray-400">
+                  Manuel
+                </span>
+              )}
+
+              {/* Sync status badge */}
+              {isEnabled && syncStatus !== 'idle' && (
                 <span className={`text-xs px-1.5 py-0.5 rounded font-medium
                   ${syncStatus === 'syncing' ? 'bg-blue-50 text-status-syncing' : ''}
                   ${syncStatus === 'paused'  ? 'bg-yellow-50 text-status-paused' : ''}
@@ -78,15 +134,21 @@ export function BackendConfigCard({ config, status, syncState, onRemove }: Backe
             <div className="mt-1 space-y-0.5">
               <p className="text-xs text-gray-400 truncate">
                 <span className="font-medium text-gray-500">Local :</span>{' '}
-                {config.syncDir || '—'}
+                {(config.localPath ?? '') || config.syncDir || '—'}
               </p>
               <p className="text-xs text-gray-400 truncate">
                 <span className="font-medium text-gray-500">Distant :</span>{' '}
                 {config.remotePath || '—'}
               </p>
               <p className="text-xs text-gray-400 truncate">
-                {config.params.url ?? config.params.mountPath ?? ''}
+                {config.params?.url ?? config.params?.mountPath ?? ''}
               </p>
+              {(config.warning ?? '') && (
+                <p className="flex items-center gap-1 text-xs text-amber-600 truncate" title={config.warning}>
+                  <AlertTriangle size={11} className="shrink-0" />
+                  {config.warning}
+                </p>
+              )}
             </div>
 
             {status && isConnected && (
@@ -94,7 +156,7 @@ export function BackendConfigCard({ config, status, syncState, onRemove }: Backe
                 Libre : {formatSpace(status.freeSpace)} / Total : {formatSpace(status.totalSpace)}
               </p>
             )}
-            {status?.error && (
+            {status?.error && isEnabled && (
               <p className="text-xs text-red-500 mt-0.5 truncate" title={status.error}>
                 {status.error}
               </p>
@@ -112,14 +174,41 @@ export function BackendConfigCard({ config, status, syncState, onRemove }: Backe
             )}
           </div>
 
-          <div className="flex items-center gap-1 shrink-0">
-            {isConnected
-              ? <Wifi size={15} className="text-status-idle" />
-              : <WifiOff size={15} className="text-status-error" />
-            }
+          {/* ── Right: toggle buttons ───────────────────────── */}
+          <div className="flex items-center gap-0.5 shrink-0">
+            {/* AutoSync toggle */}
+            <button
+              onClick={handleToggleAutoSync}
+              disabled={busy || !isEnabled}
+              title={config.autoSync ? 'Désactiver sync auto' : 'Activer sync auto'}
+              aria-label={config.autoSync ? 'Désactiver sync auto' : 'Activer sync auto'}
+              className={`p-1 rounded transition-colors hover:bg-surface-secondary
+                disabled:opacity-40 disabled:cursor-not-allowed
+                ${config.autoSync && isEnabled ? 'text-brand' : 'text-gray-300'}`}
+            >
+              <RefreshCw size={14} />
+            </button>
+
+            {/* Enable/Disable toggle */}
+            <button
+              onClick={handleToggleEnabled}
+              disabled={busy}
+              title={isEnabled ? 'Désactiver ce backend' : 'Activer ce backend'}
+              aria-label={isEnabled ? 'Désactiver ce backend' : 'Activer ce backend'}
+              className={`p-1 rounded transition-colors hover:bg-surface-secondary
+                disabled:opacity-40 disabled:cursor-not-allowed
+                ${isEnabled ? 'text-status-idle' : 'text-gray-300'}`}
+            >
+              {isEnabled ? <Power size={14} /> : <PowerOff size={14} />}
+            </button>
           </div>
         </div>
 
+        {toggleError && (
+          <p className="text-xs text-red-500 mt-1" role="alert">{toggleError}</p>
+        )}
+
+        {/* ── Action buttons ─────────────────────────────────── */}
         <div className="flex flex-wrap gap-1.5 mt-2.5">
           <Button size="sm" variant="ghost" onClick={() => ghostdriveApi.openSyncFolder(config.id)}>
             <FolderOpen size={12} /> Ouvrir

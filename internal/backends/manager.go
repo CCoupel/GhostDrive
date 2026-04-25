@@ -1,6 +1,7 @@
 package backends
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -9,8 +10,7 @@ import (
 	"github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/CCoupel/GhostDrive/plugins"
-	"github.com/CCoupel/GhostDrive/plugins/moosefs"
-	"github.com/CCoupel/GhostDrive/plugins/webdav"
+	_ "github.com/CCoupel/GhostDrive/plugins/local" // registers "local" backend via init()
 )
 
 // BackendManager manages the lifecycle of storage backends.
@@ -109,37 +109,60 @@ func (m *BackendManager) List() []string {
 	return ids
 }
 
-// ListStatuses returns connection status for all registered backends.
+// ListStatuses returns connection status for all registered backends,
+// including disk quota when the backend supports it.
+// GetQuota is called outside the lock to avoid deadlocks with plugins
+// that acquire internal mutexes during quota calls.
 func (m *BackendManager) ListStatuses() []types.BackendStatus {
+	type entry struct {
+		id string
+		b  plugins.StorageBackend
+	}
+
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	statuses := make([]types.BackendStatus, 0, len(m.backends))
+	entries := make([]entry, 0, len(m.backends))
 	for id, b := range m.backends {
-		status := types.BackendStatus{
-			BackendID: id,
-			Connected: b.IsConnected(),
+		entries = append(entries, entry{id, b})
+	}
+	m.mu.RUnlock()
+
+	statuses := make([]types.BackendStatus, 0, len(entries))
+	for _, e := range entries {
+		s := types.BackendStatus{BackendID: e.id, Connected: e.b.IsConnected()}
+		if e.b.IsConnected() {
+			if free, total, err := e.b.GetQuota(context.Background()); err == nil {
+				s.FreeSpace = free
+				s.TotalSpace = total
+			}
 		}
-		statuses = append(statuses, status)
+		statuses = append(statuses, s)
 	}
 	return statuses
 }
 
-// AvailableTypes returns the compiled-in plugin type identifiers.
+// AvailableTypes returns the names of all registered plugin backends, sorted
+// alphabetically.  The list grows automatically as plugins register themselves
+// via their init() functions.
 func AvailableTypes() []string {
-	return []string{"webdav", "moosefs"}
+	return plugins.ListBackends()
 }
 
-// InstantiateBackend creates a StorageBackend from a BackendConfig without connecting.
+// InstantiateBackend creates a new StorageBackend instance from a BackendConfig
+// without connecting.  The type must have been registered via plugins.Register
+// (each plugin package does this in its init()).
 func InstantiateBackend(bc plugins.BackendConfig) (plugins.StorageBackend, error) {
-	switch bc.Type {
-	case "webdav":
-		return webdav.New(), nil
-	case "moosefs":
-		return moosefs.New(), nil
-	default:
+	b, err := plugins.Get(bc.Type)
+	if err != nil {
 		return nil, fmt.Errorf("backends: unknown type %q", bc.Type)
 	}
+	return b, nil
 }
+
+// GenerateID creates a random 16-byte hex identifier.
+// Exported so callers (e.g. app.AddBackend) can assign the ID before
+// passing BackendConfig to manager.Add, ensuring the returned config
+// carries the definitive ID.
+func GenerateID() string { return generateID() }
 
 // generateID creates a random 16-byte hex identifier.
 func generateID() string {

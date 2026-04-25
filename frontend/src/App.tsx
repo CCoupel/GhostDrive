@@ -1,14 +1,15 @@
-import { useState, useEffect } from 'react';
-import { SyncStatusPanel } from './components/status/SyncStatus';
+import { useState, useEffect, useCallback } from 'react';
 import { TrayMenu } from './components/tray/TrayMenu';
 import { SettingsPage } from './components/settings/SettingsPage';
+import { ConfigPage } from './pages/ConfigPage';
+import { AboutPage } from './pages/AboutPage';
 import { useSyncStatus } from './hooks/useSyncStatus';
 import { useBackends } from './hooks/useBackends';
 import { ghostdriveApi } from './services/wails';
 import type { AppConfig } from './types/ghostdrive';
 
 const DEFAULT_CONFIG: AppConfig = {
-  version: '0.2.0',
+  version: '0.4.0',
   backends: [],
   cacheEnabled: false,
   cacheDir: '',
@@ -17,14 +18,18 @@ const DEFAULT_CONFIG: AppConfig = {
   autoStart: false,
 };
 
-type View = 'status' | 'settings';
+type View = 'backends' | 'configuration' | 'about';
 
 export function App() {
-  const [view, setView] = useState<View>('status');
+  const [view, setView] = useState<View>('backends');
   const [appConfig, setAppConfig] = useState<AppConfig>(DEFAULT_CONFIG);
 
-  const { syncState, activeTransfers, errors, recentEvents } = useSyncStatus();
+  const { syncState } = useSyncStatus();
   const { configs } = useBackends();
+
+  // Stable reference — TrayStatus registers the 'tray:open-settings' Wails
+  // event listener; keep the callback stable to avoid re-registering on every render.
+  const handleOpenSettings = useCallback(() => setView('backends'), []);
 
   useEffect(() => {
     ghostdriveApi.getConfig()
@@ -37,30 +42,28 @@ export function App() {
       <TrayMenu
         syncState={syncState}
         backends={configs}
-        onOpenSettings={() => setView('settings')}
+        onOpenSettings={handleOpenSettings}
       />
 
       <nav className="flex border-b border-surface-border bg-white shrink-0">
-        <NavTab active={view === 'status'} onClick={() => setView('status')}>
-          État
+        <NavTab active={view === 'backends'} onClick={() => setView('backends')}>
+          Backends
         </NavTab>
-        <NavTab active={view === 'settings'} onClick={() => setView('settings')}>
-          Paramètres
+        <NavTab active={view === 'configuration'} onClick={() => setView('configuration')}>
+          Configuration
+        </NavTab>
+        <NavTab active={view === 'about'} onClick={() => setView('about')}>
+          À propos
         </NavTab>
       </nav>
 
       <main className="flex-1 overflow-hidden">
-        {view === 'settings' ? (
-          <SettingsPage appConfig={appConfig} onConfigChange={setAppConfig} />
+        {view === 'configuration' ? (
+          <ConfigPage appConfig={appConfig} onConfigChange={setAppConfig} />
+        ) : view === 'about' ? (
+          <AboutPage appConfig={appConfig} />
         ) : (
-          <div className="h-full overflow-y-auto">
-            <SyncStatusPanel
-              syncState={syncState}
-              activeTransfers={activeTransfers}
-              errors={errors}
-              recentEvents={recentEvents}
-            />
-          </div>
+          <SettingsPage />
         )}
       </main>
     </div>

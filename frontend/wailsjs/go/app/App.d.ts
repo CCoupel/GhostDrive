@@ -7,19 +7,31 @@ import {config} from '../models';
 
 export function AddBackend(arg1:plugins.BackendConfig):Promise<plugins.BackendConfig>;
 
+export function ClearCache():Promise<void>;
+
 export function Context():Promise<context.Context>;
+
+export function DownloadFile(arg1:string,arg2:string):Promise<void>;
 
 export function Emit(arg1:string,arg2:any):Promise<void>;
 
 export function ForceSync(arg1:string):Promise<void>;
 
+export function GetAvailableBackendTypes():Promise<Array<string>>;
+
 export function GetBackendStatuses():Promise<Array<types.BackendStatus>>;
 
+export function GetCacheStats():Promise<types.CacheStats>;
+
 export function GetConfig():Promise<config.AppConfig>;
+
+export function GetGhostDriveRoot():Promise<string>;
 
 export function GetSyncState():Promise<types.SyncState>;
 
 export function GetVersion():Promise<string>;
+
+export function ListFiles(arg1:string,arg2:string):Promise<Array<plugins.FileInfo>>;
 
 export function OpenSyncFolder(arg1:string):Promise<void>;
 
@@ -30,6 +42,12 @@ export function Quit():Promise<void>;
 export function RemoveBackend(arg1:string):Promise<void>;
 
 export function SaveConfig(arg1:config.AppConfig):Promise<void>;
+
+export function SelectDirectory():Promise<string>;
+
+export function SetAutoSync(arg1:string,arg2:boolean):Promise<void>;
+
+export function SetBackendEnabled(arg1:string,arg2:boolean):Promise<void>;
 
 export function StartSync(arg1:string):Promise<void>;
 

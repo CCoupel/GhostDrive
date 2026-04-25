@@ -1,7 +1,7 @@
 ---
 name: doc-updater
 description: "Agent de mise a jour de la documentation. Maintient CHANGELOG.md, README.md, docs techniques et versioning apres chaque feature, bugfix ou release. Appele par le CDP apres la phase QA."
-model: sonnet
+model: haiku
 color: cyan
 ---
 

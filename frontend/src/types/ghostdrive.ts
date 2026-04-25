@@ -5,7 +5,7 @@ export type FileEventType = 'created' | 'modified' | 'deleted' | 'renamed';
 export type SyncStatus = 'idle' | 'syncing' | 'paused' | 'error';
 export type TransferDirection = 'upload' | 'download';
 export type FileSource = 'local' | 'remote';
-export type BackendType = 'webdav' | 'moosefs';
+export type BackendType = 'webdav' | 'moosefs' | 'local';
 export type TrayAction = 'open' | 'settings' | 'pause' | 'sync' | 'quit';
 
 export interface FileInfo {
@@ -62,9 +62,15 @@ export interface BackendConfig {
   name: string;
   type: BackendType;
   enabled: boolean;
+  /** Si true, la sync démarre automatiquement à la connexion du backend (défaut: false) */
+  autoSync: boolean;
   params: Record<string, string>;
   syncDir: string;
   remotePath: string;
+  /** Chemin local sur le PC (vide = Auto, le backend calcule). Ajouté v0.4.0 #51 */
+  localPath: string;
+  /** Avertissement non bloquant retourné par le backend (ex. rootPath déjà utilisé) */
+  warning?: string;
 }
 
 export interface BackendStatus {

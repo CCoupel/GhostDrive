@@ -2,6 +2,7 @@
 
 > **Usage** : Ce fichier est la source de verite pour demarrer une nouvelle session.
 > Mis a jour par `/end-session`.
+> **IMPORTANT** : Pour l'etat du backlog (issues, milestone, assignees), la source de verite est **GitHub** — toujours interroger l'API au demarrage, ne pas se fier a ce fichier pour les issues.
 
 ---
 
@@ -11,8 +12,8 @@
 |-----------|--------|
 | Nom | `GhostDrive` |
 | Repository | `https://github.com/CCoupel/GhostDrive` |
-| Version actuelle | `0.1.0` |
-| Derniere mise a jour | `2026-04-18` |
+| Version actuelle | `0.3.0` |
+| Derniere mise a jour | `2026-04-23` |
 
 ---
 
@@ -21,7 +22,7 @@
 | Environnement | Version | Date deploy |
 |---------------|---------|-------------|
 | Production (GitHub Release) | `0.1.0` | `2026-04-18` |
-| En developpement | `0.2.0` | — |
+| En developpement | `0.4.0` | — |
 
 ---
 
@@ -29,25 +30,11 @@
 
 ### Phase Actuelle
 
-**Phase** : IDLE — v0.1.0 livre, pret pour v0.2.0
-**Branche** : `main` (feat/sync-engine-v0.1.0 mergee et close)
-**Description** : Milestone v0.1.0 complete — moteur de sync Go livré en prod
+**Phase** : DEV — v0.4.0 plugin LOCAL en cours
+**Branche** : `feat/v0.4.0-plugin-local`
+**Description** : Interface StorageBackend + template + docs livres (#45 ferme) — reste implementation LOCAL, tests et registry
 
-### Issues GitHub Actives (v0.2.0)
-
-| # | Titre | Labels |
-|---|-------|--------|
-| #28 | Icône systray + menu contextuel (Wails) | frontend |
-| #29 | Page configuration backend (WebDAV / MooseFS) | frontend |
-| #30 | Page configuration points de synchronisation | frontend |
-| #31 | Vue état synchronisation en temps réel | frontend |
-| #46 | ci: upgrade softprops/action-gh-release (Node.js 24) | infra |
-
-### Prochaines Etapes
-
-1. Creer branche `feat/ui-v0.2.0`
-2. Implémenter systray + pages config (issues #28-#31)
-3. Corriger `softprops/action-gh-release@v1` → v2 (#46)
+> **Backlog** : interroger GitHub au demarrage (`gh issue list` + `gh api milestones`) — ne pas se fier a ce fichier pour les issues ouvertes.
 
 ---
 
@@ -66,11 +53,14 @@
 
 | Fichier | Role |
 |---------|------|
-| `config.json` | Config runtime (version patchée par CI au tag) |
-| `frontend/package.json` | Version frontend (patchée par CI au tag) |
+| `config.json` | Config runtime (version patchee par CI au tag) |
+| `frontend/package.json` | Version frontend (patchee par CI au tag) |
 | `CHANGELOG.md` | Historique — source des release notes GitHub |
-| `.github/workflows/ci.yml` | CI légère push/PR |
+| `.github/workflows/ci.yml` | CI legere push/PR |
 | `.github/workflows/build.yml` | Pipeline complet sur tag v* |
+| `plugins/plugin.go` | Interface StorageBackend + sentinelles d'erreur |
+| `plugins/template.go` | Template plugin commenté |
+| `docs/plugin-development.md` | Guide developpeur plugin |
 
 ---
 
@@ -78,28 +68,30 @@
 
 | Decision | Raison | Date |
 |----------|--------|------|
-| Tag = source de vérité version | config.json + package.json patchés par CI au build | 2026-04-18 |
-| workflow_call : ci.yml réutilisé dans build.yml | Pas de duplication de la définition des tests | 2026-04-18 |
+| GitHub = source de verite backlog | MEMORY.md devient stale entre sessions — toujours lire l'API GitHub au demarrage | 2026-04-23 |
+| Tag = source de verite version | config.json + package.json patches par CI au build | 2026-04-18 |
+| workflow_call : ci.yml reutilise dans build.yml | Pas de duplication de la definition des tests | 2026-04-18 |
 | first-event-wins dans watcher debounce | create+write sur Linux/WSL2 reportait "modified" au lieu de "created" | 2026-04-18 |
-| Plugins = interfaces Go compilées (pas .dll/gRPC) | Pragmatique pour projet solo | 2026-04-15 |
-| Frontend Wails (pas systray manuel) | Meilleure DX, installer Windows intégré | 2026-04-15 |
-| Tests backends : serveurs in-memory | Pas d'infra réelle requise en CI | 2026-04-15 |
+| Plugins = interfaces Go compilees (pas .dll/gRPC) | Pragmatique pour projet solo | 2026-04-15 |
+| Frontend Wails (pas systray manuel) | Meilleure DX, installer Windows integre | 2026-04-15 |
+| Tests backends : serveurs in-memory | Pas d'infra reelle requise en CI | 2026-04-15 |
 
 ---
 
 ## Regles Critiques du Projet
 
-- Contract-first : créer les contrats dans `contracts/` AVANT le code
+- **GitHub est la source de verite pour le backlog** : interroger `gh issue list` + `gh api milestones` au demarrage
+- Contract-first : creer les contrats dans `contracts/` AVANT le code
 - Plugin-first : toute interaction backend passe par `StorageBackend`
 - Jamais de push sur main sans CI verte
-- Le tag git est la seule source de vérité pour la version
-- `frontend/package-lock.json` commité (reproductibilité CI)
+- Le tag git est la seule source de verite pour la version
+- `frontend/package-lock.json` commite (reproductibilite CI)
 - `coverage.out` et `.remember/` ne pas commiter
 
 ---
 
 ## Points d'Attention
 
-- `softprops/action-gh-release@v1` dépréciée Node.js 20 → corriger en v0.2.0 (#46)
-- `cmd/ghostdrive/main.go` non implémenté → build Wails pas encore actif (TODO dans build.yml)
-- v0.2.0 = premier milestone avec UI Wails → tester le build Wails en CI (libgtk-3-dev requis)
+- `softprops/action-gh-release@v1` deprecie Node.js 20 → corriger en v0.4.0 ou apres (#46)
+- v0.4.0 = milestone plugin LOCAL — issues #47, #48, #50 ouvertes (verifier sur GitHub)
+- Registry (#50) requis avant binding Wails `ListBackends`

@@ -70,5 +70,21 @@ export function useBackends() {
     [state.statuses],
   );
 
-  return { ...state, reload: load, addBackend, removeBackend, testConnection, getStatus };
+  const setEnabled = useCallback(async (backendId: string, enabled: boolean) => {
+    await ghostdriveApi.setBackendEnabled(backendId, enabled);
+    setState(s => ({
+      ...s,
+      configs: s.configs.map(c => c.id === backendId ? { ...c, enabled } : c),
+    }));
+  }, []);
+
+  const setAutoSync = useCallback(async (backendId: string, autoSync: boolean) => {
+    await ghostdriveApi.setAutoSync(backendId, autoSync);
+    setState(s => ({
+      ...s,
+      configs: s.configs.map(c => c.id === backendId ? { ...c, autoSync } : c),
+    }));
+  }, []);
+
+  return { ...state, reload: load, addBackend, removeBackend, testConnection, getStatus, setEnabled, setAutoSync };
 }

@@ -316,6 +316,13 @@ func (b *Backend) Watch(ctx context.Context, path string) (<-chan plugins.FileEv
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
+// ─── Quota ────────────────────────────────────────────────────────────────────
+
+// GetQuota is not supported by the MooseFS backend; returns (-1, -1, nil).
+func (b *Backend) GetQuota(_ context.Context) (int64, int64, error) {
+	return -1, -1, nil
+}
+
 func (b *Backend) mountedPath(remote string) string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
