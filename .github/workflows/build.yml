@@ -95,6 +95,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64
 
+      - name: Install WinFsp FUSE headers for cgofuse cross-compilation
+        if: matrix.target == 'windows-amd64'
+        run: |
+          # cgofuse host_cgo.go requires WinFsp FUSE headers at /usr/local/include/winfsp/
+          # when cross-compiling for Windows with CGO_ENABLED=1 (mingw32).
+          sudo mkdir -p /usr/local/include/winfsp
+          BASE="https://raw.githubusercontent.com/winfsp/winfsp/v2.0/inc/fuse"
+          for h in fuse.h fuse_common.h fuse_opt.h winfsp_fuse.h; do
+            sudo wget -q "${BASE}/${h}" -O "/usr/local/include/winfsp/${h}"
+          done
+
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
 
