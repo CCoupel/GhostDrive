@@ -8,6 +8,7 @@ import (
 
 	"github.com/CCoupel/GhostDrive/internal/backends"
 	"github.com/CCoupel/GhostDrive/internal/config"
+	"github.com/CCoupel/GhostDrive/internal/placeholder"
 	internalsync "github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/plugins"
 	_ "github.com/CCoupel/GhostDrive/plugins/local" // registers "local" via init()
@@ -32,6 +33,7 @@ func newTestApp(t *testing.T) *App {
 		}(),
 		engines: make(map[string]*internalsync.Engine),
 		manager: backends.NewBackendManager(nil),
+		drive:   placeholder.New(),
 	}
 }
 
@@ -208,6 +210,42 @@ func TestAddBackend_AutoLocalPath(t *testing.T) {
 	assert.True(t, info.IsDir())
 }
 
+// ─── Case 7 — Startup creates GhostDriveRoot if it does not exist (#58) ──────
+
+func TestStartup_CreatesGhostDriveRoot(t *testing.T) {
+	// Use a sub-directory that does not yet exist as GhostDriveRoot.
+	baseDir := t.TempDir()
+	ghostRoot := filepath.Join(baseDir, "GhostDrive")
+	cfgPath := filepath.Join(baseDir, "config.json")
+
+	// Write a config.json with GhostDriveRoot pointing to our temp dir.
+	// This ensures Startup() loads the config (no fallback to DefaultConfig)
+	// and keeps the GhostDriveRoot value we set.
+	testCfg := config.DefaultConfig()
+	testCfg.GhostDriveRoot = ghostRoot
+	require.NoError(t, config.Save(testCfg, cfgPath))
+
+	a := &App{
+		cfgPath: cfgPath,
+		cfg:     testCfg,
+		engines: make(map[string]*internalsync.Engine),
+		manager: backends.NewBackendManager(nil),
+	}
+
+	// GhostDriveRoot must not exist before Startup.
+	_, err := os.Stat(ghostRoot)
+	require.True(t, os.IsNotExist(err), "GhostDriveRoot must not exist before Startup")
+
+	// Call Startup with a nil context (no Wails runtime in tests).
+	// emitError / emit are no-ops when ctx == nil.
+	a.Startup(nil)
+
+	// GhostDriveRoot must now exist on disk.
+	info, err := os.Stat(ghostRoot)
+	require.NoError(t, err, "Startup must create GhostDriveRoot")
+	assert.True(t, info.IsDir(), "GhostDriveRoot must be a directory")
+}
+
 // ─── Case 6 — validateBackendConfig tolerates ErrNotExist for SyncDir ────────
 
 func TestValidateBackendConfig_SyncDirNotExist_Tolerated(t *testing.T) {
@@ -225,4 +263,49 @@ func TestValidateBackendConfig_SyncDirNotExist_Tolerated(t *testing.T) {
 
 	assert.NoError(t, err,
 		"validateBackendConfig must tolerate ErrNotExist for SyncDir (MkdirAll runs after validation)")
+}
+
+// ─── Case 8 — MountDrive / UnmountDrive pass on NullDrive (non-Windows) ──────
+
+func TestMountDrive_NoBackends_ReturnsError(t *testing.T) {
+	a := newTestApp(t)
+	// No backends configured → MountDrive must return an error on every platform.
+	err := a.MountDrive()
+	require.Error(t, err, "MountDrive with no connected backends must fail")
+}
+
+func TestUnmountDrive_NotMounted_IsNoop(t *testing.T) {
+	a := newTestApp(t)
+	// Unmounting when not mounted must not error on any platform.
+	assert.NoError(t, a.UnmountDrive())
+}
+
+func TestGetDriveStatus_InitialState(t *testing.T) {
+	a := newTestApp(t)
+	s := a.GetDriveStatus()
+	assert.False(t, s.Mounted, "drive must not be mounted at startup")
+}
+
+func TestGetMountPoint_Default(t *testing.T) {
+	a := newTestApp(t)
+	// Default mount point must be non-empty on every platform.
+	assert.NotEmpty(t, a.GetMountPoint(), "default mount point must not be empty")
+}
+
+func TestGetMountPoint_Configured(t *testing.T) {
+	a := newTestApp(t)
+	a.cfg.MountPoint = "/tmp/test-ghost-mount"
+	assert.Equal(t, "/tmp/test-ghost-mount", a.GetMountPoint())
+}
+
+// ─── Case 9 — Shutdown calls Unmount before stopping engines (#57) ────────────
+
+func TestShutdown_CallsUnmount(t *testing.T) {
+	a := newTestApp(t)
+	// Shutdown must not panic even when drive is not mounted.
+	assert.NotPanics(t, func() {
+		a.Shutdown(nil)
+	})
+	// After Shutdown, drive must still report not-mounted.
+	assert.False(t, a.GetDriveStatus().Mounted)
 }

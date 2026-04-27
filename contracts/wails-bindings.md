@@ -273,3 +273,60 @@ Frontend  : window.go.App.Quit()
 ```
 
 Quitte l'application proprement.
+
+---
+
+## Drive Virtuel
+
+> Détail complet dans `contracts/winfsp-bindings.md`.
+
+### MountDrive
+
+```
+Signature : MountDrive() error
+Frontend  : window.go.App.MountDrive()
+```
+
+Monte la lettre de lecteur `GhD:` via WinFsp. No-op si déjà monté.
+Émet `drive:mounted` avec payload `DriveStatus` en cas de succès.
+
+---
+
+### UnmountDrive
+
+```
+Signature : UnmountDrive() error
+Frontend  : window.go.App.UnmountDrive()
+```
+
+Démonte `GhD:` proprement. No-op si non monté.
+Émet `drive:unmounted` après démontage réussi.
+
+---
+
+### GetDriveStatus
+
+```
+Signature : GetDriveStatus() DriveStatus
+Frontend  : window.go.App.GetDriveStatus()
+Retour    : DriveStatus (voir models.md)
+```
+
+Retourne l'état courant du drive virtuel.
+Voir `contracts/models.md` pour la définition de `DriveStatus`.
+
+---
+
+### GetAvailableDriveLetters
+
+```
+Signature : GetAvailableDriveLetters() []string
+Frontend  : window.go.App.GetAvailableDriveLetters()
+Retour    : []string — lettres libres au format "X:" (ex: ["D:", "G:", "H:"])
+```
+
+Retourne la liste des lettres de lecteur Windows non utilisées (A–Z).
+Utilise `GetLogicalDrives()` (syscall Windows) pour déterminer les lettres occupées.
+Sur plateforme non-Windows, retourne `null`.
+
+Utilisation typique : alimenter le sélecteur de lettre de lecteur dans la page Paramètres.

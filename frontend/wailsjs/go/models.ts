@@ -9,6 +9,7 @@ export namespace config {
 	    startMinimized: boolean;
 	    autoStart: boolean;
 	    ghostDriveRoot?: string;
+	    mountPoint?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppConfig(source);
@@ -24,6 +25,7 @@ export namespace config {
 	        this.startMinimized = source["startMinimized"];
 	        this.autoStart = source["autoStart"];
 	        this.ghostDriveRoot = source["ghostDriveRoot"];
+	        this.mountPoint = source["mountPoint"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -43,6 +45,29 @@ export namespace config {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace placeholder {
+	
+	export class DriveStatus {
+	    Mounted: boolean;
+	    MountPoint: string;
+	    BackendPaths: Record<string, string>;
+	    LastError: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DriveStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Mounted = source["Mounted"];
+	        this.MountPoint = source["MountPoint"];
+	        this.BackendPaths = source["BackendPaths"];
+	        this.LastError = source["LastError"];
+	    }
 	}
 
 }

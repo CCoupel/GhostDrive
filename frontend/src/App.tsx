@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
+import { HardDrive } from 'lucide-react';
 import { TrayMenu } from './components/tray/TrayMenu';
 import { SettingsPage } from './components/settings/SettingsPage';
 import { ConfigPage } from './pages/ConfigPage';
 import { AboutPage } from './pages/AboutPage';
+import { FileBrowserPage } from './pages/FileBrowserPage';
 import { useSyncStatus } from './hooks/useSyncStatus';
 import { useBackends } from './hooks/useBackends';
-import { ghostdriveApi } from './services/wails';
+import { ghostdriveApi, onEvent } from './services/wails';
 import type { AppConfig } from './types/ghostdrive';
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -18,11 +20,12 @@ const DEFAULT_CONFIG: AppConfig = {
   autoStart: false,
 };
 
-type View = 'backends' | 'configuration' | 'about';
+type View = 'backends' | 'configuration' | 'about' | 'drive';
 
 export function App() {
   const [view, setView] = useState<View>('backends');
   const [appConfig, setAppConfig] = useState<AppConfig>(DEFAULT_CONFIG);
+  const [driveMounted, setDriveMounted] = useState(false);
 
   const { syncState } = useSyncStatus();
   const { configs } = useBackends();
@@ -35,6 +38,13 @@ export function App() {
     ghostdriveApi.getConfig()
       .then(setAppConfig)
       .catch(() => {});
+  }, []);
+
+  // Track drive mount state for the GhD: tab badge
+  useEffect(() => {
+    const unsubMounted   = onEvent('drive:mounted',   () => setDriveMounted(true));
+    const unsubUnmounted = onEvent('drive:unmounted', () => setDriveMounted(false));
+    return () => { unsubMounted(); unsubUnmounted(); };
   }, []);
 
   return (
@@ -52,6 +62,18 @@ export function App() {
         <NavTab active={view === 'configuration'} onClick={() => setView('configuration')}>
           Configuration
         </NavTab>
+        <NavTab active={view === 'drive'} onClick={() => setView('drive')}>
+          <span className="flex items-center gap-1.5">
+            <HardDrive size={13} aria-hidden="true" />
+            GhD:
+            {driveMounted && (
+              <span
+                className="inline-block w-1.5 h-1.5 rounded-full bg-green-500"
+                aria-label="Drive monté"
+              />
+            )}
+          </span>
+        </NavTab>
         <NavTab active={view === 'about'} onClick={() => setView('about')}>
           À propos
         </NavTab>
@@ -62,6 +84,8 @@ export function App() {
           <ConfigPage appConfig={appConfig} onConfigChange={setAppConfig} />
         ) : view === 'about' ? (
           <AboutPage appConfig={appConfig} />
+        ) : view === 'drive' ? (
+          <FileBrowserPage />
         ) : (
           <SettingsPage />
         )}

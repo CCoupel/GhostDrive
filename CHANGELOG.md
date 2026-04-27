@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-04-26
+
+### Added
+
+- **Drive virtuel GhD:** monté via WinFsp/cgofuse — les backends connectés apparaissent comme sous-dossiers (`GhD:\NomBackend\`) (#11, #52)
+- **Navigation contenu distant** dans l'onglet "GhD:" — listage via `StorageBackend.List()`, breadcrumb, sélecteur de backend (#55)
+- **Téléchargement à la demande** depuis GhD: avec progress bar inline — `StorageBackend.Download()` + `sync:progress` (#56)
+- **Démontage propre** du drive GhD: à l'arrêt de l'application (#57)
+- **Création automatique** du dossier racine `C:\GhostDrive\` au démarrage (#58)
+- **Menu systray complet** — 3 nouvelles entrées : "Synchroniser maintenant", "Pause / Reprendre", "Paramètres" (#54)
+
+### Technical
+
+- Package `internal/placeholder/` : interface `VirtualDrive`, `WinFspDrive` (Windows), `NullDrive` (stub cross-platform)
+- Dépendance cgofuse v1.6.0 (github.com/winfsp/cgofuse)
+- Hook React `useDriveStatus` + composants `FileBrowserPage`, `RemoteFileList`
+- `AppConfig.MountPoint` configurable — lettre de lecteur (`G:`) ou chemin répertoire (`C:\GhostDrive\GhD\`, défaut)
+- **Prérequis runtime** : WinFsp 2.0+ — https://winfsp.dev/rel/
+- Icône GhostDrive embarquée (`//go:embed ghostdrive.ico`) et servie comme fichier virtuel FUSE ; registre `DriveIcons` pour les lettres de lecteur (#71 — en cours, voir issue pour limitations connues)
+
 ## [0.4.0] — TBD
 
 ### Added

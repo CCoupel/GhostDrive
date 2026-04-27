@@ -23,6 +23,10 @@ type AppConfig struct {
 	// folders are created in Auto mode.  Empty means use the platform default
 	// (C:\GhostDrive on Windows, ~/GhostDrive elsewhere).
 	GhostDriveRoot string `json:"ghostDriveRoot,omitempty"`
+	// MountPoint is the Windows mount point for the GhD: virtual drive.
+	// It can be a drive letter (e.g. "G:") or a directory path (e.g. `C:\GhostDrive\GhD\`).
+	// Empty means use the default (`C:\GhostDrive\GhD\` on Windows).
+	MountPoint string `json:"mountPoint,omitempty"`
 }
 
 // DefaultConfig returns a new AppConfig with sensible defaults.

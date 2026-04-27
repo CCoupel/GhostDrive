@@ -15,6 +15,7 @@ import (
 
 	"github.com/CCoupel/GhostDrive/internal/backends"
 	"github.com/CCoupel/GhostDrive/internal/config"
+	"github.com/CCoupel/GhostDrive/internal/placeholder"
 	"github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/CCoupel/GhostDrive/plugins"
@@ -30,6 +31,7 @@ type App struct {
 	mu      gosync.RWMutex
 	manager *backends.BackendManager
 	engines map[string]*sync.Engine
+	drive   placeholder.VirtualDrive
 }
 
 // NewApp creates a new App. Configuration is loaded in Startup once the
@@ -45,6 +47,7 @@ func NewApp(cfgPath string) *App {
 		cfgPath: cfgPath,
 		cfg:     config.DefaultConfig(),
 		engines: make(map[string]*sync.Engine),
+		drive:   placeholder.New(),
 	}
 }
 
@@ -74,6 +77,13 @@ func (a *App) Startup(ctx context.Context) {
 	a.manager = backends.NewBackendManager(a)
 	a.mu.Unlock()
 
+	// #58 — Auto-create GhostDrive root directory on startup.
+	// Non-blocking: log the error but do not prevent the application from starting.
+	root := a.GetGhostDriveRoot()
+	if err := os.MkdirAll(root, 0755); err != nil {
+		log.Printf("app: create GhostDriveRoot %q: %v", root, err)
+	}
+
 	// Reconnect saved backends and auto-start sync where configured.
 	for _, bc := range cfg.Backends {
 		if bc.Enabled {
@@ -89,6 +99,13 @@ func (a *App) Startup(ctx context.Context) {
 		}
 	}
 
+	// Auto-mount GhD: if at least one backend is connected.
+	// MountDrive() emits drive:mounted on success and drive:error on failure —
+	// no secondary emit needed here.
+	if err := a.MountDrive(); err != nil {
+		log.Printf("app: auto-mount drive: %v", err)
+	}
+
 	a.emit("app:ready", map[string]any{
 		"version":       cfg.Version,
 		"backendsCount": len(cfg.Backends),
@@ -97,6 +114,12 @@ func (a *App) Startup(ctx context.Context) {
 
 // shutdown is called by Wails when the application is about to quit.
 func (a *App) Shutdown(ctx context.Context) {
+	// #57 — Unmount GhD: before stopping sync engines.
+	if err := a.drive.Unmount(); err != nil {
+		log.Printf("app: shutdown unmount: %v", err)
+	}
+	a.emit("drive:unmounted", map[string]any{})
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for id, engine := range a.engines {
@@ -367,15 +390,51 @@ func (a *App) ListFiles(backendID string, path string) ([]plugins.FileInfo, erro
 	return b.List(context.Background(), path)
 }
 
-// DownloadFile downloads a remote file into the backend's local SyncDir.
+// DownloadFile downloads a remote file into the backend's local SyncDir,
+// preserving the remote directory structure. Emits sync:progress events
+// with percent, bytesDone, bytesTotal, backendId and remotePath so the
+// frontend can display inline download progress.
 func (a *App) DownloadFile(backendID string, remotePath string) error {
 	b, ok := a.manager.Get(backendID)
 	if !ok {
 		return fmt.Errorf("not found: %s", backendID)
 	}
 	bc, _ := a.manager.GetConfig(backendID)
-	localPath := filepath.Join(bc.SyncDir, filepath.Base(remotePath))
-	return b.Download(context.Background(), remotePath, localPath, nil)
+
+	// Preserve directory structure: strip leading separators to avoid
+	// filepath.Join treating remotePath as absolute.
+	relPath := filepath.Clean(strings.TrimLeft(remotePath, "/\\"))
+	localPath := filepath.Join(bc.SyncDir, relPath)
+
+	// Containment check — same pattern as AddBackend:
+	// block path traversal via crafted remotePath (e.g. "../../Windows/evil.dll").
+	syncDir := filepath.Clean(bc.SyncDir)
+	if !strings.HasPrefix(localPath, syncDir+string(os.PathSeparator)) {
+		return fmt.Errorf("path traversal detected in remotePath: %s", remotePath)
+	}
+
+	// Create intermediate directories before downloading.
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		return fmt.Errorf("create local dirs: %w", err)
+	}
+
+	progress := func(done, total int64) {
+		var percent float64
+		if total > 0 {
+			percent = float64(done) / float64(total) * 100
+		}
+		a.emit("sync:progress", map[string]any{
+			"path":       remotePath,
+			"direction":  "download",
+			"bytesDone":  done,
+			"bytesTotal": total,
+			"percent":    percent,
+			"backendId":  backendID,
+			"remotePath": remotePath,
+		})
+	}
+
+	return b.Download(context.Background(), remotePath, localPath, progress)
 }
 
 // GetCacheStats returns local cache statistics (stub — cache implemented in v1).
@@ -507,6 +566,19 @@ func (a *App) PauseSync(backendID string) error {
 	return nil
 }
 
+// ResumeSync resumes a paused sync engine for a backend.
+func (a *App) ResumeSync(backendID string) error {
+	a.mu.RLock()
+	e, exists := a.engines[backendID]
+	a.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("not found: %s", backendID)
+	}
+	e.Resume()
+	a.emitSyncState()
+	return nil
+}
+
 // ForceSync triggers an immediate full sync for a backend.
 func (a *App) ForceSync(backendID string) error {
 	a.mu.RLock()
@@ -589,6 +661,82 @@ func aggregateStatus(states []types.BackendSyncState) types.SyncStatus {
 		return types.SyncPaused
 	}
 	return types.SyncIdle
+}
+
+// ─── Drive Virtuel (WinFsp) ───────────────────────────────────────────────────
+
+// GetAvailableDriveLetters returns the list of unused Windows drive letters in
+// "X:" format (e.g. ["D:", "G:", "H:"]). On non-Windows platforms returns nil.
+func (a *App) GetAvailableDriveLetters() []string {
+	return placeholder.AvailableDriveLetters()
+}
+
+// GetMountPoint returns the configured virtual drive mount point.
+// Default: `C:\GhostDrive\GhD\` on Windows, ~/GhostDrive/GhD on other platforms.
+func (a *App) GetMountPoint() string {
+	a.mu.RLock()
+	mp := a.cfg.MountPoint
+	a.mu.RUnlock()
+	if mp != "" {
+		return mp
+	}
+	if runtime.GOOS == "windows" {
+		return `C:\GhostDrive\GhD\`
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "GhostDrive", "GhD")
+	}
+	return filepath.Join(home, "GhostDrive", "GhD")
+}
+
+// MountDrive mounts GhD: with all currently connected backends.
+// No-op (returns nil) if the drive is already mounted.
+func (a *App) MountDrive() error {
+	// Collect connected backends.
+	statuses := a.manager.ListStatuses()
+	var mbs []placeholder.MountedBackend
+	for _, s := range statuses {
+		if !s.Connected {
+			continue
+		}
+		b, ok := a.manager.Get(s.BackendID)
+		if !ok {
+			continue
+		}
+		bc, _ := a.manager.GetConfig(s.BackendID)
+		mbs = append(mbs, placeholder.MountedBackend{
+			ID:      s.BackendID,
+			Name:    bc.Name,
+			Backend: b,
+			Config:  bc,
+		})
+	}
+	if len(mbs) == 0 {
+		return fmt.Errorf("winfsp: no connected backend")
+	}
+	mountPoint := a.GetMountPoint()
+	if err := a.drive.Mount(mountPoint, mbs); err != nil {
+		a.emit("drive:error", a.drive.Status())
+		return err
+	}
+	a.emit("drive:mounted", a.drive.Status())
+	return nil
+}
+
+// UnmountDrive unmounts GhD: cleanly.  No-op if not mounted.
+func (a *App) UnmountDrive() error {
+	if err := a.drive.Unmount(); err != nil {
+		a.emit("drive:error", a.drive.Status())
+		return err
+	}
+	a.emit("drive:unmounted", map[string]any{})
+	return nil
+}
+
+// GetDriveStatus returns the current state of the virtual drive.
+func (a *App) GetDriveStatus() placeholder.DriveStatus {
+	return a.drive.Status()
 }
 
 // GetGhostDriveRoot returns the configurable root directory under which

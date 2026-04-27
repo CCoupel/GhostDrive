@@ -9,6 +9,7 @@ require (
 	github.com/getlantern/systray v1.2.2
 	github.com/stretchr/testify v1.10.0
 	github.com/wailsapp/wails/v2 v2.12.0
+	github.com/winfsp/cgofuse v1.6.0
 	golang.org/x/net v0.35.0
 	golang.org/x/sys v0.30.0
 )

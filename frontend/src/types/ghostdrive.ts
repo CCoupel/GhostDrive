@@ -87,6 +87,21 @@ export interface ProgressEvent {
   bytesDone: number;
   bytesTotal: number;
   percent: number;
+  /** Available on download progress events emitted by DownloadFile */
+  backendId?: string;
+  /** Remote path of the file being downloaded */
+  remotePath?: string;
+}
+
+/**
+ * DriveStatus — matches placeholder.DriveStatus (Go, no JSON tags →
+ * field names are capitalized on the wire).
+ */
+export interface DriveStatus {
+  Mounted: boolean;
+  MountPoint: string;   // renamed from DriveLetter in commit a7416cd
+  BackendPaths: Record<string, string>; // backendID → path under drive root
+  LastError: string;    // empty string when no error
 }
 
 export interface CacheStats {
@@ -103,6 +118,11 @@ export interface AppConfig {
   cacheSizeMaxMB: number;
   startMinimized: boolean;
   autoStart: boolean;
+  ghostDriveRoot?: string;
+  /** Point de montage du drive virtuel GhD: — lettre ("G:") ou chemin ("C:\GhostDrive\GhD\") */
+  mountPoint?: string;
+  /** @deprecated Utilisez mountPoint. Conservé pour rétrocompatibilité JSON. */
+  driveLetter?: string;
 }
 
 export type WailsEventMap = {
@@ -116,6 +136,9 @@ export type WailsEventMap = {
   'app:ready': { version: string; backendsCount: number };
   'tray:open-settings': undefined;
   'tray:action': { action: TrayAction };
+  'drive:mounted': DriveStatus;
+  'drive:unmounted': Record<string, never>;
+  'drive:error': DriveStatus;
 };
 
 export type WailsEventName = keyof WailsEventMap;

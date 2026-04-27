@@ -30,6 +30,10 @@ export function GetAvailableBackendTypes() {
   return window['go']['app']['App']['GetAvailableBackendTypes']();
 }
 
+export function GetAvailableDriveLetters() {
+  return window['go']['app']['App']['GetAvailableDriveLetters']();
+}
+
 export function GetBackendStatuses() {
   return window['go']['app']['App']['GetBackendStatuses']();
 }
@@ -42,8 +46,16 @@ export function GetConfig() {
   return window['go']['app']['App']['GetConfig']();
 }
 
+export function GetDriveStatus() {
+  return window['go']['app']['App']['GetDriveStatus']();
+}
+
 export function GetGhostDriveRoot() {
   return window['go']['app']['App']['GetGhostDriveRoot']();
+}
+
+export function GetMountPoint() {
+  return window['go']['app']['App']['GetMountPoint']();
 }
 
 export function GetSyncState() {
@@ -56,6 +68,10 @@ export function GetVersion() {
 
 export function ListFiles(arg1, arg2) {
   return window['go']['app']['App']['ListFiles'](arg1, arg2);
+}
+
+export function MountDrive() {
+  return window['go']['app']['App']['MountDrive']();
 }
 
 export function OpenSyncFolder(arg1) {
@@ -72,6 +88,10 @@ export function Quit() {
 
 export function RemoveBackend(arg1) {
   return window['go']['app']['App']['RemoveBackend'](arg1);
+}
+
+export function ResumeSync(arg1) {
+  return window['go']['app']['App']['ResumeSync'](arg1);
 }
 
 export function SaveConfig(arg1) {
@@ -100,4 +120,8 @@ export function StopSync(arg1) {
 
 export function TestBackendConnection(arg1) {
   return window['go']['app']['App']['TestBackendConnection'](arg1);
+}
+
+export function UnmountDrive() {
+  return window['go']['app']['App']['UnmountDrive']();
 }

@@ -1,6 +1,6 @@
 # Contrats — Modèles Partagés (Go ↔ Frontend)
 
-> **Version** : 0.1.0  
+> **Version** : 0.5.0  
 > **Scope** : Types de données exposés via Wails v2 (JSON sérialisés)  
 > **Règle** : Le backend PEUT ajouter des champs ; le frontend ne modifie pas ce fichier.
 
@@ -160,3 +160,20 @@ type BackendStatus struct {
     TotalSpace int64  `json:"totalSpace"` // -1 si non disponible
 }
 ```
+
+---
+
+## DriveStatus
+
+État du drive virtuel GhD: monté via WinFsp.
+
+```go
+type DriveStatus struct {
+    Mounted      bool              `json:"mounted"`
+    MountPoint   string            `json:"mountPoint"`   // ex: "G:" ou `C:\GhostDrive\GhD\`
+    BackendPaths map[string]string `json:"backendPaths"` // backendID → `<MountPoint>\NomBackend\`
+    LastError    string            `json:"lastError"`    // dernière erreur mount/unmount ; vide si aucune
+}
+```
+
+Retourné par `GetDriveStatus()` et inclus dans le payload des événements `drive:mounted` et `drive:error`.

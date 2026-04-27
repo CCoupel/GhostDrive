@@ -107,7 +107,7 @@ Telecharger le dernier binaire depuis les [Releases GitHub](https://github.com/C
 
 **Windows** : executer le binaire, GhostDrive se lance automatiquement au demarrage.
 
-**Prerequis Windows** : [WinFsp](https://github.com/winfsp/winfsp/releases) doit etre installe pour les placeholders Files On-Demand.
+**Prerequis Windows** : [WinFsp 2.0+](https://winfsp.dev/rel/) doit etre installe pour les placeholders Files On-Demand et le drive virtuel GhD:
 
 ### Depuis les sources
 
@@ -115,7 +115,7 @@ Telecharger le dernier binaire depuis les [Releases GitHub](https://github.com/C
 - Go 1.21+
 - Node.js 18+
 - [Wails v2](https://wails.io/docs/gettingstarted/installation) (`go install github.com/wailsapp/wails/v2/cmd/wails@latest`)
-- [WinFsp](https://github.com/winfsp/winfsp/releases) (Windows uniquement)
+- [WinFsp 2.0+](https://winfsp.dev/rel/) (Windows uniquement — requis pour placeholders Files On-Demand et drive GhD:)
 
 ```bash
 git clone https://github.com/CCoupel/GhostDrive.git

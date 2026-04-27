@@ -4,6 +4,7 @@ import {plugins} from '../models';
 import {context} from '../models';
 import {types} from '../models';
 import {config} from '../models';
+import {placeholder} from '../models';
 
 export function AddBackend(arg1:plugins.BackendConfig):Promise<plugins.BackendConfig>;
 
@@ -19,19 +20,27 @@ export function ForceSync(arg1:string):Promise<void>;
 
 export function GetAvailableBackendTypes():Promise<Array<string>>;
 
+export function GetAvailableDriveLetters():Promise<Array<string>>;
+
 export function GetBackendStatuses():Promise<Array<types.BackendStatus>>;
 
 export function GetCacheStats():Promise<types.CacheStats>;
 
 export function GetConfig():Promise<config.AppConfig>;
 
+export function GetDriveStatus():Promise<placeholder.DriveStatus>;
+
 export function GetGhostDriveRoot():Promise<string>;
+
+export function GetMountPoint():Promise<string>;
 
 export function GetSyncState():Promise<types.SyncState>;
 
 export function GetVersion():Promise<string>;
 
 export function ListFiles(arg1:string,arg2:string):Promise<Array<plugins.FileInfo>>;
+
+export function MountDrive():Promise<void>;
 
 export function OpenSyncFolder(arg1:string):Promise<void>;
 
@@ -40,6 +49,8 @@ export function PauseSync(arg1:string):Promise<void>;
 export function Quit():Promise<void>;
 
 export function RemoveBackend(arg1:string):Promise<void>;
+
+export function ResumeSync(arg1:string):Promise<void>;
 
 export function SaveConfig(arg1:config.AppConfig):Promise<void>;
 
@@ -54,3 +65,5 @@ export function StartSync(arg1:string):Promise<void>;
 export function StopSync(arg1:string):Promise<void>;
 
 export function TestBackendConnection(arg1:plugins.BackendConfig):Promise<types.BackendStatus>;
+
+export function UnmountDrive():Promise<void>;

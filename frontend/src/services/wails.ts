@@ -4,6 +4,7 @@ import type {
   AppConfig,
   BackendConfig,
   BackendStatus,
+  DriveStatus,
   SyncState,
   FileInfo,
   CacheStats,
@@ -66,6 +67,16 @@ export const ghostdriveApi = {
 
   getVersion: (): Promise<string> => App.GetVersion(),
   quit: (): Promise<void> => App.Quit(),
+
+  // Drive virtuel (WinFsp) — bindings générés par Wails v0.5.0
+  getDriveStatus: (): Promise<DriveStatus> =>
+    App.GetDriveStatus() as unknown as Promise<DriveStatus>,
+  mountDrive: (): Promise<void> => App.MountDrive(),
+  unmountDrive: (): Promise<void> => App.UnmountDrive(),
+
+  /** Retourne les lettres de lecteur Windows disponibles (ex: ['E:', 'F:', 'G:']). */
+  getAvailableDriveLetters: (): Promise<string[]> =>
+    (App as any).GetAvailableDriveLetters() as Promise<string[]>,
 };
 
 export function onEvent<T extends WailsEventName>(

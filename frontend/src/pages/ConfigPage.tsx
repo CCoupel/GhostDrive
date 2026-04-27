@@ -1,7 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Button } from '../components/ui/Button';
 import { ghostdriveApi } from '../services/wails';
 import type { AppConfig, CacheStats } from '../types/ghostdrive';
+
+/** True when the value looks like a Windows drive letter (e.g. "G" or "G:"). */
+const isDriveLetter = (v: string): boolean => /^[A-Za-z]:?$/.test(v.trim());
 
 interface ConfigPageProps {
   appConfig: AppConfig | null;
@@ -41,6 +44,11 @@ export function ConfigPage({ appConfig, onConfigChange }: ConfigPageProps) {
           </section>
         )}
 
+        {/* ── Drive virtuel ─────────────────────────────────── */}
+        {appConfig && (
+          <MountPointSection appConfig={appConfig} onSave={handleSave} />
+        )}
+
         {/* ── Cache ─────────────────────────────────────────── */}
         <CacheSection appConfig={appConfig} onSave={handleSave} />
 
@@ -50,6 +58,140 @@ export function ConfigPage({ appConfig, onConfigChange }: ConfigPageProps) {
 }
 
 // ── Sub-components ─────────────────────────────────────────
+
+/**
+ * MountPointSection — Point de montage du drive virtuel GhD:
+ *
+ * Si la valeur stockée est une lettre Windows (ex: "G:") → affiche un <select>
+ * peuplé par GetAvailableDriveLetters().
+ * Sinon → affiche un <input type="text"> pour un chemin libre.
+ */
+function MountPointSection({
+  appConfig,
+  onSave,
+}: {
+  appConfig: AppConfig;
+  onSave: (updates: Partial<AppConfig>) => void;
+}) {
+  const rawValue = appConfig.mountPoint ?? appConfig.driveLetter ?? '';
+  // Normalize to "X:" form if user stored just "X"
+  const normalize = (v: string) =>
+    isDriveLetter(v) && !v.endsWith(':') ? `${v.toUpperCase()}:` : v;
+
+  const initialIsLetter = isDriveLetter(rawValue);
+  const [mode, setMode] = useState<'letter' | 'path'>(
+    initialIsLetter ? 'letter' : 'path',
+  );
+  const [letters, setLetters] = useState<string[]>([]);
+  const [lettersLoading, setLettersLoading] = useState(false);
+  const [selectedLetter, setSelectedLetter] = useState<string>(
+    initialIsLetter ? normalize(rawValue) : 'G:',
+  );
+
+  const loadLetters = useCallback(async () => {
+    setLettersLoading(true);
+    try {
+      const avail = await ghostdriveApi.getAvailableDriveLetters();
+      setLetters(avail ?? []);
+      // If current letter is in the list, keep it; otherwise fall back to first available
+      if (avail && avail.length > 0 && !avail.includes(selectedLetter)) {
+        setSelectedLetter(avail[0]);
+      }
+    } catch {
+      setLetters([]);
+    } finally {
+      setLettersLoading(false);
+    }
+  }, [selectedLetter]);
+
+  useEffect(() => {
+    if (mode === 'letter') {
+      loadLetters();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
+  const handleModeToggle = () => {
+    const next = mode === 'letter' ? 'path' : 'letter';
+    setMode(next);
+  };
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          Drive virtuel (GhD:)
+        </h3>
+        {/* Mode toggle */}
+        <button
+          type="button"
+          onClick={handleModeToggle}
+          className="text-xs text-brand hover:underline"
+          aria-label={
+            mode === 'letter'
+              ? 'Passer en mode chemin libre'
+              : 'Passer en mode lettre de lecteur'
+          }
+        >
+          {mode === 'letter' ? 'Utiliser un chemin' : 'Utiliser une lettre'}
+        </button>
+      </div>
+
+      <div className="flex items-center justify-between py-1 gap-3">
+        <label
+          htmlFor="mount-point-config"
+          className="text-sm text-gray-800 shrink-0"
+        >
+          Point de montage
+        </label>
+
+        {mode === 'letter' ? (
+          <select
+            id="mount-point-config"
+            value={selectedLetter}
+            disabled={lettersLoading || letters.length === 0}
+            onChange={e => {
+              setSelectedLetter(e.target.value);
+              onSave({ mountPoint: e.target.value });
+            }}
+            className="flex-1 min-w-0 rounded border border-surface-border px-2 py-1 text-sm
+              focus:outline-none focus:ring-2 focus:ring-brand bg-white"
+            aria-label="Lettre de lecteur Windows pour le drive GhD:"
+          >
+            {lettersLoading && <option value="">Chargement...</option>}
+            {!lettersLoading && letters.length === 0 && (
+              <option value="">Aucune lettre disponible</option>
+            )}
+            {letters.map(l => (
+              <option key={l} value={l}>
+                {l}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            id="mount-point-config"
+            type="text"
+            defaultValue={!initialIsLetter ? rawValue : ''}
+            placeholder="C:\\GhostDrive\\GhD\\"
+            onBlur={e =>
+              onSave({ mountPoint: e.target.value.trim() || undefined })
+            }
+            className="flex-1 min-w-0 rounded border border-surface-border px-2 py-1 text-sm
+              focus:outline-none focus:ring-2 focus:ring-brand"
+            aria-label="Chemin complet du point de montage du drive virtuel GhD:"
+          />
+        )}
+      </div>
+
+      <p className="text-xs text-gray-400 mt-1">
+        {mode === 'letter'
+          ? 'Lettre Windows disponible (ex : G:).'
+          : 'Chemin complet sur le disque (ex : C:\\GhostDrive\\GhD\\).'}
+      </p>
+    </section>
+  );
+}
 
 function ToggleRow({
   label,
