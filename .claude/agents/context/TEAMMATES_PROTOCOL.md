@@ -11,7 +11,7 @@ Au demarrage, chaque agent :
 
 ```
 1. Lit ce fichier (TEAMMATES_PROTOCOL.md)
-2. Lit son propre fichier de spec (.claude/agents/<nom>.template.md)
+2. Lit son propre fichier de spec (.claude/agents/<nom>.md)
 3. Attend les instructions du CDP
 ```
 
@@ -61,9 +61,12 @@ Retourner en mode IDLE
 ```
 SendMessage({
   to: "cdp",
-  content: "[rapport en texte naturel]"
+  content: "[rapport minimaliste — voir formats ci-dessous]"
 })
 ```
+
+> **REGLE ABSOLUE** : Jamais de contenu de code, de diff, ni d'extraits de fichiers dans les messages.
+> Les messages sont des metadonnees, pas des rapports techniques.
 
 ### Push proactif de progression
 
@@ -72,20 +75,13 @@ SendMessage({
 | Jalon | Quand |
 |-------|-------|
 | DEMARRE | Des le debut de l'execution de la tache |
-| PROGRESSION | A chaque etape significative (ex: "migration schema OK, endpoints en cours...") |
 | BLOQUE | Des qu'un blocage survient |
 | TERMINE | Quand la tache est completement terminee |
 
-Format de mise a jour de progression :
+Format de mise a jour de progression (une seule ligne) :
 
 ```
-**[NOM-AGENT] EN COURS — [X]%**
----------------------------------------
-Tache : [description]
-Fait : [ce qui est termine]
-En cours : [ce qui est en train d'etre fait]
-Restant : [ce qui reste]
----------------------------------------
+[NOM-AGENT] EN COURS — X% — [etape courante en < 10 mots]
 ```
 
 ### Reponse a une demande de progression (/progression)
@@ -93,53 +89,31 @@ Restant : [ce qui reste]
 Quand le CDP demande un statut de progression, repondre avec ce format exact :
 
 ```
-**[NOM-AGENT] STATUT**
----------------------------------------
-Tache ID    : [id ou "—"]
-Tache       : [nom court de la tache]
-Status      : [TERMINE | EN COURS (X%) | ATTENTE DEPENDANCE | ATTENTE TEAMMATE | ATTENTE VALIDATION | BLOQUE]
-Dependance  : [agent ou tache dont je depends, ou "—"]
-Detail      : [une ligne sur ce qui se passe actuellement]
----------------------------------------
+[NOM-AGENT] | [TERMINE | EN COURS X% | ATTENTE | BLOQUE] | [une ligne]
 ```
 
 ### Format du rapport de fin de tache
 
-**Format STRICT — minimaliste obligatoire. Aucun code, aucun diff, aucune explication dans les messages.**
-
 ```
-**[NOM-AGENT] TERMINE — [DONE|FAILED]**
-Fichiers : [liste des fichiers modifies, un par ligne]
-Commit   : [SHA court]
+[NOM-AGENT] DONE
+Fichiers : chemin/fichier1, chemin/fichier2
+SHA : <commit-sha>
 ```
 
-Exemple :
-```
-**DEV-BACKEND TERMINE — DONE**
-Fichiers : internal/app/app.go, plugins/local/local.go
-Commit   : a3f9c12
-```
+ou en cas d'echec :
 
-En cas d'echec :
 ```
-**DEV-BACKEND TERMINE — FAILED**
-Fichiers : [fichiers tentes ou aucun]
-Commit   : —
-Raison   : [une ligne — cause racine uniquement, pas de stack trace]
+[NOM-AGENT] FAILED
+Raison : [une ligne — cause technique precise]
+Action requise : [ce dont j'ai besoin]
 ```
-
-> **INTERDIT dans les rapports** : extraits de code, diffs, docstrings, explications longues, listes de fonctions implementees.
-> Le CDP lit le code via le code-reviewer — pas via les messages.
 
 ### Format de rapport de blocage
 
 ```
-**[NOM-AGENT] BLOQUE**
----------------------------------------
-Tache : [description]
-Probleme : [description precise — qu'est-ce qui empeche de continuer]
+[NOM-AGENT] BLOQUE
+Raison : [une ligne]
 Action requise : [ce dont j'ai besoin]
----------------------------------------
 ```
 
 ---
@@ -174,14 +148,14 @@ SendMessage({
 ```
 [AGENT DEMARRE]
 → Lit TEAMMATES_PROTOCOL.md ✓
-→ Lit .claude/agents/[nom].template.md ✓
+→ Lit .claude/agents/[nom].md ✓
 → MODE IDLE — en attente d'un ordre du CDP
 
 [CDP envoie un ordre via SendMessage]
 → "Implemente l'endpoint POST /api/auth avec JWT. Voir contracts/http-endpoints.md."
+→ SendMessage(cdp, "DEV-BACKEND EN COURS — 0% — demarrage implementation /api/auth")
 → [Travail effectue...]
-→ SendMessage(cdp, "**DEV-BACKEND TERMINE** — endpoint POST /api/auth implemente,
-   tests unitaires ajoutés, commits atomiques effectues.")
+→ SendMessage(cdp, "DEV-BACKEND DONE\nFichiers : internal/auth/handler.go, internal/auth/handler_test.go\nSHA : a3f1c2d")
 → MODE IDLE — en attente du prochain ordre
 
 [CDP envoie shutdown_request]

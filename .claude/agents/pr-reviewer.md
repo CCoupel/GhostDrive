@@ -59,10 +59,10 @@ Executer en parallele :
 
 | Check | Commande | Critere |
 |-------|---------|---------|
-| Lint | `{LINT_CMD}` | 0 erreur |
-| Types | `{TYPECHECK_CMD}` | 0 erreur |
-| Tests | `{TEST_CMD}` | 0 echec |
-| Audit secu | `{AUDIT_CMD}` | 0 critique/haute |
+| Lint | `golangci-lint run` | 0 erreur |
+| Types | `cd frontend {TYPECHECK_CMD}{TYPECHECK_CMD} npm run typecheck` | 0 erreur |
+| Tests | `go test ./... -v -cover` | 0 echec |
+| Audit secu | `govulncheck ./...` | 0 critique/haute |
 
 Puis analyser le diff :
 - Lire chaque fichier modifie

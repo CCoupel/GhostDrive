@@ -1,7 +1,7 @@
 {
   "name": "GhostDrive",
   "description": "Client de synchronisation Windows vers backends de stockage prives (WebDAV, MooseFS, S3...). Equivalent OneDrive open-source avec placeholders Files On-Demand, cache local et architecture plugin.",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "initialized_at": "2026-04-15T00:00:00Z",
   "initialized_from": "workshop",
   "stack": {
@@ -22,34 +22,61 @@
     "database": null,
     "plugins": {
       "interface": "plugins/plugin.go",
-      "v1": ["webdav", "moosefs"],
+      "v1": [
+        "webdav",
+        "moosefs"
+      ],
       "pattern": "go-interface-compiled"
     }
   },
   "platform": {
     "primary": "windows",
-    "secondary": ["linux"],
-    "windows_api": ["cloud-filter-api", "winfsp"],
+    "secondary": [
+      "linux"
+    ],
+    "windows_api": [
+      "cloud-filter-api",
+      "winfsp"
+    ],
     "distribution": "binary-releases"
   },
   "infrastructure": {
     "cicd": "github-actions",
     "deploy": "binary-releases",
     "targets": [
-      { "os": "windows", "arch": "amd64", "suffix": "windows-amd64.exe" }
+      {
+        "os": "windows",
+        "arch": "amd64",
+        "suffix": "windows-amd64.exe"
+      }
     ],
     "versioning": "semantic",
-    "version_sources": ["server-go/config.json", "frontend/package.json", "git-tag"]
+    "version_sources": [
+      "server-go/config.json",
+      "frontend/package.json",
+      "git-tag"
+    ]
   },
   "testing": {
-    "backend": ["go-test", "testify"],
-    "frontend": ["vitest"],
+    "backend": [
+      "go-test",
+      "testify"
+    ],
+    "frontend": [
+      "vitest"
+    ],
     "e2e": [],
-    "integration": ["webdav-in-memory"],
+    "integration": [
+      "webdav-in-memory"
+    ],
     "coverage_threshold": 70
   },
   "security": {
-    "concerns": ["local-file-access", "backend-credentials", "private-storage"]
+    "concerns": [
+      "local-file-access",
+      "backend-credentials",
+      "private-storage"
+    ]
   },
   "versioning": {
     "roadmap": {
@@ -67,8 +94,22 @@
     "commits": "conventional-commits",
     "issues": {
       "epics": "parent-issues-with-checklist",
-      "milestones": ["V1", "V2", "V3"],
+      "milestones": [
+        "V1",
+        "V2",
+        "V3"
+      ],
       "workflow": "open -> in-progress (branch linked) -> PR -> done"
     }
+  },
+  "team_name": "ghostdrive-team",
+  "org": "CCoupel",
+  "project": "GhostDrive",
+  "commands": {
+    "build": "wails build",
+    "test": "go test ./... -v -cover",
+    "lint": "golangci-lint run",
+    "audit": "govulncheck ./...",
+    "typecheck": "cd frontend && npm run typecheck"
   }
 }

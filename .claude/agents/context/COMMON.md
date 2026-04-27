@@ -1,6 +1,6 @@
 # Regles Communes a Tous les Agents
 
-> **Ce fichier contient les regles obligatoires pour TOUS les agents {PROJECT_NAME}.**
+> **Ce fichier contient les regles obligatoires pour TOUS les agents GhostDrive.**
 > Chaque agent doit referencer ce fichier : `@import COMMON.md`
 >
 > **Contexte projet** : Voir `context/PROJECT_CONTEXT.md` pour le stack technique, la structure et les commandes.
@@ -95,49 +95,35 @@ Re-afficher le plan complet avec la progression :
 
 ### Au Demarrage de la Tache
 
-Vous DEVEZ afficher immediatement un message de demarrage avec ce format :
+Envoyer immediatement via SendMessage au CDP :
 
 ```
-**[NOM-AGENT] DEMARRE**
----------------------------------------
-[Champ principal] : [Valeur]
-[Champ secondaire] : [Valeur]
-[Champ tertiaire] : [Valeur]
----------------------------------------
+[NOM-AGENT] EN COURS — 0% — demarrage [description courte]
 ```
 
 ### A la Fin de la Tache
 
 **En cas de succes :**
 ```
-**[NOM-AGENT] TERMINE**
----------------------------------------
-[Champ principal] : [Valeur]
-[Resultat 1] : [Valeur]
-[Resultat 2] : [Valeur]
-[Statut final] : [OK / Pret pour X]
----------------------------------------
+[NOM-AGENT] DONE
+Fichiers : chemin/fichier1, chemin/fichier2
+SHA : <commit-sha>
 ```
 
 **En cas d'erreur :**
 ```
-**[NOM-AGENT] ERREUR**
----------------------------------------
-[Champ principal] : [Valeur]
-Probleme : [Description]
-Action requise : [Solution proposee]
----------------------------------------
+[NOM-AGENT] FAILED
+Raison : [une ligne — cause technique precise]
+Action requise : [ce dont j'ai besoin]
 ```
 
-### Notifications Intermediaires (OBLIGATOIRE pour workflows longs)
+> **REGLE** : Jamais de contenu de code, de diff, ni d'extraits de fichiers dans les messages SendMessage.
+> Les messages vers le CDP sont des metadonnees (statut, fichiers, SHA), pas des rapports techniques.
 
-Pour les workflows longs, notifier entre chaque phase majeure avec le plan mis a jour :
+### Notifications Intermediaires (workflows longs uniquement)
+
 ```
-**[NOM-AGENT] - Phase [N]/[Total] : [Nom de la phase]**
-   -- [Ce qui va etre fait]
-
-## Plan de Taches [N/Total]
-[Plan complet avec statuts mis a jour]
+[NOM-AGENT] EN COURS — X% — [etape courante en < 10 mots]
 ```
 
 ---

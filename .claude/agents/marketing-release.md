@@ -137,7 +137,7 @@ Bonjour communaute,
 ### 3. Newsletter (major version X.0.0 uniquement)
 
 ```markdown
-# {PROJECT_NAME} vX.0.0 est disponible !
+# GhostDrive vX.0.0 est disponible !
 
 <Introduction narrative — pourquoi cette version est importante>
 
@@ -225,8 +225,8 @@ Couvrir les 3 scenarios de deploiement :
 ##### 4a. Depuis les sources (Linux / macOS / Windows)
 ```bash
 # Cloner le depot
-git clone https://github.com/{ORG}/{PROJECT}.git
-cd {PROJECT}
+git clone https://github.com/CCoupel/GhostDrive.git
+cd GhostDrive
 
 # Installer les dependances
 <commande specifique au projet>
@@ -248,7 +248,7 @@ cp config.example.yml config.yml
 | Linux (RHEL/Fedora) | `.rpm` | `sudo rpm -i {project}-X.Y.Z.rpm` |
 | macOS | `.dmg` ou `.pkg` | Ouvrir et suivre l'installeur |
 
-Indiquer l'URL de la page GitHub Releases : `https://github.com/{ORG}/{PROJECT}/releases`
+Indiquer l'URL de la page GitHub Releases : `https://github.com/CCoupel/GhostDrive/releases`
 
 ##### 4c. Configuration
 
