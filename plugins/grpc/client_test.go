@@ -349,3 +349,46 @@ func TestGRPCBackend_ErrorMapping_NotConnected(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, plugins.ErrNotConnected), "expected ErrNotConnected, got: %v", err)
 }
+
+// ── Delete / Move tests ───────────────────────────────────────────────────────
+
+func TestGRPCBackend_Delete(t *testing.T) {
+	mock := newMockBackend()
+	backend, cleanup := newTestPair(t, mock)
+	defer cleanup()
+	_ = backend.Connect(plugins.BackendConfig{})
+
+	// Pre-populate a remote file.
+	mock.files["/to-delete.txt"] = []byte("data")
+
+	err := backend.Delete(context.Background(), "/to-delete.txt")
+	require.NoError(t, err)
+	assert.NotContains(t, mock.files, "/to-delete.txt", "file must be removed after Delete")
+}
+
+func TestGRPCBackend_Move(t *testing.T) {
+	mock := newMockBackend()
+	backend, cleanup := newTestPair(t, mock)
+	defer cleanup()
+	_ = backend.Connect(plugins.BackendConfig{})
+
+	mock.files["/src.txt"] = []byte("content")
+
+	err := backend.Move(context.Background(), "/src.txt", "/dst.txt")
+	require.NoError(t, err)
+	assert.NotContains(t, mock.files, "/src.txt", "source must not exist after Move")
+	assert.Contains(t, mock.files, "/dst.txt", "destination must exist after Move")
+}
+
+func TestGRPCBackend_ErrorMapping_DeleteNotFound(t *testing.T) {
+	mock := newMockBackend()
+	mock.connected = true
+	backend, cleanup := newTestPair(t, mock)
+	defer cleanup()
+
+	// File does not exist → mockBackend.Delete wraps ErrFileNotFound.
+	err := backend.Delete(context.Background(), "/nonexistent.txt")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, plugins.ErrFileNotFound),
+		"expected ErrFileNotFound on Delete of nonexistent file, got: %v", err)
+}

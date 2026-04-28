@@ -15,6 +15,13 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+const (
+	// maxUploadSize is the maximum total bytes accepted per Upload RPC (10 GB).
+	// Exceeding this limit causes the stream to be aborted with codes.ResourceExhausted
+	// to prevent DoS via disk saturation.
+	maxUploadSize = 10 * 1024 * 1024 * 1024
+)
+
 // ── GRPCBackendServer ────────────────────────────────────────────────────────
 
 // GRPCBackendServer implements the proto-generated StorageServiceServer.
@@ -59,6 +66,7 @@ func (s *GRPCBackendServer) IsConnected(_ context.Context, _ *storagepb.IsConnec
 func (s *GRPCBackendServer) Upload(stream storagepb.StorageService_UploadServer) error {
 	var remotePath string
 	firstMsg := true
+	var totalWritten int64
 
 	tmpFile, err := os.CreateTemp("", "ghostdrive-upload-*")
 	if err != nil {
@@ -80,7 +88,13 @@ func (s *GRPCBackendServer) Upload(stream storagepb.StorageService_UploadServer)
 			remotePath = chunk.GetRemotePath()
 			firstMsg = false
 		}
-		if len(chunk.GetData()) > 0 {
+		if n := len(chunk.GetData()); n > 0 {
+			totalWritten += int64(n)
+			if totalWritten > maxUploadSize {
+				tmpFile.Close()
+				return status.Errorf(codes.ResourceExhausted,
+					"upload: taille maximale dépassée (%d octets > %d)", totalWritten, maxUploadSize)
+			}
 			if _, writeErr := tmpFile.Write(chunk.GetData()); writeErr != nil {
 				tmpFile.Close()
 				return status.Errorf(codes.Internal, "upload: write temp: %v", writeErr)
