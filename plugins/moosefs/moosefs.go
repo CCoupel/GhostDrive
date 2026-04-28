@@ -28,6 +28,10 @@ type Backend struct {
 	connected bool
 }
 
+func init() {
+	plugins.Register("moosefs", func() plugins.StorageBackend { return New() })
+}
+
 // New creates an unconnected MooseFS backend.
 func New() *Backend {
 	return &Backend{}

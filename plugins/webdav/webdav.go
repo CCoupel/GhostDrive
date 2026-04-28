@@ -32,6 +32,10 @@ type Backend struct {
 	connected bool
 }
 
+func init() {
+	plugins.Register("webdav", func() plugins.StorageBackend { return New() })
+}
+
 // New creates an unconnected WebDAV backend.
 func New() *Backend {
 	return &Backend{

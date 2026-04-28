@@ -10,7 +10,9 @@ import (
 	"github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/CCoupel/GhostDrive/plugins"
-	_ "github.com/CCoupel/GhostDrive/plugins/local" // registers "local" backend via init()
+	_ "github.com/CCoupel/GhostDrive/plugins/local"   // registers "local" backend via init()
+	_ "github.com/CCoupel/GhostDrive/plugins/moosefs" // registers "moosefs" backend via init()
+	_ "github.com/CCoupel/GhostDrive/plugins/webdav"  // registers "webdav" backend via init()
 )
 
 // BackendManager manages the lifecycle of storage backends.
