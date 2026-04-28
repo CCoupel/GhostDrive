@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-04-28
+
+### Added
+
+- **Plugin loader dynamique** (go-plugin + gRPC) : chargement de plugins externes compilés depuis `<AppDir>/plugins/*.exe`
+- **Bridge gRPC complet** couvrant toute l'interface `StorageBackend` (13 RPCs, streaming Upload/Download/Watch)
+- **Registre dynamique** (`DynamicRegistry`) : scan de répertoire, watchdog avec backoff exponentiel (1s→2s→4s, 3 tentatives)
+- **SDK Go pour développeurs de plugins** — template de référence + plugin echo fonctionnel
+- **Bindings Wails** : `GetLoadedPlugins()`, `ReloadPlugins()`, `GetAvailableBackendTypes()` étendu aux plugins dynamiques
+- **Événements Wails** : `plugin:loaded`, `plugin:reloaded`
+- Fix `init()` d'auto-registration dans `webdav` et `moosefs`
+- Sécurité : cap upload gRPC à 10 GB (`codes.ResourceExhausted`)
+
+### Fixed
+
+- `go.mod` : dépendances go-plugin/go-hclog/grpc/protobuf promues en directes
+
+### Known Issues (v0.6.1)
+
+- `context.Background()` sans timeout sur les appels lifecycle gRPC (MAJEUR-3)
+- Watchdog restart n'invalide pas les instances `BackendManager` existantes (MAJEUR-4)
+- `GRPCBackend.Version()` retourne `"unknown"` — `GetVersion` RPC prévu v0.6.1
+
 ## [0.5.0] — 2026-04-26
 
 ### Added
@@ -168,6 +191,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ci.yml` réutilisé dans `build.yml` via `workflow_call` (pas de duplication)
 - Actions upgradées vers les versions compatibles Node.js 24 : checkout@v6, setup-go@v6, setup-node@v6, upload-artifact@v7, download-artifact@v8
 
+[0.6.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.6.0
+[0.5.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.5.0
+[0.4.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.4.0
 [0.3.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.3.0
 [0.2.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.2.0
 [0.1.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.1.0
