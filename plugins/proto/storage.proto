@@ -1,0 +1,154 @@
+syntax = "proto3";
+
+package ghostdrive.storage.v1;
+
+option go_package = "github.com/CCoupel/GhostDrive/plugins/proto;storagepb";
+
+// ─── Shared Messages ─────────────────────────────────────────────────────────
+
+// BackendConfigProto carries the serialised BackendConfig for Connect calls.
+message BackendConfigProto {
+  string id          = 1;
+  string name        = 2;
+  string type        = 3;
+  bool   enabled     = 4;
+  bool   auto_sync   = 5;
+  map<string, string> params       = 6;
+  string sync_dir    = 7;
+  string remote_path = 8;
+  string local_path  = 9;
+}
+
+// FileInfoProto carries metadata for a remote file or directory.
+message FileInfoProto {
+  string name           = 1;
+  string path           = 2;
+  int64  size           = 3;
+  bool   is_dir         = 4;
+  int64  mod_time_unix  = 5; // Unix timestamp (seconds)
+  string etag           = 6;
+  bool   is_placeholder = 7;
+  bool   is_cached      = 8;
+}
+
+// FileEventProto carries a change notification from Watch.
+message FileEventProto {
+  string event_type    = 1; // "created" | "modified" | "deleted" | "renamed"
+  string path          = 2;
+  string old_path      = 3;
+  int64  timestamp_unix = 4;
+  string source        = 5; // "local" | "remote"
+}
+
+// ─── Upload (client-streaming) ───────────────────────────────────────────────
+
+// UploadChunk is sent by the client during an Upload RPC.
+// The first message must contain the metadata fields; subsequent messages
+// carry data only (metadata fields are ignored after the first message).
+message UploadChunk {
+  // Metadata — populated in first message only.
+  string local_path  = 1;
+  string remote_path = 2;
+  int64  total_bytes = 3; // used by server to compute progress
+  // Payload — present in every message.
+  bytes  data        = 4;
+}
+
+// UploadResult is returned by the server after the last chunk is received.
+message UploadResult {
+  string error = 1; // empty on success
+}
+
+// ─── Download (server-streaming) ─────────────────────────────────────────────
+
+// DownloadRequest initiates a Download RPC.
+message DownloadRequest {
+  string remote_path = 1;
+  string local_path  = 2;
+}
+
+// DownloadChunk is streamed by the server during a Download RPC.
+message DownloadChunk {
+  bytes  data        = 1;
+  int64  bytes_done  = 2;
+  int64  bytes_total = 3;
+  string error       = 4; // non-empty on terminal error
+}
+
+// ─── Simple request / response wrappers ──────────────────────────────────────
+
+message NameRequest  {}
+message NameResponse { string name = 1; }
+
+message ConnectRequest  { BackendConfigProto config = 1; }
+message ConnectResponse { string error = 1; }
+
+message DisconnectRequest  {}
+message DisconnectResponse { string error = 1; }
+
+message IsConnectedRequest  {}
+message IsConnectedResponse { bool connected = 1; }
+
+message DeleteRequest  { string path = 1; }
+message DeleteResponse { string error = 1; }
+
+message MoveRequest  { string old_path = 1; string new_path = 2; }
+message MoveResponse { string error = 1; }
+
+message ListRequest  { string path = 1; }
+message ListResponse {
+  repeated FileInfoProto files = 1;
+  string error = 2;
+}
+
+message StatRequest  { string path = 1; }
+message StatResponse {
+  FileInfoProto file  = 1;
+  string        error = 2;
+}
+
+message CreateDirRequest  { string path = 1; }
+message CreateDirResponse { string error = 1; }
+
+message WatchRequest { string path = 1; }
+// WatchEvent is streamed by the server until the client cancels the context.
+message WatchEvent {
+  FileEventProto event = 1;
+  string         error = 2; // non-empty on terminal error
+}
+
+message QuotaRequest  {}
+message QuotaResponse {
+  int64  free  = 1;
+  int64  total = 2;
+  string error = 3;
+}
+
+// ─── Service ─────────────────────────────────────────────────────────────────
+
+service StorageService {
+  // Identification
+  rpc Name        (NameRequest)        returns (NameResponse);
+
+  // Connection lifecycle
+  rpc Connect     (ConnectRequest)     returns (ConnectResponse);
+  rpc Disconnect  (DisconnectRequest)  returns (DisconnectResponse);
+  rpc IsConnected (IsConnectedRequest) returns (IsConnectedResponse);
+
+  // File operations
+  rpc Upload    (stream UploadChunk)    returns (UploadResult);
+  rpc Download  (DownloadRequest)       returns (stream DownloadChunk);
+  rpc Delete    (DeleteRequest)         returns (DeleteResponse);
+  rpc Move      (MoveRequest)           returns (MoveResponse);
+
+  // Navigation
+  rpc List      (ListRequest)           returns (ListResponse);
+  rpc Stat      (StatRequest)           returns (StatResponse);
+  rpc CreateDir (CreateDirRequest)      returns (CreateDirResponse);
+
+  // Watch (server-streaming until context cancelled)
+  rpc Watch     (WatchRequest)          returns (stream WatchEvent);
+
+  // Quota
+  rpc GetQuota  (QuotaRequest)          returns (QuotaResponse);
+}
