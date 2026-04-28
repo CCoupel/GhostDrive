@@ -5,13 +5,21 @@
 //   - Integration testing the plugin loader without real storage infrastructure.
 //   - As a reference implementation for plugin authors.
 //
-// Build:
+// This file is excluded from `go build ./...` via the `ignore` build tag.
+// To build the echo plugin binary, use the Makefile:
 //
-//	GOOS=windows GOARCH=amd64 go build -o echo.exe .
+//	make build          # → echo.exe (Windows AMD64)
+//
+// Or manually:
+//
+//	GOOS=windows GOARCH=amd64 go build -tags ignore -o echo.exe .
 //
 // Install:
 //
 //	copy echo.exe <AppDir>\plugins\echo.exe
+
+//go:build ignore
+
 package main
 
 import (

@@ -14,7 +14,7 @@ CGO    := 0
 build:
 	@echo "Building echo plugin for $(GOOS)/$(GOARCH)..."
 	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=$(CGO) \
-		go build -ldflags="-s -w" -o echo.exe ./echo/
+		go build -tags ignore -ldflags="-s -w" -o echo.exe ./echo/
 	@echo "Done: echo.exe"
 
 clean:
