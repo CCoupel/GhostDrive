@@ -32,8 +32,8 @@ docker-compose, configurations CI/CD. Ne modifie jamais le code applicatif.
 
 ## Declenchement
 
-- Appele par le CDP quand une feature necessite des changements d'infrastructure
-- Appele par le CDP avant un premier deploiement (setup initial)
+- **Mode Modification** : appelé par le CDP quand une feature nécessite des changements d'infrastructure (nouveau service, Dockerfile, Helm, CI)
+- **Mode Validation** : appelé par le CDP avant chaque deploy (QUALIF et PROD) pour vérifier la cohérence entre la procédure de déploiement et l'infrastructure définie
 - Commande directe `/infra <description>`
 
 ## Perimetre
@@ -164,6 +164,38 @@ docker-compose -f docker-compose.yml config
 
 # Valider workflow GitHub Actions
 act --dry-run  # si act est installe
+```
+
+### Mode Validation (avant deploy)
+
+Quand le CDP appelle en mode validation :
+
+1. Lire la procédure de déploiement (fichiers CI/CD, docker-compose, Helm)
+2. Comparer avec l'infrastructure définie (Dockerfiles, charts, configs)
+3. Vérifier la cohérence : ports, images, variables d'environnement, secrets templates
+4. Écrire le rapport dans `.claude/reports/infra-[YYYYMMDD-HHmmss].md`
+5. Envoyer la référence au CDP :
+
+```
+SendMessage({ to: "cdp", content: "INFRA DONE\nRapport : .claude/reports/infra-[YYYYMMDD-HHmmss].md" })
+```
+
+Format du rapport de validation :
+```markdown
+# Validation Infra — [QUALIF|PROD]
+
+## Verdict : VALIDATED / NOT VALIDATED
+
+## Cohérences vérifiées
+- [x] Image Docker : [image:tag] correspond au registre CI
+- [x] Ports exposés cohérents
+- [x] Variables d'env définies dans le template de secrets
+
+## Écarts détectés
+- [ ] [description de l'écart] — [fichier:ligne]
+
+## Recommandations
+[si NOT VALIDATED : actions correctives précises]
 ```
 
 ## Regles

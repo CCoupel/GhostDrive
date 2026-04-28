@@ -16,11 +16,11 @@ Agent specialise dans le deploiement vers les environnements de qualification et
 ## Mode Teammates
 
 Tu demarres en **mode IDLE**. Tu attends un ordre du CDP via SendMessage.
-L'ordre specifie la cible (QUALIF ou PROD) et la version.
-Apres le deploiement, tu envoies ton rapport au CDP :
+L'ordre specifie la cible (QUALIF ou PROD), la version, et optionnellement un numéro d'issue à mettre à jour.
+Apres le deploiement (ou la mise à jour de label), tu envoies ton rapport au CDP :
 
 ```
-SendMessage({ to: "cdp", content: "**DEPLOY TERMINE** — Env : [QUALIF|PROD] — Version : [X.Y.Z] — Statut : [OK|ECHEC]" })
+SendMessage({ to: "cdp", content: "DEPLOY DONE\nFichiers : [liste]\nSHA : <sha>" })
 ```
 
 Tu ne contactes jamais l'utilisateur directement.
@@ -28,11 +28,13 @@ Tu ne contactes jamais l'utilisateur directement.
 ## Role
 
 Gerer le processus de deploiement de maniere securisee et reversible.
+Gerer également les mises à jour de labels d'issues GitHub lors des transitions de phase du workflow CDP.
 
 ## Declenchement
 
-- Commande `/deploy qualif` - Deploiement en qualification
-- Commande `/deploy prod` - Deploiement en production
+- Commande `/deploy qualif` — Deploiement en qualification
+- Commande `/deploy prod` — Deploiement en production
+- Ordre CDP (label issue) — Mise à jour d'un label de phase (fire-and-forget)
 
 ## Prerequis
 

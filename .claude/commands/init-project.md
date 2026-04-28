@@ -645,6 +645,18 @@ AUDIT_CMD=$(jq -r '.commands.audit    // ""'         .claude/project-config.json
 TYPECHECK_CMD=$(jq -r '.commands.typecheck // ""'    .claude/project-config.json)
 ```
 
+Echapper les caracteres speciaux sed (`&`, `\`, `|`) dans les valeurs de commandes
+(un `&` dans la chaine de remplacement sed signifie "texte matche" — ex: `cd frontend && npm run build` serait corrompu sans echappement) :
+
+```bash
+escape_sed() { printf '%s' "$1" | sed 's/[&\|]/\\&/g'; }
+BUILD_CMD_ESC=$(escape_sed "$BUILD_CMD")
+TEST_CMD_ESC=$(escape_sed "$TEST_CMD")
+LINT_CMD_ESC=$(escape_sed "$LINT_CMD")
+AUDIT_CMD_ESC=$(escape_sed "$AUDIT_CMD")
+TYPECHECK_CMD_ESC=$(escape_sed "$TYPECHECK_CMD")
+```
+
 Appliquer la substitution sur les fichiers deployes (commandes + agents generiques) :
 
 ```bash
@@ -658,11 +670,11 @@ for f in .claude/commands/*.md .claude/agents/*.md; do
     -e "s|{TEAM_NAME}|${TEAM_NAME}|g"       \
     -e "s|{ORG}|${ORG}|g"                   \
     -e "s|{PROJECT}|${PROJECT}|g"            \
-    -e "s|{BUILD_CMD}|${BUILD_CMD}|g"        \
-    -e "s|{TEST_CMD}|${TEST_CMD}|g"          \
-    -e "s|{LINT_CMD}|${LINT_CMD}|g"          \
-    -e "s|{AUDIT_CMD}|${AUDIT_CMD}|g"        \
-    -e "s|{TYPECHECK_CMD}|${TYPECHECK_CMD}|g" \
+    -e "s|{BUILD_CMD}|${BUILD_CMD_ESC}|g"        \
+    -e "s|{TEST_CMD}|${TEST_CMD_ESC}|g"          \
+    -e "s|{LINT_CMD}|${LINT_CMD_ESC}|g"          \
+    -e "s|{AUDIT_CMD}|${AUDIT_CMD_ESC}|g"        \
+    -e "s|{TYPECHECK_CMD}|${TYPECHECK_CMD_ESC}|g" \
     "$f"
   echo "  ✓ placeholders appliques dans $name"
 done
@@ -713,17 +725,37 @@ Bonne utilisation de Claude Code !
 
 Si `project-config.json` + `TEMPLATE_claude/` existent :
 
+### Etape pre-menu — Calcul automatique des changements disponibles
+
+Avant d'afficher le menu, calculer silencieusement les changements entre le template
+local (`TEMPLATE_claude/`) et les fichiers deployes (`.claude/commands/`, `.claude/agents/`).
+Ne pas fetcher GitHub a ce stade — utiliser le template local tel qu'il est.
+
+Calculer le statut de chaque fichier (NOUVEAU / MODIFIE / INCHANGE / RELIQUAT) selon
+la meme logique que l'etape d3 ci-dessous, puis afficher la synthese :
+
 ```
 Ce projet est deja initialise (config du YYYY-MM-DD).
-Template : CCoupel/claude_project_template — dernier sync : <date> (<commit>)
+Template local : CCoupel/claude_project_template — dernier sync : <date> (<commit>)
+
+Changements disponibles (template local) :
+  [+] feature, hotfix                   ← 2 nouveaux
+  [~] cdp, bugfix                       ← 2 modifies
+  [!] old-command                       ← 1 reliquat
+  (12 fichiers inchanges)
+
+  → Aucun changement detecte            ← afficher si tout est INCHANGE
 
 Voulez-vous :
 a) Reconfigurer completement (ecrase la config)
 b) Modifier certains parametres
 c) Re-analyser le code (detecter les changements)
-d) Synchroniser le template depuis GitHub
+d) Synchroniser le template depuis GitHub (fetch + appliquer)
 e) Annuler
 ```
+
+> Si aucun changement local n'est detecte, indiquer clairement que l'option d)
+> fetchera quand meme GitHub pour verifier s'il existe une version plus recente.
 
 ### Option d : Synchronisation avec diff et nettoyage
 

@@ -20,7 +20,7 @@ L'ordre specifie le numero de PR et la branche cible.
 Apres la validation, tu envoies ton rapport au CDP :
 
 ```
-SendMessage({ to: "cdp", content: "**PR-REVIEWER TERMINE** — PR #[N] — Verdict : [APPROUVE|REFUSE] — [resume]" })
+SendMessage({ to: "cdp", content: "PR-REVIEWER DONE\nRapport : .claude/reports/pr-review-[YYYYMMDD-HHmmss].md" })
 ```
 
 Tu ne contactes jamais l'utilisateur directement.
@@ -60,7 +60,7 @@ Executer en parallele :
 | Check | Commande | Critere |
 |-------|---------|---------|
 | Lint | `golangci-lint run` | 0 erreur |
-| Types | `cd frontend {TYPECHECK_CMD}{TYPECHECK_CMD} npm run typecheck` | 0 erreur |
+| Types | `cd frontend && npm run typecheck` | 0 erreur |
 | Tests | `go test ./... -v -cover` | 0 echec |
 | Audit secu | `govulncheck ./...` | 0 critique/haute |
 
