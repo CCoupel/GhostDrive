@@ -106,6 +106,20 @@ jobs:
             sudo wget -q "${BASE}/${h}" -O "/usr/local/include/winfsp/${h}"
           done
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '25.1'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install protoc Go plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+      - name: Generate protobuf stubs
+        run: protoc --go_out=. --go-grpc_out=. --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative plugins/proto/storage.proto
+
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
 
@@ -119,7 +133,7 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           FILE="ghostdrive-v${{ needs.version.outputs.version }}-${{ matrix.suffix }}"
-          wails build -platform ${{ matrix.goos }}/${{ matrix.goarch }} -o "$FILE"
+          wails build -platform ${{ matrix.goos }}/${{ matrix.goarch }} -o "$FILE" -skipbindings
           echo "✅ ${{ matrix.goos }}/${{ matrix.goarch }} → $FILE"
 
       - name: Locate binary
