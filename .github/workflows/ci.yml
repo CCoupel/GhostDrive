@@ -29,10 +29,9 @@ jobs:
           cache: true
       - name: Install protoc + plugins
         run: |
-          PB_REL=3.25.1
+          PB_REL="3.25.1"
           curl -Lo /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v${PB_REL}/protoc-${PB_REL}-linux-x86_64.zip
-          unzip /tmp/protoc.zip -d /tmp/protoc
-          sudo mv /tmp/protoc/bin/protoc /usr/local/bin/protoc
+          sudo unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
           go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
       - name: Generate protobuf stubs
