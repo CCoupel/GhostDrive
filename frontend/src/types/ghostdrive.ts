@@ -5,7 +5,7 @@ export type FileEventType = 'created' | 'modified' | 'deleted' | 'renamed';
 export type SyncStatus = 'idle' | 'syncing' | 'paused' | 'error';
 export type TransferDirection = 'upload' | 'download';
 export type FileSource = 'local' | 'remote';
-export type BackendType = 'webdav' | 'moosefs' | 'local';
+export type BackendType = 'local' | string;
 export type TrayAction = 'open' | 'settings' | 'pause' | 'sync' | 'quit';
 
 export interface FileInfo {

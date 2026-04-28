@@ -5,6 +5,7 @@ import {context} from '../models';
 import {types} from '../models';
 import {config} from '../models';
 import {placeholder} from '../models';
+import {loader} from '../models';
 
 export function AddBackend(arg1:plugins.BackendConfig):Promise<plugins.BackendConfig>;
 
@@ -32,6 +33,8 @@ export function GetDriveStatus():Promise<placeholder.DriveStatus>;
 
 export function GetGhostDriveRoot():Promise<string>;
 
+export function GetLoadedPlugins():Promise<Array<loader.PluginInfo>>;
+
 export function GetMountPoint():Promise<string>;
 
 export function GetSyncState():Promise<types.SyncState>;
@@ -47,6 +50,8 @@ export function OpenSyncFolder(arg1:string):Promise<void>;
 export function PauseSync(arg1:string):Promise<void>;
 
 export function Quit():Promise<void>;
+
+export function ReloadPlugins():Promise<void>;
 
 export function RemoveBackend(arg1:string):Promise<void>;
 

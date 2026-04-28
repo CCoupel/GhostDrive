@@ -72,7 +72,7 @@ type SyncState struct {
 type BackendConfig struct {
 	ID      string            `json:"id"`
 	Name    string            `json:"name"`
-	Type    string            `json:"type"` // "webdav" | "moosefs"
+	Type    string            `json:"type"` // "local" or dynamic plugin type
 	Enabled bool              `json:"enabled"`
 	Params  map[string]string `json:"params"`
 	SyncDir string            `json:"syncDir"`

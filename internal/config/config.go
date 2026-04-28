@@ -10,6 +10,11 @@ import (
 	"github.com/CCoupel/GhostDrive/plugins"
 )
 
+// AppVersion is the canonical version of this build.
+// It is always written into the loaded config so the UI reflects the binary version,
+// not whatever version string was persisted in an older config.json.
+const AppVersion = "0.6.0"
+
 // AppConfig represents the global application configuration (config.json).
 type AppConfig struct {
 	Version        string                  `json:"version"`
@@ -32,7 +37,7 @@ type AppConfig struct {
 // DefaultConfig returns a new AppConfig with sensible defaults.
 func DefaultConfig() AppConfig {
 	return AppConfig{
-		Version:        "0.2.0",
+		Version:        AppVersion,
 		Backends:       []plugins.BackendConfig{},
 		CacheEnabled:   false,
 		CacheDir:       "",

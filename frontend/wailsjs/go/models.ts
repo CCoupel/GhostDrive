@@ -49,6 +49,31 @@ export namespace config {
 
 }
 
+export namespace loader {
+	
+	export class PluginInfo {
+	    name: string;
+	    version: string;
+	    path: string;
+	    status: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PluginInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.version = source["version"];
+	        this.path = source["path"];
+	        this.status = source["status"];
+	        this.error = source["error"];
+	    }
+	}
+
+}
+
 export namespace placeholder {
 	
 	export class DriveStatus {

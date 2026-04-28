@@ -54,6 +54,10 @@ export function GetGhostDriveRoot() {
   return window['go']['app']['App']['GetGhostDriveRoot']();
 }
 
+export function GetLoadedPlugins() {
+  return window['go']['app']['App']['GetLoadedPlugins']();
+}
+
 export function GetMountPoint() {
   return window['go']['app']['App']['GetMountPoint']();
 }
@@ -84,6 +88,10 @@ export function PauseSync(arg1) {
 
 export function Quit() {
   return window['go']['app']['App']['Quit']();
+}
+
+export function ReloadPlugins() {
+  return window['go']['app']['App']['ReloadPlugins']();
 }
 
 export function RemoveBackend(arg1) {

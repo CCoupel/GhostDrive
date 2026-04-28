@@ -34,33 +34,13 @@ const localZoneSchema = z.object({
   }
 });
 
-/** Zone REMOTE — WebDAV */
-const webdavRemoteSchema = z.object({
-  url:        z.string().url('URL invalide'),
-  username:   z.string().min(1, 'Requis'),
-  password:   z.string().min(1, 'Requis'),
-  insecure:   z.boolean().optional(),
-  remotePath: z.string().min(1, 'Requis').refine(v => v.startsWith('/'), 'Doit commencer par /'),
-});
-
-/** Zone REMOTE — MooseFS */
-const moosefsRemoteSchema = z.object({
-  master:     z.string().min(1, 'Requis'),
-  port:       z.string().optional(),
-  mountPath:  z.string().min(1, 'Requis').refine(v => v.startsWith('/'), 'Doit commencer par /'),
-  remotePath: z.string().min(1, 'Requis').refine(v => v.startsWith('/'), 'Doit commencer par /'),
-});
-
 /** Zone REMOTE — Local */
 const localRemoteSchema = z.object({
   rootPath: z.string().min(1, 'Le dossier source est requis'),
 });
 
-type LocalZoneForm     = z.infer<typeof localZoneSchema>;
-type WebDAVRemoteForm  = z.infer<typeof webdavRemoteSchema>;
-type MooseFSRemoteForm = z.infer<typeof moosefsRemoteSchema>;
-type LocalRemoteForm   = z.infer<typeof localRemoteSchema>;
-type AnyRemoteForm     = WebDAVRemoteForm | MooseFSRemoteForm | LocalRemoteForm;
+type LocalZoneForm  = z.infer<typeof localZoneSchema>;
+type LocalRemoteForm = z.infer<typeof localRemoteSchema>;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -82,17 +62,13 @@ interface SyncPointFormProps {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function labelFor(type: BackendType): string {
-  switch (type) {
-    case 'webdav':  return 'WebDAV';
-    case 'moosefs': return 'MooseFS';
-    case 'local':   return 'Local';
-    default:        return type;
-  }
+  if (type === 'local') return 'Local';
+  return type;
 }
 
 function buildDraft(
   localZone: LocalZoneForm,
-  remote: AnyRemoteForm,
+  remote: LocalRemoteForm,
   backendType: BackendType,
 ): Omit<BackendConfig, 'id'> {
   const localPath = localZone.localPathMode === 'manual'
@@ -108,34 +84,7 @@ function buildDraft(
     syncDir:    localPath,
   };
 
-  if (backendType === 'webdav') {
-    const d = remote as WebDAVRemoteForm;
-    return {
-      ...base,
-      remotePath: d.remotePath,
-      params: {
-        url:      d.url,
-        username: d.username,
-        password: d.password,
-        ...(d.insecure ? { insecure: 'true' } : {}),
-      },
-    };
-  }
-  if (backendType === 'moosefs') {
-    const d = remote as MooseFSRemoteForm;
-    return {
-      ...base,
-      remotePath: d.remotePath,
-      params: {
-        master:    d.master,
-        mountPath: d.mountPath,
-        ...(d.port ? { port: d.port } : {}),
-      },
-    };
-  }
-  // local
-  const d = remote as LocalRemoteForm;
-  return { ...base, remotePath: '/', params: { rootPath: d.rootPath } };
+  return { ...base, remotePath: '/', params: { rootPath: remote.rootPath } };
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -148,7 +97,7 @@ export function SyncPointForm({
 }: SyncPointFormProps) {
   const [availableTypes, setAvailableTypes] = useState<BackendType[]>([]);
   const [typesLoading, setTypesLoading]     = useState(true);
-  const [backendType, setBackendType]       = useState<BackendType>('webdav');
+  const [backendType, setBackendType]       = useState<BackendType>('local');
   const [testState, setTestState]           = useState<TestState>({ status: 'idle' });
   const [submitting, setSubmitting]         = useState(false);
   const [submitError, setSubmitError]       = useState<string | null>(null);
@@ -176,10 +125,8 @@ export function SyncPointForm({
     defaultValues: { localPathMode: 'auto' },
   });
 
-  // Zones REMOTE (une par type)
-  const webdavRemoteForm  = useForm<WebDAVRemoteForm>({ resolver: zodResolver(webdavRemoteSchema) });
-  const moosefsRemoteForm = useForm<MooseFSRemoteForm>({ resolver: zodResolver(moosefsRemoteSchema) });
-  const localRemoteForm   = useForm<LocalRemoteForm>({ resolver: zodResolver(localRemoteSchema) });
+  // Zone REMOTE
+  const localRemoteForm = useForm<LocalRemoteForm>({ resolver: zodResolver(localRemoteSchema) });
 
   // Surveillances temps réel
   const nameValue     = localZoneForm.watch('name') ?? '';
@@ -229,7 +176,7 @@ export function SyncPointForm({
   };
 
   /** Valide les deux zones et retourne les données, ou null si invalide */
-  const validateAndGetData = async (): Promise<{ localZone: LocalZoneForm; remote: AnyRemoteForm } | null> => {
+  const validateAndGetData = async (): Promise<{ localZone: LocalZoneForm; remote: LocalRemoteForm } | null> => {
     const localValid = await localZoneForm.trigger();
 
     // Unicité du nom (vérification après zod)
@@ -239,22 +186,10 @@ export function SyncPointForm({
       return null;
     }
 
-    const remoteValid = await (
-      backendType === 'webdav'  ? webdavRemoteForm.trigger() :
-      backendType === 'moosefs' ? moosefsRemoteForm.trigger() :
-      localRemoteForm.trigger()
-    );
-
+    const remoteValid = await localRemoteForm.trigger();
     if (!localValid || !remoteValid) return null;
 
-    const localZone = localZoneForm.getValues();
-    const remote = (
-      backendType === 'webdav'  ? webdavRemoteForm.getValues() :
-      backendType === 'moosefs' ? moosefsRemoteForm.getValues() :
-      localRemoteForm.getValues()
-    ) as AnyRemoteForm;
-
-    return { localZone, remote };
+    return { localZone: localZoneForm.getValues(), remote: localRemoteForm.getValues() };
   };
 
   const handleTest = async () => {
@@ -438,90 +373,29 @@ export function SyncPointForm({
           <div className="h-px flex-1 bg-gray-200" aria-hidden="true" />
         </div>
 
-        {backendType === 'webdav' && (
-          <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1">
+          <label htmlFor="rootPath-input" className="text-xs font-medium text-gray-700">
+            Dossier source <span className="text-red-500">*</span>
+          </label>
+          <div className="flex gap-2">
             <Input
-              label="URL WebDAV" required placeholder="https://nas.local/dav"
-              {...webdavRemoteForm.register('url')}
-              error={webdavRemoteForm.formState.errors.url?.message}
+              id="rootPath-input"
+              placeholder="D:\Photos\..."
+              {...localRemoteForm.register('rootPath')}
+              error={localRemoteForm.formState.errors.rootPath?.message}
+              className="flex-1"
             />
-            <Input
-              label="Utilisateur" required autoComplete="username"
-              {...webdavRemoteForm.register('username')}
-              error={webdavRemoteForm.formState.errors.username?.message}
-            />
-            <Input
-              label="Mot de passe" type="password" required autoComplete="new-password"
-              {...webdavRemoteForm.register('password')}
-              error={webdavRemoteForm.formState.errors.password?.message}
-            />
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                {...webdavRemoteForm.register('insecure')}
-                className="accent-brand w-4 h-4"
-              />
-              <span className="text-sm text-gray-700">Accepter les certificats auto-signés</span>
-            </label>
-            <Input
-              label="Chemin distant" required placeholder="/GhostDrive"
-              hint="Chemin racine sur le serveur WebDAV"
-              {...webdavRemoteForm.register('remotePath')}
-              error={webdavRemoteForm.formState.errors.remotePath?.message}
-            />
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => void handleBrowseRootPath()}
+              className="shrink-0"
+            >
+              Parcourir…
+            </Button>
           </div>
-        )}
-
-        {backendType === 'moosefs' && (
-          <div className="flex flex-col gap-3">
-            <Input
-              label="Adresse du Master" required placeholder="192.168.1.1"
-              {...moosefsRemoteForm.register('master')}
-              error={moosefsRemoteForm.formState.errors.master?.message}
-            />
-            <Input
-              label="Port" placeholder="9421" hint="Défaut : 9421"
-              {...moosefsRemoteForm.register('port')}
-            />
-            <Input
-              label="Chemin de montage FUSE" required placeholder="/mnt/moosefs"
-              {...moosefsRemoteForm.register('mountPath')}
-              error={moosefsRemoteForm.formState.errors.mountPath?.message}
-            />
-            <Input
-              label="Chemin distant" required placeholder="/GhostDrive"
-              hint="Chemin racine sur MooseFS"
-              {...moosefsRemoteForm.register('remotePath')}
-              error={moosefsRemoteForm.formState.errors.remotePath?.message}
-            />
-          </div>
-        )}
-
-        {backendType === 'local' && (
-          <div className="flex flex-col gap-1">
-            <label htmlFor="rootPath-input" className="text-xs font-medium text-gray-700">
-              Dossier source <span className="text-red-500">*</span>
-            </label>
-            <div className="flex gap-2">
-              <Input
-                id="rootPath-input"
-                placeholder="D:\Photos\..."
-                {...localRemoteForm.register('rootPath')}
-                error={localRemoteForm.formState.errors.rootPath?.message}
-                className="flex-1"
-              />
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => void handleBrowseRootPath()}
-                className="shrink-0"
-              >
-                Parcourir…
-              </Button>
-            </div>
-            <p className="text-xs text-gray-400">Répertoire source à synchroniser</p>
-          </div>
-        )}
+          <p className="text-xs text-gray-400">Répertoire source à synchroniser</p>
+        </div>
       </section>
 
       {/* Warning rootPath dupliqué (non bloquant) */}

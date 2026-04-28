@@ -102,7 +102,7 @@ type BackendConfig struct {
 	// Name is a human-readable label displayed in the UI.
 	Name string `json:"name"`
 	// Type selects which plugin handles this backend.
-	// Valid values: "webdav" | "moosefs" | "local" (v0.4.0)
+	// Valid values: "local" — dynamic plugin types registered at runtime via go-plugin
 	Type string `json:"type"`
 	// Enabled controls whether this backend participates in sync.
 	Enabled bool `json:"enabled"`

@@ -112,6 +112,9 @@ nul
 # Claude Code local settings
 .claude/settings.local.json
 
+# Protobuf generated stubs — générés par protoc à chaque CI build
+plugins/proto/*.pb.go
+
 # Fichiers TEMPLATE — fetches depuis GitHub via /init-project (ne pas modifier manuellement)
 TEMPLATE_claude/
 .claude/commands/

@@ -19,6 +19,8 @@ import (
 	"github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/CCoupel/GhostDrive/plugins"
+	"github.com/CCoupel/GhostDrive/plugins/loader"
+	pluginsregistry "github.com/CCoupel/GhostDrive/plugins/registry"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -28,10 +30,11 @@ type App struct {
 	cfgPath string
 	cfg     config.AppConfig
 
-	mu      gosync.RWMutex
-	manager *backends.BackendManager
-	engines map[string]*sync.Engine
-	drive   placeholder.VirtualDrive
+	mu          gosync.RWMutex
+	manager     *backends.BackendManager
+	engines     map[string]*sync.Engine
+	drive       placeholder.VirtualDrive
+	dynRegistry *pluginsregistry.DynamicRegistry // v0.6.x dynamic plugin loader
 }
 
 // NewApp creates a new App. Configuration is loaded in Startup once the
@@ -71,6 +74,7 @@ func (a *App) Startup(ctx context.Context) {
 		a.emitError("app: load config: " + err.Error())
 		cfg = config.DefaultConfig()
 	}
+	cfg.Version = config.AppVersion // always reflect the compiled binary version
 	a.mu.Lock()
 	a.cfg = cfg
 	a.cfgPath = path
@@ -82,6 +86,19 @@ func (a *App) Startup(ctx context.Context) {
 	root := a.GetGhostDriveRoot()
 	if err := os.MkdirAll(root, 0755); err != nil {
 		log.Printf("app: create GhostDriveRoot %q: %v", root, err)
+	}
+
+	// v0.6.x — Scan <AppDir>/plugins/*.exe and register dynamic backends BEFORE
+	// the backend reconnection loop so that dynamic types pass validateBackendConfig.
+	appExe, exeErr := os.Executable()
+	if exeErr != nil {
+		log.Printf("app: os.Executable: %v — using os.Args[0]", exeErr)
+		appExe = os.Args[0]
+	}
+	pluginsDir := filepath.Join(filepath.Dir(appExe), "plugins")
+	a.dynRegistry = pluginsregistry.NewDynamicRegistry(pluginsDir)
+	if err := a.dynRegistry.Start(); err != nil {
+		log.Printf("app: plugin scan %q: %v", pluginsDir, err)
 	}
 
 	// Reconnect saved backends and auto-start sync where configured.
@@ -126,6 +143,13 @@ func (a *App) Shutdown(ctx context.Context) {
 		engine.Stop()
 		delete(a.engines, id)
 	}
+
+	// v0.6.x — Stop dynamic plugin subprocesses.
+	if a.dynRegistry != nil {
+		if err := a.dynRegistry.Stop(); err != nil {
+			log.Printf("app: shutdown dynRegistry: %v", err)
+		}
+	}
 }
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -153,10 +177,55 @@ func (a *App) GetVersion() string {
 	return a.cfg.Version
 }
 
-// GetAvailableBackendTypes returns the list of compiled-in plugin types.
+// GetAvailableBackendTypes returns all available plugin types (static + dynamic).
 // The frontend uses this to populate the "Add backend" type selector.
+// v0.6.x: includes dynamic plugins loaded from <AppDir>/plugins/*.exe.
 func (a *App) GetAvailableBackendTypes() []string {
+	if a.dynRegistry != nil {
+		infos := a.dynRegistry.ListAvailablePlugins()
+		names := make([]string, 0, len(infos))
+		seen := make(map[string]bool, len(infos))
+		for _, info := range infos {
+			if !seen[info.Name] && info.Status == "loaded" {
+				names = append(names, info.Name)
+				seen[info.Name] = true
+			}
+		}
+		return names
+	}
 	return backends.AvailableTypes()
+}
+
+// GetLoadedPlugins returns the list of dynamically-loaded plugins with their
+// current status. Does not include static (compiled-in) plugins.
+//
+// Wails binding: window.go.App.GetLoadedPlugins()
+func (a *App) GetLoadedPlugins() []loader.PluginInfo {
+	if a.dynRegistry == nil {
+		return []loader.PluginInfo{}
+	}
+	result := a.dynRegistry.ListDynamicPlugins()
+	if result == nil {
+		return []loader.PluginInfo{}
+	}
+	return result
+}
+
+// ReloadPlugins rescans <AppDir>/plugins/*.exe without restarting the application.
+// Backends using a dynamic plugin that was reloaded must be reconnected manually.
+// Emits "plugin:reloaded" with the count of newly loaded plugins on success.
+//
+// Wails binding: window.go.App.ReloadPlugins()
+func (a *App) ReloadPlugins() error {
+	if a.dynRegistry == nil {
+		return fmt.Errorf("dynamic registry not initialised")
+	}
+	if err := a.dynRegistry.Reload(); err != nil {
+		return err
+	}
+	count := len(a.dynRegistry.ListDynamicPlugins())
+	a.emit("plugin:reloaded", map[string]any{"count": count})
+	return nil
 }
 
 // ─── Backends ────────────────────────────────────────────────────────────────
@@ -816,23 +885,6 @@ func (a *App) validateBackendConfig(bc plugins.BackendConfig) (warning string, e
 
 	// ── Plugin-specific params ────────────────────────────────────────────
 	switch bc.Type {
-	case "webdav":
-		if bc.Params["url"] == "" {
-			return "", fmt.Errorf("url requis pour WebDAV")
-		}
-		if bc.Params["username"] == "" {
-			return "", fmt.Errorf("username requis pour WebDAV")
-		}
-		if bc.Params["password"] == "" {
-			return "", fmt.Errorf("password requis pour WebDAV")
-		}
-	case "moosefs":
-		if bc.Params["master"] == "" {
-			return "", fmt.Errorf("master requis pour MooseFS")
-		}
-		if bc.Params["mountPath"] == "" {
-			return "", fmt.Errorf("mountPath requis pour MooseFS")
-		}
 	case "local":
 		if bc.Params["rootPath"] == "" {
 			return "", fmt.Errorf("rootPath requis pour Local")
