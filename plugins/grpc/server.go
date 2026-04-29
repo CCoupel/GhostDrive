@@ -233,10 +233,14 @@ func (s *GRPCBackendServer) Watch(req *storagepb.WatchRequest, stream storagepb.
 
 // ── Quota ─────────────────────────────────────────────────────────────────────
 
+// GetQuota returns free and total bytes, or a gRPC status error on failure.
+// Errors are propagated via mapBackendError so that ErrNotConnected and
+// ErrFileNotFound round-trip as their Go sentinels on the client side.
+// Plugins that do not support quota must return (-1, -1, nil).
 func (s *GRPCBackendServer) GetQuota(ctx context.Context, _ *storagepb.QuotaRequest) (*storagepb.QuotaResponse, error) {
 	free, total, err := s.Impl.GetQuota(ctx)
 	if err != nil {
-		return &storagepb.QuotaResponse{Error: err.Error()}, nil
+		return nil, mapBackendError(err)
 	}
 	return &storagepb.QuotaResponse{Free: free, Total: total}, nil
 }
