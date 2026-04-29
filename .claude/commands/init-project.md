@@ -71,7 +71,7 @@ puis deploiera les commandes et agents dans `.claude/`.
 | Categorie | Emplacement | Comportement |
 |-----------|-------------|--------------|
 | **TEMPLATE** | `TEMPLATE_claude/` (racine projet) | Fetche depuis GitHub, gitignore, jamais edite manuellement |
-| **COMMANDES** | `.claude/commands/*.template.md` | Depuis `TEMPLATE_claude/commands/*.md`, déployé en `*.template.md` — gitignore |
+| **COMMANDES** | `.claude/commands/*.md` | Depuis `TEMPLATE_claude/commands/*.md`, déployé en `*.md` — gitignore |
 | **AGENTS TEMPLATE** | `.claude/agents/*.template.md` + `.claude/agents/context/` | Depuis `TEMPLATE_claude/agents/*.md`, déployé en `*.template.md` — gitignore |
 | **PROJET** | `.claude/CLAUDE.md`, `project-config.json`, `memory/`, `agents/dev-*.md` | Trackes dans git, jamais ecrases |
 
@@ -137,15 +137,15 @@ gh api repos/$TEMPLATE_REPO/git/trees/$TEMPLATE_BRANCH?recursive=1 \
 
 #### 4. Deployer dans .claude/
 
-Les fichiers source sont déployés en `*.template.md` — jamais édités manuellement.
-Les adaptations projet vont dans des fichiers `*.md` compagnons (voir COMMON.md §13).
+Les commandes sont déployées en `*.md` — directement invocables comme `/xxx`, jamais éditées manuellement.
+Les agents sont déployés en `*.template.md` — les adaptations projet vont dans des fichiers `*.md` compagnons (voir COMMON.md §13).
 
 ```bash
 mkdir -p .claude/commands .claude/agents
 
-# Commandes : déployé en *.template.md
+# Commandes : déployé en *.md (invocables directement comme /xxx)
 for src in TEMPLATE_claude/commands/*.md; do
-  dest=".claude/commands/$(basename $src .md).template.md"
+  dest=".claude/commands/$(basename $src)"
   cp "$src" "$dest"
   echo "  ✓ $dest"
 done
@@ -218,11 +218,24 @@ Migration requise. Continuer ? [O/n]
 
 Executer la procedure "Fetch du Template depuis GitHub" ci-dessus.
 
+### Etape M1b — Migration : renommer les commandes legacy *.template.md → *.md
+
+Les commandes etaient deployees en `*.template.md` avant la v2.9.7. Les renommer avant de nettoyer le cache git.
+
+```bash
+for f in .claude/commands/*.template.md; do
+  [[ -f "$f" ]] || continue
+  mv "$f" "${f/.template.md/.md}"
+  echo "  ✓ migration commande : $(basename $f) → $(basename ${f/.template.md/.md})"
+done
+```
+
 ### Etape M2 — Nettoyer .claude/ des anciens fichiers template
 
 ```bash
 git rm --cached .claude/commands/*.template.md 2>/dev/null || true
 git rm --cached .claude/commands/*.md 2>/dev/null || true
+# Note : après migration v3, les commandes sont en *.md (gitignored)
 git rm --cached -r .claude/agents/context/ 2>/dev/null || true
 git rm --cached .claude/agents/*.template.md 2>/dev/null || true
 git rm --cached .claude/agents/*.md 2>/dev/null || true
@@ -620,7 +633,7 @@ et remplacer les placeholders :
 
 | Placeholder | Exemple |
 |-------------|---------|
-| `{PROJECT_NAME}` | `MyApp` |
+| `GhostDrive` | `MyApp` |
 | `{BINARY_NAME}` | `myapp` |
 | `{BACKEND_DIR}` | `backend` |
 | `{FRONTEND_DIR}` | `frontend` |
@@ -664,18 +677,18 @@ TYPECHECK_CMD_ESC=$(escape_sed "$TYPECHECK_CMD")
 Appliquer la substitution sur les fichiers deployes (commandes + agents generiques) :
 
 ```bash
-for f in .claude/commands/*.template.md .claude/agents/*.template.md; do
+for f in .claude/commands/*.md .claude/agents/*.template.md; do
   name=$(basename "$f")
   sed -i \
-    -e "s|{PROJECT_NAME}|${PROJECT_NAME}|g" \
-    -e "s|{TEAM_NAME}|${TEAM_NAME}|g"       \
-    -e "s|{ORG}|${ORG}|g"                   \
-    -e "s|{PROJECT}|${PROJECT}|g"            \
-    -e "s|{BUILD_CMD}|${BUILD_CMD_ESC}|g"        \
-    -e "s|{TEST_CMD}|${TEST_CMD_ESC}|g"          \
-    -e "s|{LINT_CMD}|${LINT_CMD_ESC}|g"          \
-    -e "s|{AUDIT_CMD}|${AUDIT_CMD_ESC}|g"        \
-    -e "s|{TYPECHECK_CMD}|${TYPECHECK_CMD_ESC}|g" \
+    -e "s|GhostDrive|$GhostDrive|g" \
+    -e "s|ghostdrive-team|$ghostdrive-team|g"       \
+    -e "s|CCoupel|$CCoupel|g"                   \
+    -e "s|GhostDrive|$GhostDrive|g"            \
+    -e "s|wails build|${BUILD_CMD_ESC}|g"        \
+    -e "s|go test ./... -v -cover|${TEST_CMD_ESC}|g"          \
+    -e "s|golangci-lint run|${LINT_CMD_ESC}|g"          \
+    -e "s|govulncheck ./...|${AUDIT_CMD_ESC}|g"        \
+    -e "s|cd frontend && npm run typecheck|${TYPECHECK_CMD_ESC}|g" \
     "$f"
   echo "  ✓ placeholders appliques dans $name"
 done
@@ -783,16 +796,17 @@ e) Annuler
 
 Executer la procedure "Fetch du Template depuis GitHub" pour mettre a jour `TEMPLATE_claude/`.
 
-#### Etape d1b — Migration : renommer les fichiers legacy *.template.md
+#### Etape d1b — Migration : renommer les commandes legacy *.template.md → *.md
 
-Avant tout calcul, renommer tous les fichiers `*.template.md` residuels
-dans `.claude/commands/` et `.claude/agents/` (deployes avant la v2.4.0).
+Avant tout calcul, renommer les commandes `*.template.md` residuelles dans `.claude/commands/`
+(déployées avant la v2.9.7 où les commandes étaient encore en `*.template.md`).
+Les agents gardent leur extension `*.template.md` — ne pas les toucher.
 
 ```bash
-for f in .claude/commands/*.template.md .claude/agents/*.template.md; do
+for f in .claude/commands/*.template.md; do
   [[ -f "$f" ]] || continue
   mv "$f" "${f/.template.md/.md}"
-  echo "  ✓ migration : $(basename $f) → $(basename ${f/.template.md/.md})"
+  echo "  ✓ migration commande : $(basename $f) → $(basename ${f/.template.md/.md})"
 done
 ```
 
@@ -813,9 +827,14 @@ done)
 #### Etape d3 — Comparer avec les fichiers deployes
 
 ```bash
-# Commandes template déployées (*.template.md uniquement — les *.md sont des fichiers projet)
-DEPLOYED_COMMANDS=$(ls .claude/commands/*.template.md 2>/dev/null \
-  | xargs -I{} basename {} .template.md)
+# Commandes template déployées (*.md ou *.template.md legacy — hors context/)
+DEPLOYED_COMMANDS=$(
+  { ls .claude/commands/*.md 2>/dev/null; ls .claude/commands/*.template.md 2>/dev/null; } \
+  | grep -v '/context/' \
+  | xargs -I{} basename {} \
+  | sed 's/\.template\.md$//' | sed 's/\.md$//' \
+  | sort -u
+)
 
 # Agents template déployés (*.template.md uniquement — les *.md et dev-*.md sont des fichiers projet)
 DEPLOYED_AGENTS=$(ls .claude/agents/*.template.md 2>/dev/null \
@@ -870,10 +889,10 @@ Actions :
 
 ```bash
 for src in TEMPLATE_claude/commands/*.md; do
-  dest=".claude/commands/$(basename $src .md).template.md"
+  dest=".claude/commands/$(basename $src)"
   if ! cmp -s "$src" "$dest" 2>/dev/null; then
     cp "$src" "$dest"
-    echo "  ✓ $(basename $src .md).template.md mis a jour"
+    echo "  ✓ $(basename $src) mis a jour"
   fi
 done
 
@@ -890,7 +909,7 @@ cp -r TEMPLATE_claude/agents/context .claude/agents/context
 
 **Etape systematique — Appliquer les placeholders sur TOUS les fichiers deployes :**
 
-Scanner l'integralite de `.claude/commands/*.template.md` et `.claude/agents/*.template.md` et appliquer
+Scanner l'integralite de `.claude/commands/*.md` (hors `context/`) et `.claude/agents/*.template.md` et appliquer
 la procedure "Application des placeholders" (section 4 ci-dessus) sur tous les fichiers,
 en lisant les valeurs depuis `.claude/project-config.json` existant.
 
@@ -900,8 +919,8 @@ en lisant les valeurs depuis `.claude/project-config.json` existant.
 # Supprimer les commandes reliquats
 for name in $DEPLOYED_COMMANDS; do
   if ! echo "$EXPECTED_COMMANDS" | grep -q "^${name}$"; then
-    rm ".claude/commands/${name}.template.md"
-    echo "  ✗ .claude/commands/${name}.template.md supprime (reliquat)"
+    rm ".claude/commands/${name}.md"
+    echo "  ✗ .claude/commands/${name}.md supprime (reliquat)"
   fi
 done
 
@@ -923,7 +942,7 @@ Silencieuse si aucun `*.md` compagnon n'existe ou si tout est propre.
 
 ```bash
 COMPANIONS=()
-for tmpl in .claude/commands/*.template.md .claude/agents/*.template.md; do
+for tmpl in .claude/agents/*.template.md; do
   base=$(basename "$tmpl" .template.md)
   dir=$(dirname "$tmpl")
   companion="$dir/$base.md"
@@ -985,7 +1004,7 @@ echo "  ✗ $(basename $companion) supprimé (identique au template)"
 ```
 
 Pour chaque fichier `DERIVE-PROJET` ou `MIXTE` :
-- Lire `xxx.md` et `xxx.template.md`
+- Lire `xxx.md` (agent projet) et `xxx.template.md` (agent template)
 - Identifier les blocs présents dans `xxx.md` mais absents du template
   (diff sémantique : sections ajoutées, règles supplémentaires, surcharges)
 - Réécrire `xxx.md` avec uniquement ces blocs
