@@ -132,6 +132,10 @@ message QuotaRequest  {}
 message QuotaResponse {
   int64  free  = 1;
   int64  total = 2;
+  // Deprecated: since v0.7.0 the server returns gRPC status errors instead of
+  // populating this field. Kept for wire-format compatibility with pre-v0.7.0
+  // plugin binaries. The client (plugins/grpc/client.go GetQuota) still reads
+  // it as a fallback. Do NOT remove field number 3.
   string error = 3;
 }
 

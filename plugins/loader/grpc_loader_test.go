@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -19,27 +20,41 @@ import (
 // Set by TestMain; empty string if compilation failed (integration tests skip).
 var mockPluginBinary string
 
-// TestMain compiles the mock plugin before all tests in this package.
+// TestMain compiles the mock plugin binary before all tests in this package.
 //
-// The mock plugin is compiled from
-// github.com/CCoupel/GhostDrive/plugins/testdata/mock-plugin into a temporary
-// directory using CGO_ENABLED=0 so that it works on all CI platforms.
+// CI mode: set GHOSTDRIVE_MOCK_PLUGIN to the path of a pre-built static binary
+// (CGO_ENABLED=0) so that the race detector is not disabled during go test.
+// The CI workflow builds it in a dedicated step before running tests.
+//
+// Local fallback: when GHOSTDRIVE_MOCK_PLUGIN is unset, TestMain compiles the
+// mock plugin on the fly (CGO_ENABLED=0 scoped to the exec.Command only).
 // Integration tests that require the mock are guarded by requireMockPlugin.
 func TestMain(m *testing.M) {
 	os.Exit(runAllTests(m))
 }
 
 func runAllTests(m *testing.M) int {
+	// CI path: use the pre-built binary to keep CGO_ENABLED=0 out of the test run.
+	if prebuilt := os.Getenv("GHOSTDRIVE_MOCK_PLUGIN"); prebuilt != "" {
+		if _, err := os.Stat(prebuilt); err == nil {
+			mockPluginBinary = prebuilt
+			log.Printf("TestMain: using pre-built mock plugin at %q", prebuilt)
+			return m.Run()
+		}
+		log.Printf("TestMain: GHOSTDRIVE_MOCK_PLUGIN=%q not found -- falling back to local build", prebuilt)
+	}
+
+	// Local fallback: compile the mock plugin on the fly.
 	tmpDir, err := os.MkdirTemp("", "ghostdrive-mock-plugin-build-*")
 	if err != nil {
-		log.Printf("TestMain: cannot create temp dir: %v — integration tests will be skipped", err)
+		log.Printf("TestMain: cannot create temp dir: %v -- integration tests will be skipped", err)
 		return m.Run()
 	}
 	defer os.RemoveAll(tmpDir)
 
 	moduleRoot, err := findModuleRoot()
 	if err != nil {
-		log.Printf("TestMain: cannot find module root: %v — integration tests will be skipped", err)
+		log.Printf("TestMain: cannot find module root: %v -- integration tests will be skipped", err)
 		return m.Run()
 	}
 
@@ -50,7 +65,7 @@ func runAllTests(m *testing.M) int {
 	cmd.Dir = moduleRoot
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("TestMain: build mock plugin failed: %v\n%s\n— integration tests will be skipped", err, out)
+		log.Printf("TestMain: build mock plugin failed: %v\n%s\n-- integration tests will be skipped", err, out)
 		mockPluginBinary = ""
 	}
 
@@ -81,7 +96,7 @@ func findModuleRoot() (string, error) {
 func requireMockPlugin(t *testing.T) {
 	t.Helper()
 	if mockPluginBinary == "" {
-		t.Skip("mock plugin binary not available — skipping integration test")
+		t.Skip("mock plugin binary not available -- skipping integration test")
 	}
 }
 
@@ -123,7 +138,7 @@ func TestGRPCLoader_ScanEmptyDir(t *testing.T) {
 // directories as empty matches, so no error is expected).
 func TestGRPCLoader_ScanDirNotExist(t *testing.T) {
 	l := loader.NewGRPCLoader()
-	// filepath.Glob on a non-existent dir returns nil, nil — no error.
+	// filepath.Glob on a non-existent dir returns nil, nil -- no error.
 	err := l.Scan("/tmp/ghostdrive-no-such-dir-xyz-12345")
 	assert.NoError(t, err)
 }
@@ -197,21 +212,25 @@ func TestPluginInfo_Fields(t *testing.T) {
 // extensionless files with the executable bit set (Linux/macOS plugin
 // convention) and attempts to load them as go-plugin binaries.
 //
-// The file is not a valid plugin, so the result must be a "failed" entry —
+// The file is not a valid plugin, so the result must be a "failed" entry --
 // but the important thing is that the loader found and attempted to load it,
 // proving the extensionless scan path is active.
 func TestGRPCLoader_ScanLinuxExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux executable scan not applicable on Windows")
+	}
+
 	dir := t.TempDir()
 
-	// Extensionless executable — should be picked up by the Linux scan.
+	// Extensionless executable -- should be picked up by the Linux scan.
 	execFile := filepath.Join(dir, "myplugin")
 	require.NoError(t, os.WriteFile(execFile, []byte("not a real plugin"), 0755))
 
-	// Non-executable extensionless file — must be skipped.
+	// Non-executable extensionless file -- must be skipped.
 	noExec := filepath.Join(dir, "readme")
 	require.NoError(t, os.WriteFile(noExec, []byte("not executable"), 0644))
 
-	// Extensionless empty file — must be skipped (size == 0).
+	// Extensionless empty file -- must be skipped (size == 0).
 	emptyFile := filepath.Join(dir, "empty")
 	require.NoError(t, os.WriteFile(emptyFile, []byte{}, 0755))
 
@@ -232,7 +251,7 @@ func TestGRPCLoader_ScanLinuxExecutable(t *testing.T) {
 func TestGRPCLoader_ScanLinuxDir(t *testing.T) {
 	dir := t.TempDir()
 
-	// A subdirectory with a name that has no extension — must be ignored.
+	// A subdirectory with a name that has no extension -- must be ignored.
 	subDir := filepath.Join(dir, "asubdir")
 	require.NoError(t, os.MkdirAll(subDir, 0755))
 
@@ -272,7 +291,7 @@ func TestGRPCLoader_ValidPlugin(t *testing.T) {
 func TestGRPCLoader_HandshakeFailed(t *testing.T) {
 	dir := t.TempDir()
 	badPath := filepath.Join(dir, "wrongcookie.exe")
-	// A binary that is not a valid go-plugin — the handshake will fail.
+	// A binary that is not a valid go-plugin -- the handshake will fail.
 	require.NoError(t, os.WriteFile(badPath, []byte("#!/bin/sh\nexit 0"), 0755))
 
 	l := loader.NewGRPCLoader()
@@ -308,7 +327,7 @@ func TestGRPCLoader_Watchdog_RestartOnCrash(t *testing.T) {
 	// Kill the subprocess without cancelling the watchdog context.
 	require.NoError(t, l.KillPluginProcess("mock"))
 
-	// Watchdog detects exit (≤ 500 ms poll interval) + 10 ms delay + restart.
+	// Watchdog detects exit (<= 500 ms poll interval) + 10 ms delay + restart.
 	// Allow up to 5 s for the cycle to complete.
 	require.Eventually(t, func() bool {
 		for _, info := range l.GetLoadedPlugins() {
@@ -322,8 +341,9 @@ func TestGRPCLoader_Watchdog_RestartOnCrash(t *testing.T) {
 }
 
 // TestGRPCLoader_Watchdog_MaxRetries removes the plugin binary after initial
-// load, then kills the subprocess. The watchdog must fail all restart attempts
-// and mark the plugin as "failed".
+// load, then kills the subprocess. The watchdog must fail all consecutive
+// restart attempts and mark the plugin as "failed" with "max restart attempts
+// reached".
 func TestGRPCLoader_Watchdog_MaxRetries(t *testing.T) {
 	requireMockPlugin(t)
 
@@ -368,7 +388,8 @@ func TestGRPCLoader_Watchdog_MaxRetries(t *testing.T) {
 	infos := l.GetLoadedPlugins()
 	require.Len(t, infos, 1)
 	assert.Equal(t, "failed", infos[0].Status)
-	assert.NotEmpty(t, infos[0].Error, "failed entry must carry the restart error")
+	assert.Contains(t, infos[0].Error, "max restart",
+		"error must be 'max restart attempts reached'")
 }
 
 // TestGRPCLoader_Shutdown_KillsPlugin verifies that Shutdown terminates the

@@ -60,6 +60,11 @@ type LoaderOptions struct {
 	// crashed plugins. The number of elements defines the maximum restart
 	// attempts. Zero-length slice defaults to {1s, 2s, 4s}.
 	//
+	// The attempt counter resets after a successful recovery; the limit
+	// applies to consecutive failures only. If a plugin crashes 3 times in a
+	// row without a successful restart in between, it is permanently marked
+	// "failed". A single successful restart resets the counter to zero.
+	//
 	// Tests should inject short delays (e.g. {10ms, 10ms, 10ms}) to avoid
 	// blocking the test suite.
 	WatchdogDelays []time.Duration
@@ -233,6 +238,9 @@ func (l *GRPCLoader) launchPlugin(path string) (*goplugin.Client, *grpcbridge.GR
 
 // watchdog monitors a plugin process and restarts it on crash up to
 // len(l.watchdogDelays) times using the configured back-off schedule.
+// The attempt counter resets after a successful recovery (consecutive failures
+// only). After all attempts are exhausted entry.status is set to "failed" and
+// entry.err is set to "max restart attempts reached".
 func (l *GRPCLoader) watchdog(ctx context.Context, entry *pluginEntry) {
 	delays := l.watchdogDelays
 
@@ -267,8 +275,12 @@ func (l *GRPCLoader) watchdog(ctx context.Context, entry *pluginEntry) {
 		newClient, newBackend, err := l.launchPlugin(entry.path)
 		if err != nil {
 			log.Printf("loader: restart %q attempt %d failed: %v", entry.name, attempt+1, err)
+			// Stay in "restarting" — we may still have attempts left.
+			// "failed" is only set after all consecutive attempts are exhausted,
+			// at which point entry.err is overwritten with the canonical
+			// "max restart attempts reached" message.
 			l.mu.Lock()
-			entry.status = "failed"
+			entry.status = "restarting"
 			entry.err = err.Error()
 			l.mu.Unlock()
 			continue
@@ -293,9 +305,9 @@ func (l *GRPCLoader) watchdog(ctx context.Context, entry *pluginEntry) {
 	log.Printf("loader: plugin %q failed after %d attempts — giving up", entry.name, len(delays))
 	l.mu.Lock()
 	entry.status = "failed"
-	if entry.err == "" {
-		entry.err = "max restart attempts reached"
-	}
+	// Always set the canonical message so callers can test for it reliably.
+	// The individual restart errors are preserved in the logs.
+	entry.err = "max restart attempts reached"
 	l.mu.Unlock()
 }
 

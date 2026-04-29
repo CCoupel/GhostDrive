@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/CCoupel/GhostDrive/plugins"
@@ -9,9 +10,10 @@ import (
 
 // MockPlugin is a no-op implementation of plugins.StorageBackend for use in
 // integration tests. All write operations succeed without performing any I/O.
-// Name() returns "mock" — this value must match the expected plugin name in
+// Name() returns "mock" -- this value must match the expected plugin name in
 // loader integration tests.
 type MockPlugin struct {
+	mu        sync.Mutex
 	connected bool
 }
 
@@ -23,22 +25,27 @@ func (m *MockPlugin) Name() string { return "mock" }
 // ── Connection ────────────────────────────────────────────────────────────────
 
 // Connect marks the plugin as connected. Accepts any config without validation.
-// Use plugins.ErrNotConnected sentinel examples:
-//
-//	return fmt.Errorf("mock: connect: %w", plugins.ErrNotConnected)
 func (m *MockPlugin) Connect(_ plugins.BackendConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.connected = true
 	return nil
 }
 
 // Disconnect marks the plugin as disconnected.
 func (m *MockPlugin) Disconnect() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.connected = false
 	return nil
 }
 
-// IsConnected returns the current connection state. Thread-safe (no I/O).
-func (m *MockPlugin) IsConnected() bool { return m.connected }
+// IsConnected returns the current connection state. Thread-safe.
+func (m *MockPlugin) IsConnected() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.connected
+}
 
 // ── File operations ───────────────────────────────────────────────────────────
 

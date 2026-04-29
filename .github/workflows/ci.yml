@@ -40,10 +40,17 @@ jobs:
         run: protoc --go_out=. --go-grpc_out=. --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative plugins/proto/storage.proto
       - run: go vet ./...
       - run: go build ./...
-      # CGO_ENABLED=0 ensures the mock plugin compiled by loader's TestMain
-      # (plugins/testdata/mock-plugin) is a static binary that runs on the CI
-      # Linux runner without libc dependency issues.
-      - run: CGO_ENABLED=0 go test ./... -coverprofile=coverage.out -covermode=atomic -coverpkg=./internal/backends/...,./internal/config/...,./internal/sync/...,./plugins/grpc/...,./plugins/loader/...
+      # Pre-build the mock plugin as a static binary so that CGO_ENABLED=0
+      # is scoped to this single build step and does NOT contaminate the race
+      # detector used in the test step below.
+      - name: Build mock plugin (static)
+        run: CGO_ENABLED=0 go build -o /tmp/ghostdrive-mock-plugin ./plugins/testdata/mock-plugin/
+      - name: Run tests with race detector
+        env:
+          # TestMain in plugins/loader reads this env var and skips the local
+          # compile, using the pre-built static binary directly.
+          GHOSTDRIVE_MOCK_PLUGIN: /tmp/ghostdrive-mock-plugin
+        run: go test -race ./... -coverprofile=coverage.out -covermode=atomic -coverpkg=./internal/backends/...,./internal/config/...,./internal/sync/...,./plugins/grpc/...,./plugins/loader/...
       - name: Enforce 70% coverage (business packages only)
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
