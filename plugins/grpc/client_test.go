@@ -182,6 +182,15 @@ func (m *mockBackend) GetQuota(_ context.Context) (free, total int64, err error)
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+func TestGRPCBackend_Version(t *testing.T) {
+	mock := newMockBackend()
+	backend, cleanup := newTestPair(t, mock)
+	defer cleanup()
+
+	assert.Equal(t, "unknown", backend.Version(),
+		"Version() must return 'unknown' (no version RPC in proto)")
+}
+
 func TestGRPCBackend_Name(t *testing.T) {
 	mock := newMockBackend()
 	backend, cleanup := newTestPair(t, mock)
@@ -330,6 +339,50 @@ func (e *errorBackend) List(_ context.Context, path string) ([]plugins.FileInfo,
 	return nil, fmt.Errorf("mock: list: %w", plugins.ErrNotConnected)
 }
 
+// internalErrorBackend returns a generic (non-sentinel) error to exercise the
+// default / codes.Internal path in both mapBackendError and mapGRPCError.
+type internalErrorBackend struct {
+	mockBackend
+}
+
+func (e *internalErrorBackend) Stat(_ context.Context, path string) (*plugins.FileInfo, error) {
+	return nil, fmt.Errorf("some unexpected internal failure")
+}
+
+func (e *internalErrorBackend) Move(_ context.Context, _, _ string) error {
+	return fmt.Errorf("some unexpected internal failure")
+}
+
+// TestGRPCBackend_ErrorMapping_Internal verifies that a generic (non-sentinel)
+// backend error is forwarded as codes.Internal on the server side and wrapped
+// as a plain error on the client side (default case in mapGRPCError).
+func TestGRPCBackend_ErrorMapping_Internal(t *testing.T) {
+	eb := &internalErrorBackend{
+		mockBackend: mockBackend{connected: true, files: make(map[string][]byte)},
+	}
+	backend, cleanup := newTestPair(t, eb)
+	defer cleanup()
+
+	_, err := backend.Stat(context.Background(), "/some-path")
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, plugins.ErrFileNotFound),
+		"internal error must NOT be wrapped as ErrFileNotFound")
+	assert.False(t, errors.Is(err, plugins.ErrNotConnected),
+		"internal error must NOT be wrapped as ErrNotConnected")
+}
+
+// TestGRPCBackend_ErrorMapping_Move_Internal verifies the Move error path.
+func TestGRPCBackend_ErrorMapping_Move_Internal(t *testing.T) {
+	eb := &internalErrorBackend{
+		mockBackend: mockBackend{connected: true, files: make(map[string][]byte)},
+	}
+	backend, cleanup := newTestPair(t, eb)
+	defer cleanup()
+
+	err := backend.Move(context.Background(), "/src", "/dst")
+	require.Error(t, err, "Move must propagate a non-nil internal error")
+}
+
 func TestGRPCBackend_ErrorMapping_NotFound(t *testing.T) {
 	eb := &errorBackend{mockBackend: mockBackend{connected: true, files: make(map[string][]byte)}}
 	backend, cleanup := newTestPair(t, eb)
@@ -380,6 +433,28 @@ func TestGRPCBackend_Move(t *testing.T) {
 	assert.Contains(t, mock.files, "/dst.txt", "destination must exist after Move")
 }
 
+func TestGRPCBackend_CreateDir(t *testing.T) {
+	mock := newMockBackend()
+	backend, cleanup := newTestPair(t, mock)
+	defer cleanup()
+	_ = backend.Connect(plugins.BackendConfig{})
+
+	err := backend.CreateDir(context.Background(), "/new-dir")
+	require.NoError(t, err, "CreateDir must succeed on connected backend")
+}
+
+func TestGRPCBackend_CreateDir_NotConnected(t *testing.T) {
+	mock := newMockBackend() // connected = false
+	backend, cleanup := newTestPair(t, mock)
+	defer cleanup()
+
+	// mockBackend.CreateDir returns ErrNotConnected when not connected.
+	err := backend.CreateDir(context.Background(), "/new-dir")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, plugins.ErrNotConnected),
+		"CreateDir on disconnected backend must wrap ErrNotConnected, got: %v", err)
+}
+
 func TestGRPCBackend_ErrorMapping_DeleteNotFound(t *testing.T) {
 	mock := newMockBackend()
 	mock.connected = true
@@ -391,4 +466,104 @@ func TestGRPCBackend_ErrorMapping_DeleteNotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, plugins.ErrFileNotFound),
 		"expected ErrFileNotFound on Delete of nonexistent file, got: %v", err)
+}
+
+// ── GetQuota error mapping ────────────────────────────────────────────────────
+//
+// After the fix in server.go, GetQuota uses mapBackendError (gRPC status
+// errors) instead of the proto Error field.  The round-trip preserves Go
+// sentinel errors: ErrNotConnected → codes.FailedPrecondition → ErrNotConnected.
+
+// quotaErrorBackend is a mock that returns a controlled error from GetQuota.
+type quotaErrorBackend struct {
+	mockBackend
+	quotaErr error
+}
+
+func (q *quotaErrorBackend) GetQuota(_ context.Context) (int64, int64, error) {
+	return 0, 0, q.quotaErr
+}
+
+// notSupportedQuotaBackend returns the canonical "quota not supported" response.
+type notSupportedQuotaBackend struct {
+	mockBackend
+}
+
+func (n *notSupportedQuotaBackend) GetQuota(_ context.Context) (int64, int64, error) {
+	return -1, -1, nil
+}
+
+// TestGRPCBackend_GetQuota_ErrorMapping verifies that ErrNotConnected returned
+// by the plugin is propagated through the gRPC bridge as a proper sentinel.
+// This tests the server.go fix: GetQuota now uses mapBackendError instead of
+// {Error: err.Error()}, so the sentinel survives the gRPC round-trip.
+func TestGRPCBackend_GetQuota_ErrorMapping(t *testing.T) {
+	eb := &quotaErrorBackend{
+		mockBackend: mockBackend{connected: true, files: make(map[string][]byte)},
+		quotaErr:    fmt.Errorf("quota: %w", plugins.ErrNotConnected),
+	}
+	backend, cleanup := newTestPair(t, eb)
+	defer cleanup()
+
+	_, _, err := backend.GetQuota(context.Background())
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, plugins.ErrNotConnected),
+		"ErrNotConnected must round-trip through GetQuota gRPC bridge, got: %v", err)
+}
+
+// TestGRPCBackend_GetQuota_NotSupportedReturnsMinusOne verifies that when the
+// plugin returns (-1, -1, nil) the client passes the values through unchanged.
+func TestGRPCBackend_GetQuota_NotSupportedReturnsMinusOne(t *testing.T) {
+	nb := &notSupportedQuotaBackend{
+		mockBackend: mockBackend{connected: true, files: make(map[string][]byte)},
+	}
+	backend, cleanup := newTestPair(t, nb)
+	defer cleanup()
+
+	free, total, err := backend.GetQuota(context.Background())
+	require.NoError(t, err, "quota-not-supported must not return an error")
+	assert.Equal(t, int64(-1), free, "free must be -1 for unsupported quota")
+	assert.Equal(t, int64(-1), total, "total must be -1 for unsupported quota")
+}
+
+// TestGRPCBackend_Upload_Disconnected verifies that Upload propagates an error
+// when the backend reports it is not connected.
+// Note: Upload uses the client-streaming proto pattern, so the error is encoded
+// in UploadResult.Error (a string field) rather than as a gRPC status. The
+// sentinel is therefore NOT preserved across the bridge; we verify the error
+// message instead.
+func TestGRPCBackend_Upload_Disconnected(t *testing.T) {
+	mock := newMockBackend() // connected = false
+	backend, cleanup := newTestPair(t, mock)
+	defer cleanup()
+
+	tmpDir := t.TempDir()
+	localFile := filepath.Join(tmpDir, "upload.txt")
+	require.NoError(t, os.WriteFile(localFile, []byte("data"), 0644))
+
+	err := backend.Upload(context.Background(), localFile, "/remote/upload.txt", nil)
+	require.Error(t, err, "Upload on disconnected backend must return an error")
+	assert.Contains(t, err.Error(), "not connected",
+		"error message must mention 'not connected'")
+}
+
+// TestGRPCBackend_Download_FileNotFound verifies that Download propagates an
+// error when the backend cannot find the requested remote file.
+// Note: Download uses the server-streaming proto pattern; the error is encoded
+// in DownloadChunk.Error (a string field). The ErrFileNotFound sentinel is NOT
+// preserved; we verify the error message instead.
+func TestGRPCBackend_Download_FileNotFound(t *testing.T) {
+	mock := newMockBackend()
+	mock.connected = true
+	// No files added → Download will hit ErrFileNotFound in mockBackend.
+	backend, cleanup := newTestPair(t, mock)
+	defer cleanup()
+
+	tmpDir := t.TempDir()
+	localDst := filepath.Join(tmpDir, "downloaded.txt")
+
+	err := backend.Download(context.Background(), "/nonexistent.txt", localDst, nil)
+	require.Error(t, err, "Download of non-existent remote file must return an error")
+	assert.Contains(t, err.Error(), "not found",
+		"error message must mention 'not found'")
 }
