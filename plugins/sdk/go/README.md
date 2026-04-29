@@ -41,25 +41,46 @@ goplugin.Serve(sdk.ServeConfig(&MyPlugin{}))
 ### Step 3 — Build
 
 ```sh
+# Windows (default)
 make build
 # → myplugin.exe  (Windows AMD64)
+
+# Linux / macOS
+make build-linux
+# → myplugin  (Linux AMD64, no extension, executable bit set)
+
+# Both platforms at once
+make build-all
 ```
 
 Or manually:
 
 ```sh
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o myplugin.exe ./...
+# Windows
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -tags ignore -ldflags="-s -w" -o myplugin.exe ./echo/
+
+# Linux
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags ignore -ldflags="-s -w" -o myplugin ./echo/
 ```
+
+> **Multi-platform note**: the Makefile `build-linux` target uses
+> `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` — the resulting binary is a fully
+> static ELF executable compatible with the GhostDrive Linux loader.
 
 ### Step 4 — Install
 
 Copy the binary to the GhostDrive plugins directory:
 
 ```
+# Windows
 <AppDir>\plugins\myplugin.exe
+
+# Linux — the loader detects extensionless executables with the execute bit
+<AppDir>/plugins/myplugin
 ```
 
-Where `<AppDir>` is the directory containing `GhostDrive.exe`.
+Where `<AppDir>` is the directory containing `GhostDrive.exe` (Windows) or
+the `ghostdrive` binary (Linux).
 
 ### Step 5 — Load
 
