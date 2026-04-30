@@ -7,6 +7,10 @@ option go_package = "github.com/CCoupel/GhostDrive/plugins/proto;storagepb";
 // ─── Shared Messages ─────────────────────────────────────────────────────────
 
 // BackendConfigProto carries the serialised BackendConfig for Connect calls.
+//
+// Note: the BackendConfig.Warning field is loader-side only and is NOT
+// transmitted to the plugin binary — it is populated by the loader after
+// Connect returns, never by the plugin itself.
 message BackendConfigProto {
   string id          = 1;
   string name        = 2;
@@ -17,6 +21,10 @@ message BackendConfigProto {
   string sync_dir    = 7;
   string remote_path = 8;
   string local_path  = 9;
+  // Fields 10–19 are reserved for future BackendConfig extensions.
+  // Do not reuse these numbers to avoid silent data corruption in mixed
+  // loader/plugin version deployments.
+  reserved 10 to 19;
 }
 
 // FileInfoProto carries metadata for a remote file or directory.
@@ -29,6 +37,9 @@ message FileInfoProto {
   string etag           = 6;
   bool   is_placeholder = 7;
   bool   is_cached      = 8;
+  // Fields 9–19 are reserved for future FileInfo extensions (e.g. permissions,
+  // checksum). Do not reuse these numbers.
+  reserved 9 to 19;
 }
 
 // FileEventProto carries a change notification from Watch.
@@ -121,11 +132,18 @@ message QuotaRequest  {}
 message QuotaResponse {
   int64  free  = 1;
   int64  total = 2;
+  // Deprecated: since v0.7.0 the server returns gRPC status errors instead of
+  // populating this field. Kept for wire-format compatibility with pre-v0.7.0
+  // plugin binaries. The client (plugins/grpc/client.go GetQuota) still reads
+  // it as a fallback. Do NOT remove field number 3.
   string error = 3;
 }
 
 // ─── Service ─────────────────────────────────────────────────────────────────
 
+// Protocol version: 1 (loader.HandshakeConfig.ProtocolVersion).
+// Incrementing the protocol version forces a hard incompatibility between
+// loader and plugin binaries — only do so for breaking wire-format changes.
 service StorageService {
   // Identification
   rpc Name        (NameRequest)        returns (NameResponse);

@@ -1,17 +1,28 @@
 // Package loader implements the GhostDrive dynamic plugin loader based on
-// HashiCorp go-plugin. It scans a directory for plugin executables (*.exe),
-// launches each one as a subprocess, negotiates the gRPC handshake, and
-// registers the plugin in the global plugins registry.
+// HashiCorp go-plugin. It discovers plugin executables in a directory, launches
+// each one as a subprocess, negotiates the gRPC handshake, and registers the
+// backend in the global plugins registry.
 //
-// Crash supervision: if a plugin subprocess exits unexpectedly, the watchdog
-// goroutine attempts to restart it up to 3 times with exponential back-off
-// (1s → 2s → 4s). After 3 failures the plugin is marked as "failed".
+// # Cross-platform scanning
+//
+// On Windows the loader scans *.exe files.
+// On Linux/macOS it additionally scans extensionless files whose execute bit
+// is set (mode & 0111 != 0). Both types are handled by the same Scan call,
+// so a plugin directory may contain mixed Windows and Linux binaries.
+//
+// # Crash supervision
+//
+// If a plugin subprocess exits unexpectedly the watchdog goroutine attempts to
+// restart it up to N times (default N=3) with configurable back-off delays
+// (default: 1 s → 2 s → 4 s). After N failures the plugin is marked "failed".
+// The delays are injected via NewGRPCLoaderWithOptions to enable fast tests.
 package loader
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
@@ -39,6 +50,26 @@ var HandshakeConfig = goplugin.HandshakeConfig{
 	MagicCookieValue: "storage.v1",
 }
 
+// defaultWatchdogDelays is the production exponential back-off schedule.
+var defaultWatchdogDelays = []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+
+// LoaderOptions configures optional behaviours of GRPCLoader.
+// The zero value applies production defaults.
+type LoaderOptions struct {
+	// WatchdogDelays overrides the back-off schedule used when restarting
+	// crashed plugins. The number of elements defines the maximum restart
+	// attempts. Zero-length slice defaults to {1s, 2s, 4s}.
+	//
+	// The attempt counter resets after a successful recovery; the limit
+	// applies to consecutive failures only. If a plugin crashes 3 times in a
+	// row without a successful restart in between, it is permanently marked
+	// "failed". A single successful restart resets the counter to zero.
+	//
+	// Tests should inject short delays (e.g. {10ms, 10ms, 10ms}) to avoid
+	// blocking the test suite.
+	WatchdogDelays []time.Duration
+}
+
 // pluginEntry holds the runtime state of a loaded plugin.
 type pluginEntry struct {
 	name   string
@@ -54,15 +85,31 @@ type pluginEntry struct {
 // GRPCLoader scans a directory for plugin binaries, launches them via
 // go-plugin, and registers each backend with the global plugins registry.
 type GRPCLoader struct {
-	mu         sync.RWMutex
-	pluginsDir string
-	entries    map[string]*pluginEntry // keyed by plugin name
+	mu             sync.RWMutex
+	pluginsDir     string
+	entries        map[string]*pluginEntry // keyed by plugin name
+	watchdogDelays []time.Duration
 }
 
-// NewGRPCLoader creates a GRPCLoader. Call Scan to load plugins.
+// NewGRPCLoader creates a GRPCLoader with production defaults. Call Scan to load plugins.
 func NewGRPCLoader() *GRPCLoader {
+	return NewGRPCLoaderWithOptions(LoaderOptions{})
+}
+
+// NewGRPCLoaderWithOptions creates a GRPCLoader with custom options.
+// Use this constructor in tests to inject fast watchdog delays:
+//
+//	l := loader.NewGRPCLoaderWithOptions(loader.LoaderOptions{
+//	    WatchdogDelays: []time.Duration{10*time.Millisecond, 10*time.Millisecond, 10*time.Millisecond},
+//	})
+func NewGRPCLoaderWithOptions(opts LoaderOptions) *GRPCLoader {
+	delays := opts.WatchdogDelays
+	if len(delays) == 0 {
+		delays = defaultWatchdogDelays
+	}
 	return &GRPCLoader{
-		entries: make(map[string]*pluginEntry),
+		entries:        make(map[string]*pluginEntry),
+		watchdogDelays: delays,
 	}
 }
 
@@ -80,23 +127,31 @@ func (l *GRPCLoader) Scan(pluginsDir string) error {
 	l.pluginsDir = pluginsDir
 	l.mu.Unlock()
 
-	// Find all executables (cross-platform: *.exe on Windows, no extension on
-	// Linux/macOS — we scan *.exe for cross-platform builds from Windows,
-	// and also files with no extension for Linux plugin binaries).
+	// *.exe — Windows plugin binaries (also matched on Linux: extension is just
+	// a string, no OS magic involved).
 	matches, err := filepath.Glob(filepath.Join(pluginsDir, "*.exe"))
 	if err != nil {
 		return fmt.Errorf("loader: scan %q: %w", pluginsDir, err)
 	}
-	// Also scan executables without extension (Linux/macOS plugins).
-	otherMatches, _ := filepath.Glob(filepath.Join(pluginsDir, "*"))
-	for _, m := range otherMatches {
-		ext := filepath.Ext(m)
-		if ext == "" || ext == ".exe" {
+
+	// Extensionless files with execute bit — Linux/macOS plugin binaries.
+	// We skip directories, empty files, and anything with an extension (covers
+	// *.md, *.txt, *.so, *.dylib, etc.).
+	allEntries, _ := filepath.Glob(filepath.Join(pluginsDir, "*"))
+	for _, m := range allEntries {
+		if filepath.Ext(m) != "" {
+			// Has an extension — *.exe already handled above, others ignored.
 			continue
 		}
-		// Skip non-exe non-extensionless files (e.g. *.md, *.txt).
+		info, statErr := os.Stat(m)
+		if statErr != nil || info.IsDir() || info.Size() == 0 {
+			continue
+		}
+		// Executable bit set → treat as a Linux/macOS plugin binary.
+		if info.Mode()&0111 != 0 {
+			matches = append(matches, m)
+		}
 	}
-	_ = otherMatches // reserved for future cross-platform extension
 
 	for _, path := range matches {
 		l.loadPlugin(path)
@@ -181,10 +236,13 @@ func (l *GRPCLoader) launchPlugin(path string) (*goplugin.Client, *grpcbridge.GR
 	return client, backend, nil
 }
 
-// watchdog monitors a plugin process and restarts it on crash (max 3 attempts,
-// exponential back-off: 1s → 2s → 4s).
+// watchdog monitors a plugin process and restarts it on crash up to
+// len(l.watchdogDelays) times using the configured back-off schedule.
+// The attempt counter resets after a successful recovery (consecutive failures
+// only). After all attempts are exhausted entry.status is set to "failed" and
+// entry.err is set to "max restart attempts reached".
 func (l *GRPCLoader) watchdog(ctx context.Context, entry *pluginEntry) {
-	delays := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+	delays := l.watchdogDelays
 
 	for attempt := 0; attempt < len(delays); attempt++ {
 		// Wait until the client exits or the context is cancelled.
@@ -217,8 +275,12 @@ func (l *GRPCLoader) watchdog(ctx context.Context, entry *pluginEntry) {
 		newClient, newBackend, err := l.launchPlugin(entry.path)
 		if err != nil {
 			log.Printf("loader: restart %q attempt %d failed: %v", entry.name, attempt+1, err)
+			// Stay in "restarting" — we may still have attempts left.
+			// "failed" is only set after all consecutive attempts are exhausted,
+			// at which point entry.err is overwritten with the canonical
+			// "max restart attempts reached" message.
 			l.mu.Lock()
-			entry.status = "failed"
+			entry.status = "restarting"
 			entry.err = err.Error()
 			l.mu.Unlock()
 			continue
@@ -243,9 +305,9 @@ func (l *GRPCLoader) watchdog(ctx context.Context, entry *pluginEntry) {
 	log.Printf("loader: plugin %q failed after %d attempts — giving up", entry.name, len(delays))
 	l.mu.Lock()
 	entry.status = "failed"
-	if entry.err == "" {
-		entry.err = "max restart attempts reached"
-	}
+	// Always set the canonical message so callers can test for it reliably.
+	// The individual restart errors are preserved in the logs.
+	entry.err = "max restart attempts reached"
 	l.mu.Unlock()
 }
 
@@ -321,6 +383,25 @@ type PluginInfo struct {
 	Status string `json:"status"`
 	// Error contains the error message when Status == "failed".
 	Error string `json:"error,omitempty"`
+}
+
+// KillPluginProcess terminates the subprocess of the named plugin without
+// cancelling its watchdog. The watchdog will detect the exit and attempt to
+// restart the plugin according to the configured back-off schedule.
+//
+// This is primarily useful for integration tests that need to simulate a
+// plugin crash. For a clean shutdown of all plugins use Shutdown instead.
+func (l *GRPCLoader) KillPluginProcess(name string) error {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	entry, ok := l.entries[name]
+	if !ok {
+		return fmt.Errorf("loader: plugin %q not found", name)
+	}
+	if entry.client != nil {
+		entry.client.Kill()
+	}
+	return nil
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

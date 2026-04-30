@@ -3,10 +3,19 @@
 //
 // # Architecture
 //
-// Each backend is an independent Go package under plugins/<name>/ that
-// implements the StorageBackend interface. Plugins are compiled into the main
-// binary — there is no dynamic loading (.dll / .so / gRPC). The registry in
-// plugins/registry.go maps backend type names to factory functions.
+// GhostDrive supports two plugin modes:
+//
+//   - Static plugins: compiled directly into the main binary. Currently only
+//     the "local" backend (plugins/local/) is built this way. The registry in
+//     plugins/registry.go maps type names to factory functions.
+//
+//   - Dynamic plugins (go-plugin + gRPC): any external backend compiled as a
+//     standalone binary and placed in <AppDir>/plugins/. The loader in
+//     plugins/loader/ discovers these binaries at startup, negotiates the
+//     go-plugin handshake (plugins/loader.HandshakeConfig), and bridges each
+//     plugin via the gRPC transport defined in plugins/proto/storage.proto.
+//     Plugin authors should start from plugins/sdk/go/ (echo example +
+//     Makefile) and implement StorageBackend in their own binary.
 //
 // # Plugin lifecycle
 //
@@ -14,6 +23,13 @@
 //
 // A plugin must not perform any I/O before Connect is called and must not
 // panic after Disconnect is called.
+//
+// # Dynamic plugin crash recovery
+//
+// The loader watchdog restarts dynamic plugins on unexpected exit, with
+// exponential back-off (default: 1 s → 2 s → 4 s, up to 3 attempts).
+// Plugin binaries must therefore be stateless between restarts: do not hold
+// persistent locks or temp files that survive process exit.
 package plugins
 
 import (

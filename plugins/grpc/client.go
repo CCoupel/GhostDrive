@@ -320,11 +320,18 @@ func (b *GRPCBackend) Watch(ctx context.Context, path string) (<-chan plugins.Fi
 // ── Quota ─────────────────────────────────────────────────────────────────────
 
 // GetQuota implements plugins.StorageBackend.
+//
+// The server (plugins/grpc/server.go) propagates errors as gRPC status errors
+// since v0.7.0. The resp.GetError() branch below is a backward-compatibility
+// fallback for pre-v0.7.0 plugin binaries that returned errors in the response
+// body instead of as gRPC status codes. It can be removed once all plugins
+// have been recompiled against the v0.7.0+ server stub.
 func (b *GRPCBackend) GetQuota(ctx context.Context) (free, total int64, err error) {
 	resp, grpcErr := b.client.GetQuota(ctx, &storagepb.QuotaRequest{})
 	if grpcErr != nil {
 		return 0, 0, mapGRPCError("grpc: GetQuota", grpcErr)
 	}
+	// Backward-compat: pre-v0.7.0 plugins set this field instead of a gRPC error.
 	if resp.GetError() != "" {
 		return 0, 0, fmt.Errorf("grpc: GetQuota: %s", resp.GetError())
 	}

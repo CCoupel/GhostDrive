@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-04-29
+
+### Added
+
+- **Plugin loader** : parametrizable watchdog delays for testability via `NewGRPCLoaderWithOptions(LoaderOptions)` (#76)
+- **Plugin loader** : Linux/macOS executable scan (extensionless files with execute bit 0111) — cross-platform plugin discovery (#76)
+- **SDK Go** : Linux build target in Makefile (`build-linux`, `build-all`) — fully static ELF binaries compatible with Linux plugin loader (#72)
+- **Tests** : mock plugin testdata (`plugins/testdata/mock-plugin/`) compiling in CI via `TestMain` (#77)
+- **Tests** : integration tests for gRPC bridge — handshake, watchdog restart, shutdown cleanup (#77)
+- **CI** : race detector restored with scoped `CGO_ENABLED=0` for mock build only (#77)
+
+### Fixed
+
+- **gRPC server** : `GetQuota` error path now uses `mapBackendError` for sentinel round-trip, aligning with Delete/Move/List/Stat/CreateDir (#76)
+- **gRPC loader** : watchdog status "failed" only set after all consecutive restart attempts exhausted (#76)
+
+### Changed
+
+- **proto** : `BackendConfigProto` and `FileInfoProto` reserve field ranges (10-19, 9-19) for future use (#76)
+- **proto** : `StorageService` versioning comment added (Protocol version: 1, per HandshakeConfig) (#76)
+- **docs** : `plugin-development.md` rewritten for v0.7.0 gRPC architecture — 7 sections covering plugins static+dynamic, `StorageBackend` interface, step-by-step guide for external plugins (go-plugin), conventions, gRPC transport, tests, and pre-PR checklist (#73)
+
+---
+
 ## [0.6.0] — 2026-04-28
 
 ### Added
