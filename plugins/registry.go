@@ -38,6 +38,14 @@ func Get(name string) (StorageBackend, error) {
 	return factory(), nil
 }
 
+// Has reports whether a backend type name is registered.
+func Has(name string) bool {
+	registryMu.RLock()
+	_, ok := registry[name]
+	registryMu.RUnlock()
+	return ok
+}
+
 // ListBackends returns the names of all registered backends, sorted
 // alphabetically.  The result is a fresh slice on every call.
 func ListBackends() []string {

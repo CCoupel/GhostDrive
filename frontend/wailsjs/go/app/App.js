@@ -62,6 +62,10 @@ export function GetMountPoint() {
   return window['go']['app']['App']['GetMountPoint']();
 }
 
+export function GetPluginDescriptors() {
+  return window['go']['app']['App']['GetPluginDescriptors']();
+}
+
 export function GetSyncState() {
   return window['go']['app']['App']['GetSyncState']();
 }
@@ -132,4 +136,8 @@ export function TestBackendConnection(arg1) {
 
 export function UnmountDrive() {
   return window['go']['app']['App']['UnmountDrive']();
+}
+
+export function UpdateBackend(arg1) {
+  return window['go']['app']['App']['UpdateBackend'](arg1);
 }

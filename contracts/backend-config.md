@@ -31,14 +31,21 @@ type BackendConfig struct {
 **Comportement au démarrage** : Si `AutoSync=true`, l'engine de synchronisation est démarré automatiquement après reconnexion du backend.
 **Backward compatibility** : Les backends existants en config.json sans le champ `autoSync` lisent la zero-value Go (`false`) → comportement inchangé (sync manuelle).
 
-### Paramètres WebDAV (`type: "webdav"`)
+### Paramètres WebDAV (`type: "webdav"`) — v0.8.0
 
-| Clé | Type | Requis | Description |
-|-----|------|--------|-------------|
-| `url` | string | ✓ | URL WebDAV (ex: `https://nas.local/remote.php/dav/files/user`) |
-| `username` | string | ✓ | Nom d'utilisateur |
-| `password` | string | ✓ | Mot de passe (jamais loggué) |
-| `insecure` | string | — | `"true"` pour accepter les certificats auto-signés |
+| Clé | Type | Requis | Défaut | Description |
+|-----|------|--------|--------|-------------|
+| `url` | string | ✓ | — | URL racine WebDAV (ex: `https://nas.local/dav`) |
+| `username` | string | cond. | — | Requis si `authType=basic` (défaut) |
+| `password` | string | cond. | — | Requis si `authType=basic` ; jamais loggué |
+| `token` | string | cond. | — | Requis si `authType=bearer` ; jamais loggué |
+| `authType` | string | non | `"basic"` | Schéma d'auth : `"basic"` (RFC 7617) \| `"bearer"` (RFC 6750) |
+| `pollInterval` | string | non | `"30"` | Intervalle de polling Watch en **millisecondes** |
+| `tlsSkipVerify` | string | non | `"false"` | `"true"` pour accepter les certificats auto-signés (NAS domestiques) |
+
+> **Rétro-compatibilité v0.8.0** : Les configs existantes sans `token`, `authType`,
+> `pollInterval` ou `tlsSkipVerify` utilisent les valeurs par défaut ci-dessus.
+> Les configs v0.x avec `insecure` doivent migrer vers `tlsSkipVerify`.
 
 ### Paramètres MooseFS (`type: "moosefs"`)
 
@@ -155,6 +162,30 @@ Frontend     : window.go.App.OpenSyncFolder(backendId)
 ```
 
 Ouvre le `SyncDir` du backend dans l'Explorateur Windows (`explorer.exe`).
+
+---
+
+---
+
+## PluginDescriptor et ParamSpec (v1.1.0 — #79 / #80)
+
+Voir `contracts/plugin-describe.md` pour la spécification complète.
+
+Chaque plugin expose un `PluginDescriptor` via la méthode `Describe()` qui décrit les champs de
+configuration Zone 2 (Remote) nécessaires. La validation de `AddBackend` utilise `ParamSpec.Required`
+pour vérifier que les champs obligatoires sont présents dans `BackendConfig.Params`.
+
+```go
+type PluginDescriptor struct {
+    Type        string      // == Name()
+    DisplayName string      // libellé UI dans le sélecteur
+    Description string      // description courte
+    Params      []ParamSpec // champs Zone 2 — validés par validateBackendConfig
+}
+```
+
+Le binding Wails `GetPluginDescriptors() []PluginDescriptor` expose tous les plugins disponibles
+(statiques + dynamiques) au frontend pour générer dynamiquement la Zone 2 de `SyncPointForm`.
 
 ---
 

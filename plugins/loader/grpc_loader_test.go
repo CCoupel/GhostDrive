@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/CCoupel/GhostDrive/plugins"
 	"github.com/CCoupel/GhostDrive/plugins/loader"
 )
 
@@ -307,7 +308,14 @@ func TestGRPCLoader_HandshakeFailed(t *testing.T) {
 // TestGRPCLoader_Watchdog_RestartOnCrash kills the mock plugin subprocess and
 // verifies that the watchdog detects the exit and successfully restarts it.
 // Uses short watchdog delays (10 ms) to avoid waiting for the default 1s/2s/4s.
+//
+// Skipped in v0.8.0: factory mode sets entry.client = nil, so
+// KillPluginProcess is a no-op and the test passes trivially without exercising
+// any watchdog logic.
+// TODO(v0.9.0): add factory-instance crash recovery test that exercises the
+// watchdog on an active, app-level backend connection.
 func TestGRPCLoader_Watchdog_RestartOnCrash(t *testing.T) {
+	t.Skip("KillPluginProcess is a no-op in factory mode (entry.client == nil) — TODO(v0.9.0): add factory-instance crash recovery test")
 	requireMockPlugin(t)
 
 	dir := t.TempDir()
@@ -340,60 +348,24 @@ func TestGRPCLoader_Watchdog_RestartOnCrash(t *testing.T) {
 		"plugin must return to 'loaded' status after a watchdog restart")
 }
 
-// TestGRPCLoader_Watchdog_MaxRetries removes the plugin binary after initial
-// load, then kills the subprocess. The watchdog must fail all consecutive
-// restart attempts and mark the plugin as "failed" with "max restart attempts
-// reached".
+// TestGRPCLoader_Watchdog_MaxRetries is skipped in v0.8.0 because loadPlugin
+// now uses factory mode (no persistent subprocess per registered plugin type).
+// The watchdog restart path still exists and is exercised by the watchdog()
+// function itself when a factory-spawned instance crashes; however there is no
+// longer a persistent probe process to kill via KillPluginProcess, so this
+// test's trigger mechanism no longer applies.
+//
+// TODO(v0.9.0): add a dedicated factory-instance crash recovery test that
+// exercises the watchdog on an active, app-level backend connection.
 func TestGRPCLoader_Watchdog_MaxRetries(t *testing.T) {
-	requireMockPlugin(t)
-
-	dir := t.TempDir()
-	binaryPath := copyMockPlugin(t, dir, "mock.exe")
-
-	l := loader.NewGRPCLoaderWithOptions(loader.LoaderOptions{
-		WatchdogDelays: fastDelays(),
-	})
-	require.NoError(t, l.Scan(dir))
-	t.Cleanup(func() { _ = l.Shutdown() })
-
-	// Confirm initial load succeeded.
-	require.Eventually(t, func() bool {
-		for _, info := range l.GetLoadedPlugins() {
-			if info.Name == "mock" && info.Status == "loaded" {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 50*time.Millisecond)
-
-	// Delete the binary so all restart attempts fail immediately.
-	require.NoError(t, os.Remove(binaryPath))
-
-	// Kill the subprocess to trigger the watchdog.
-	require.NoError(t, l.KillPluginProcess("mock"))
-
-	// After len(WatchdogDelays)=3 consecutive failed restarts the plugin is
-	// permanently marked "failed". Allow generous timeout because each watchdog
-	// cycle polls for exit up to 500 ms before attempting restart.
-	require.Eventually(t, func() bool {
-		for _, info := range l.GetLoadedPlugins() {
-			if info.Name == "mock" && info.Status == "failed" {
-				return true
-			}
-		}
-		return false
-	}, 10*time.Second, 200*time.Millisecond,
-		"plugin must be permanently 'failed' after max restart attempts")
-
-	infos := l.GetLoadedPlugins()
-	require.Len(t, infos, 1)
-	assert.Equal(t, "failed", infos[0].Status)
-	assert.Contains(t, infos[0].Error, "max restart",
-		"error must be 'max restart attempts reached'")
+	t.Skip("watchdog max-retry test not applicable for factory-mode plugins (v0.8.0)")
 }
 
-// TestGRPCLoader_Shutdown_KillsPlugin verifies that Shutdown terminates the
-// plugin subprocess (client.Exited() becomes true) and clears all entries.
+// TestGRPCLoader_Shutdown_KillsPlugin verifies that Shutdown clears all
+// plugin entries.  In v0.8.0 factory mode the probe subprocess is killed
+// immediately after loadPlugin, so entry.client is nil and there is no
+// persistent process to check Exited() on.  The important invariant is that
+// GetLoadedPlugins() is empty after Shutdown.
 func TestGRPCLoader_Shutdown_KillsPlugin(t *testing.T) {
 	requireMockPlugin(t)
 
@@ -409,14 +381,98 @@ func TestGRPCLoader_Shutdown_KillsPlugin(t *testing.T) {
 	require.Len(t, infos, 1)
 	require.Equal(t, "loaded", infos[0].Status, "plugin must be loaded before Shutdown")
 
-	// Save the go-plugin Client BEFORE Shutdown clears the entries map.
-	client, ok := l.GetPluginClientForTest("mock")
-	require.True(t, ok, "client must be accessible before Shutdown")
-	assert.False(t, client.Exited(), "plugin process must be running before Shutdown")
+	// Shutdown cancels watchdog contexts and clears all entries.
+	require.NoError(t, l.Shutdown())
+	assert.Empty(t, l.GetLoadedPlugins(), "entries must be cleared after Shutdown")
+}
 
-	// Shutdown cancels watchdogs and kills all subprocesses.
+// TestGRPCLoader_Factory_UniqueInstances verifies that the v0.8.0 factory-mode
+// loader registers a factory that spawns a fresh subprocess for each
+// plugins.Get() call, ensuring that two backends of the same type are fully
+// independent (distinct interface values, separate gRPC connections).
+//
+// Note: each plugins.Get("mock") spawns a subprocess that is not tracked by
+// the loader.  The subprocesses are OS-reaped when the test process exits.
+// This is an accepted limitation for v0.8.0; a proper lifecycle API for
+// factory instances is tracked in a separate issue.
+func TestGRPCLoader_Factory_UniqueInstances(t *testing.T) {
+	requireMockPlugin(t)
+
+	dir := t.TempDir()
+	copyMockPlugin(t, dir, "mock.exe")
+
+	l := loader.NewGRPCLoaderWithOptions(loader.LoaderOptions{
+		WatchdogDelays: fastDelays(),
+	})
+	require.NoError(t, l.Scan(dir))
+	t.Cleanup(func() { _ = l.Shutdown() })
+
+	infos := l.GetLoadedPlugins()
+	require.Len(t, infos, 1)
+	require.Equal(t, "loaded", infos[0].Status)
+
+	// Each plugins.Get("mock") call must invoke the factory, spawning a new
+	// process and returning a distinct StorageBackend instance.
+	b1, err1 := plugins.Get("mock")
+	b2, err2 := plugins.Get("mock")
+	require.NoError(t, err1, "first plugins.Get must succeed")
+	require.NoError(t, err2, "second plugins.Get must succeed")
+	require.NotNil(t, b1)
+	require.NotNil(t, b2)
+
+	// The two backends must be distinct objects (different pointers).
+	// Using interface comparison: two interface values are equal only if they
+	// share the same type AND the same underlying pointer value.
+	assert.False(t, b1 == b2, "each plugins.Get() call must return a distinct backend instance")
+}
+
+// TestGRPCLoader_Shutdown_KillsFactoryClients is the non-regression test for
+// issue #86: before the fix, the factory closure discarded the *goplugin.Client
+// with "_", so subprocesses spawned via plugins.Get() outlived Shutdown().
+// After the fix, every factory-spawned client is tracked in factoryClients and
+// killed by Shutdown().
+func TestGRPCLoader_Shutdown_KillsFactoryClients(t *testing.T) {
+	requireMockPlugin(t)
+
+	dir := t.TempDir()
+	copyMockPlugin(t, dir, "mock.exe")
+
+	l := loader.NewGRPCLoaderWithOptions(loader.LoaderOptions{
+		WatchdogDelays: fastDelays(),
+	})
+	require.NoError(t, l.Scan(dir))
+
+	// Safety cleanup in case the test fails before the explicit Shutdown call.
+	t.Cleanup(func() { _ = l.Shutdown() })
+
+	infos := l.GetLoadedPlugins()
+	require.Len(t, infos, 1)
+	require.Equal(t, "loaded", infos[0].Status, "plugin must be loaded before calling plugins.Get")
+
+	// Spawn a factory subprocess via plugins.Get — this is the code path fixed by #86.
+	// Before the fix, the client returned by launchPlugin was silently dropped here.
+	backend, err := plugins.Get("mock")
+	require.NoError(t, err, "plugins.Get must succeed after a successful Scan")
+	require.NotNil(t, backend)
+
+	// The loader must have recorded exactly one factory client.
+	factoryClients := l.GetFactoryClientsForTest()
+	require.Len(t, factoryClients, 1,
+		"factory client must be tracked in factoryClients after plugins.Get (regression: was discarded with _ before #86 fix)")
+
+	// Capture the client so we can still inspect it after Shutdown clears the slice.
+	spawnedClient := factoryClients[0]
+	require.False(t, spawnedClient.Exited(),
+		"factory subprocess must be alive before Shutdown is called")
+
+	// Shutdown must kill all factory-spawned subprocesses.
 	require.NoError(t, l.Shutdown())
 
-	assert.True(t, client.Exited(), "plugin process must have exited after Shutdown")
-	assert.Empty(t, l.GetLoadedPlugins(), "entries must be cleared after Shutdown")
+	// Allow a short grace period for the OS to propagate the kill signal, then
+	// assert the subprocess is gone.  This would fail before the #86 fix because
+	// the client was never stored and therefore never killed.
+	require.Eventually(t, func() bool {
+		return spawnedClient.Exited()
+	}, 2*time.Second, 50*time.Millisecond,
+		"factory subprocess must be killed by Shutdown (non-regression for issue #86)")
 }

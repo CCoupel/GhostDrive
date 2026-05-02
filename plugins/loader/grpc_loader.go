@@ -33,6 +33,7 @@ import (
 
 	grpcbridge "github.com/CCoupel/GhostDrive/plugins/grpc"
 
+	"github.com/CCoupel/GhostDrive/internal/logger"
 	"github.com/CCoupel/GhostDrive/plugins"
 )
 
@@ -72,11 +73,12 @@ type LoaderOptions struct {
 
 // pluginEntry holds the runtime state of a loaded plugin.
 type pluginEntry struct {
-	name   string
-	path   string
-	client *goplugin.Client
-	status string // "loaded" | "failed" | "restarting"
-	err    string
+	name       string
+	path       string
+	client     *goplugin.Client
+	status     string // "loaded" | "failed" | "restarting"
+	err        string
+	descriptor plugins.PluginDescriptor // cached on first load
 
 	// watchdog control
 	cancelWatchdog context.CancelFunc
@@ -89,6 +91,11 @@ type GRPCLoader struct {
 	pluginsDir     string
 	entries        map[string]*pluginEntry // keyed by plugin name
 	watchdogDelays []time.Duration
+
+	// factoryClients tracks every goplugin.Client spawned by factory closures
+	// (one per plugins.Get() call). They are killed in Shutdown().
+	factoryMu      sync.Mutex
+	factoryClients []*goplugin.Client
 }
 
 // NewGRPCLoader creates a GRPCLoader with production defaults. Call Scan to load plugins.
@@ -159,11 +166,22 @@ func (l *GRPCLoader) Scan(pluginsDir string) error {
 	return nil
 }
 
-// loadPlugin launches a single plugin binary at path and registers it.
+// loadPlugin launches a single plugin binary at path, probes it to retrieve
+// its name, then registers a factory function that spawns a fresh subprocess
+// for each plugins.Get() call.  This ensures that two backends of the same
+// type (e.g. two WebDAV configs pointing to different servers) each get their
+// own isolated gRPC connection rather than sharing one process.
+//
+// The probe subprocess is killed immediately after the Name() RPC; it is never
+// used for serving requests.  Because no persistent subprocess exists after
+// loadPlugin returns, no watchdog goroutine is started for factory-mode plugins.
+// The watchdog restart behaviour applies only to plugins loaded via the
+// legacy single-instance path (watchdog function, called on restart).
 func (l *GRPCLoader) loadPlugin(path string) {
 	name := pluginNameFromPath(path)
 
-	client, backend, err := l.launchPlugin(path)
+	// Launch a short-lived probe to negotiate the handshake and read Name().
+	probeClient, backend, err := l.launchPlugin(path)
 	if err != nil {
 		log.Printf("loader: load %q: %v", path, err)
 		l.mu.Lock()
@@ -177,27 +195,47 @@ func (l *GRPCLoader) loadPlugin(path string) {
 		return
 	}
 
-	// Register a factory in the global plugin registry.
-	// The factory always returns the same GRPCBackend (single connection per plugin).
-	plugins.Register(backend.Name(), func() plugins.StorageBackend { return backend })
+	pluginName := backend.Name()
+	pluginDescriptor := backend.Describe()
+	pluginPath := path
 
-	watchCtx, watchCancel := context.WithCancel(context.Background())
+	// Kill the probe — its only purpose was to obtain the plugin name and descriptor.
+	probeClient.Kill()
+
+	// Register a factory that spawns a fresh subprocess per plugins.Get() call.
+	// This allows multiple independent backend instances of the same plugin type.
+	// Each spawned client is tracked in factoryClients so Shutdown() can kill it.
+	plugins.Register(pluginName, func() plugins.StorageBackend {
+		client, b, spawnErr := l.launchPlugin(pluginPath)
+		if spawnErr != nil {
+			log.Printf("loader: factory spawn %q: %v", pluginName, spawnErr)
+			return nil
+		}
+		l.factoryMu.Lock()
+		l.factoryClients = append(l.factoryClients, client)
+		l.factoryMu.Unlock()
+		return b
+	})
+
+	// entry.client is nil — factory-mode plugins have no persistent process to
+	// supervise.  The watchdog is not started; Shutdown() handles nil clients.
+	_, watchCancel := context.WithCancel(context.Background())
+	watchCancel() // cancel immediately: no goroutine to signal
+
 	entry := &pluginEntry{
-		name:           backend.Name(),
-		path:           path,
-		client:         client,
+		name:           pluginName,
+		path:           pluginPath,
+		client:         nil, // factory pattern: no persistent subprocess
 		status:         "loaded",
+		descriptor:     pluginDescriptor,
 		cancelWatchdog: watchCancel,
 	}
 
 	l.mu.Lock()
-	l.entries[entry.name] = entry
+	l.entries[pluginName] = entry
 	l.mu.Unlock()
 
-	log.Printf("loader: plugin %q loaded from %q", entry.name, path)
-
-	// Start watchdog goroutine.
-	go l.watchdog(watchCtx, entry)
+	log.Printf("loader: plugin %q loaded from %q (factory mode)", pluginName, path)
 }
 
 // launchPlugin starts the plugin binary and returns the go-plugin client and
@@ -207,12 +245,21 @@ func (l *GRPCLoader) launchPlugin(path string) (*goplugin.Client, *grpcbridge.GR
 		"storage": &grpcbridge.GRPCPlugin{},
 	}
 
+	pluginName := filepath.Base(path)
+	cmd := exec.Command(path)
+	// go-plugin manages its own stdout/stderr pipes internally.
+	// Use ClientConfig.Stderr (the raw stderr passthrough) to route plugin
+	// output into the central GhostDrive log. hideCmdWindow suppresses the
+	// console window on Windows via SysProcAttr before the process starts.
+	hideCmdWindow(cmd)
+
 	client := goplugin.NewClient(&goplugin.ClientConfig{
 		HandshakeConfig:  HandshakeConfig,
 		Plugins:          pluginMap,
-		Cmd:              exec.Command(path),
+		Cmd:              cmd,
 		AllowedProtocols: []goplugin.Protocol{goplugin.ProtocolGRPC},
-		Logger:           newHCLogger(filepath.Base(path)),
+		Logger:           newHCLogger(pluginName),
+		Stderr:           logger.NewPrefixed("[plugin/" + pluginName + "] "),
 	})
 
 	rpcClient, err := client.Client()
@@ -332,6 +379,14 @@ func waitForExit(ctx context.Context, client *goplugin.Client) <-chan struct{} {
 
 // Shutdown kills all loaded plugin subprocesses cleanly.
 func (l *GRPCLoader) Shutdown() error {
+	// Kill all factory-spawned clients (one per plugins.Get() call).
+	l.factoryMu.Lock()
+	for _, c := range l.factoryClients {
+		c.Kill()
+	}
+	l.factoryClients = nil
+	l.factoryMu.Unlock()
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -348,6 +403,21 @@ func (l *GRPCLoader) Shutdown() error {
 	// Clear the entries so a subsequent Scan starts fresh.
 	l.entries = make(map[string]*pluginEntry)
 	return nil
+}
+
+// GetPluginDescriptors returns a snapshot of the PluginDescriptor for every
+// successfully loaded dynamic plugin. Failed or restarting plugins are omitted.
+func (l *GRPCLoader) GetPluginDescriptors() []plugins.PluginDescriptor {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	result := make([]plugins.PluginDescriptor, 0, len(l.entries))
+	for _, e := range l.entries {
+		if e.status == "loaded" {
+			result = append(result, e.descriptor)
+		}
+	}
+	return result
 }
 
 // GetLoadedPlugins returns a snapshot of all loaded (and failed) plugins.

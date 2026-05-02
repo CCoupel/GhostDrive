@@ -19,7 +19,9 @@ import (
 	"github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/CCoupel/GhostDrive/plugins"
+	grpcbridge "github.com/CCoupel/GhostDrive/plugins/grpc"
 	"github.com/CCoupel/GhostDrive/plugins/loader"
+	"github.com/CCoupel/GhostDrive/plugins/local"
 	pluginsregistry "github.com/CCoupel/GhostDrive/plugins/registry"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -30,11 +32,13 @@ type App struct {
 	cfgPath string
 	cfg     config.AppConfig
 
-	mu          gosync.RWMutex
-	manager     *backends.BackendManager
-	engines     map[string]*sync.Engine
-	drive       placeholder.VirtualDrive
-	dynRegistry *pluginsregistry.DynamicRegistry // v0.6.x dynamic plugin loader
+	mu           gosync.RWMutex
+	manager      *backends.BackendManager
+	engines      map[string]*sync.Engine
+	drive        placeholder.VirtualDrive
+	dynRegistry  *pluginsregistry.DynamicRegistry  // v0.6.x dynamic plugin loader
+	descriptors  map[string]plugins.PluginDescriptor // cached plugin descriptors by type
+	localCleanup func()                              // cleanup for ServeInProcess local backend
 }
 
 // NewApp creates a new App. Configuration is loaded in Startup once the
@@ -47,16 +51,24 @@ func NewApp(cfgPath string) *App {
 		}
 	}
 	return &App{
-		cfgPath: cfgPath,
-		cfg:     config.DefaultConfig(),
-		engines: make(map[string]*sync.Engine),
-		drive:   placeholder.New(),
+		cfgPath:     cfgPath,
+		cfg:         config.DefaultConfig(),
+		engines:     make(map[string]*sync.Engine),
+		drive:       placeholder.New(),
+		descriptors: make(map[string]plugins.PluginDescriptor),
 	}
 }
 
 // startup is called by Wails after the frontend is ready.
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
+
+	// Guard against App instances created without NewApp() (e.g. in tests).
+	a.mu.Lock()
+	if a.descriptors == nil {
+		a.descriptors = make(map[string]plugins.PluginDescriptor)
+	}
+	a.mu.Unlock()
 
 	// Load configuration
 	path := a.cfgPath
@@ -88,6 +100,35 @@ func (a *App) Startup(ctx context.Context) {
 		log.Printf("app: create GhostDriveRoot %q: %v", root, err)
 	}
 
+	// v1.1.0 — Register the "local" backend via an in-process gRPC server backed
+	// by bufconn. This replaces the previous init()-based auto-registration in
+	// plugins/local/local.go and ensures the local backend goes through the same
+	// gRPC transport as dynamic plugins.
+	//
+	// Order matters: this MUST run before dynRegistry.Start() so that "local" is
+	// present in the registry when validateBackendConfig runs during reconnection.
+	localImpl := local.New()
+	grpcLocal, localCleanup, localErr := grpcbridge.ServeInProcess(localImpl)
+	if localErr != nil {
+		log.Printf("app: ServeInProcess local: %v — local backend unavailable", localErr)
+	} else {
+		a.localCleanup = localCleanup
+		// Cache the descriptor from the first (probe) instance.
+		a.mu.Lock()
+		a.descriptors["local"] = grpcLocal.Describe()
+		a.mu.Unlock()
+		// Register the factory: each plugins.Get("local") spawns a fresh in-process
+		// pair. In-process servers are cheap and die with the process (acceptable v1).
+		plugins.Register("local", func() plugins.StorageBackend {
+			b, _, spawnErr := grpcbridge.ServeInProcess(local.New())
+			if spawnErr != nil {
+				log.Printf("app: local factory spawn: %v", spawnErr)
+				return nil
+			}
+			return b
+		})
+	}
+
 	// v0.6.x — Scan <AppDir>/plugins/*.exe and register dynamic backends BEFORE
 	// the backend reconnection loop so that dynamic types pass validateBackendConfig.
 	appExe, exeErr := os.Executable()
@@ -99,6 +140,15 @@ func (a *App) Startup(ctx context.Context) {
 	a.dynRegistry = pluginsregistry.NewDynamicRegistry(pluginsDir)
 	if err := a.dynRegistry.Start(); err != nil {
 		log.Printf("app: plugin scan %q: %v", pluginsDir, err)
+	}
+
+	// Cache descriptors of successfully loaded dynamic plugins.
+	if a.dynRegistry != nil {
+		a.mu.Lock()
+		for _, d := range a.dynRegistry.GetPluginDescriptors() {
+			a.descriptors[d.Type] = d
+		}
+		a.mu.Unlock()
 	}
 
 	// Reconnect saved backends and auto-start sync where configured.
@@ -149,6 +199,11 @@ func (a *App) Shutdown(ctx context.Context) {
 		if err := a.dynRegistry.Stop(); err != nil {
 			log.Printf("app: shutdown dynRegistry: %v", err)
 		}
+	}
+
+	// v1.1.0 — Stop the in-process local backend gRPC server.
+	if a.localCleanup != nil {
+		a.localCleanup()
 	}
 }
 
@@ -207,6 +262,22 @@ func (a *App) GetLoadedPlugins() []loader.PluginInfo {
 	result := a.dynRegistry.ListDynamicPlugins()
 	if result == nil {
 		return []loader.PluginInfo{}
+	}
+	return result
+}
+
+// GetPluginDescriptors returns the descriptors of all available plugins
+// (static + dynamically loaded). The frontend uses this to generate the Zone 2
+// (Remote) section of the backend configuration form dynamically.
+//
+// Returns an empty (non-nil) slice when no plugins are available.
+// Wails binding: window.go.App.GetPluginDescriptors()
+func (a *App) GetPluginDescriptors() []plugins.PluginDescriptor {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	result := make([]plugins.PluginDescriptor, 0, len(a.descriptors))
+	for _, d := range a.descriptors {
+		result = append(result, d)
 	}
 	return result
 }
@@ -421,6 +492,97 @@ func (a *App) RemoveBackend(backendID string) error {
 	a.mu.Unlock()
 
 	return config.Save(cfg, path)
+}
+
+// UpdateBackend replaces the configuration of an existing backend identified by
+// newBC.ID. It stops the sync engine, disconnects the old connection, validates
+// the new config, reconnects if the backend is enabled, and persists the result.
+//
+// validateBackendConfig already skips the current backend when checking name/
+// path uniqueness (via the ex.ID == bc.ID guard), so keeping the same name does
+// not trigger a "duplicate name" error.
+func (a *App) UpdateBackend(newBC plugins.BackendConfig) (plugins.BackendConfig, error) {
+	// ── Find existing backend ─────────────────────────────────────────────
+	a.mu.RLock()
+	idx := -1
+	var oldBC plugins.BackendConfig
+	for i, bc := range a.cfg.Backends {
+		if bc.ID == newBC.ID {
+			idx = i
+			oldBC = bc
+			break
+		}
+	}
+	a.mu.RUnlock()
+
+	if idx == -1 {
+		return newBC, fmt.Errorf("backend not found: %s", newBC.ID)
+	}
+
+	// ── Stop sync engine if running ───────────────────────────────────────
+	_ = a.StopSync(newBC.ID)
+
+	// ── Disconnect old connection ─────────────────────────────────────────
+	if err := a.manager.Remove(newBC.ID); err != nil {
+		if !strings.Contains(err.Error(), "not found") {
+			return newBC, fmt.Errorf("disconnect: %w", err)
+		}
+	}
+
+	// ── Carry over immutable fields ───────────────────────────────────────
+	newBC.ID = oldBC.ID
+	if newBC.LocalPath == "" {
+		newBC.LocalPath = oldBC.LocalPath
+	}
+	if newBC.SyncDir == "" {
+		newBC.SyncDir = newBC.LocalPath
+	}
+
+	// ── Validate ──────────────────────────────────────────────────────────
+	warning, err := a.validateBackendConfig(newBC)
+	if err != nil {
+		return newBC, fmt.Errorf("validation: %w", err)
+	}
+	newBC.Warning = warning
+
+	// ── Reconnect if enabled ──────────────────────────────────────────────
+	if newBC.Enabled {
+		if err := a.manager.Add(newBC); err != nil {
+			return newBC, fmt.Errorf("connection: %w", err)
+		}
+		// MAJEUR-2 — restart AutoSync after reconnection
+		if newBC.AutoSync {
+			if syncErr := a.StartSync(newBC.ID); syncErr != nil {
+				log.Printf("app: UpdateBackend: auto-start sync %q: %v", newBC.ID, syncErr)
+			}
+		}
+	}
+
+	// ── Persist ───────────────────────────────────────────────────────────
+	a.mu.Lock()
+	// MAJEUR-1 — re-find index by ID under the write lock to avoid stale index
+	// (idx was captured under a prior RLock; a concurrent RemoveBackend could
+	// have shifted or removed the entry in the meantime).
+	finalIdx := -1
+	for i, bc := range a.cfg.Backends {
+		if bc.ID == newBC.ID {
+			finalIdx = i
+			break
+		}
+	}
+	if finalIdx == -1 {
+		a.mu.Unlock()
+		return newBC, fmt.Errorf("backend removed concurrently: %s", newBC.ID)
+	}
+	a.cfg.Backends[finalIdx] = newBC
+	path := a.cfgPath
+	cfg := a.cfg
+	a.mu.Unlock()
+
+	if err := config.Save(cfg, path); err != nil {
+		return newBC, fmt.Errorf("save: %w", err)
+	}
+	return newBC, nil
 }
 
 // TestBackendConnection instantiates a temporary backend and tests connectivity.
@@ -861,7 +1023,7 @@ func (a *App) validateBackendConfig(bc plugins.BackendConfig) (warning string, e
 	}
 
 	// ── Type ─────────────────────────────────────────────────────────────
-	if _, err := plugins.Get(bc.Type); err != nil {
+	if !plugins.Has(bc.Type) {
 		return "", fmt.Errorf("type invalide: %q", bc.Type)
 	}
 

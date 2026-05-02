@@ -57,6 +57,28 @@ export interface SyncState {
   activeTransfers: ProgressEvent[];
 }
 
+// ── Plugin Descriptor (v1.1.0 — #78 / #79) ────────────────────────────────
+
+export type ParamType = 'string' | 'password' | 'path' | 'select' | 'bool' | 'number';
+
+export interface ParamSpec {
+  key:         string;
+  label:       string;
+  type:        ParamType;
+  required:    boolean;
+  default:     string;
+  placeholder: string;
+  options:     string[];
+  helpText:    string;
+}
+
+export interface PluginDescriptor {
+  type:        string;
+  displayName: string;
+  description: string;
+  params:      ParamSpec[];
+}
+
 export interface BackendConfig {
   id: string;
   name: string;

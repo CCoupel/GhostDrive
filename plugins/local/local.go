@@ -59,14 +59,31 @@ type Backend struct {
 // New creates an unconnected Backend. Call Connect before any other method.
 func New() *Backend { return &Backend{} }
 
-func init() {
-	plugins.Register("local", func() plugins.StorageBackend { return New() })
-}
-
 // ─── Identification ───────────────────────────────────────────────────────────
 
 // Name returns the plugin identifier ("local").
 func (b *Backend) Name() string { return "local" }
+
+// Describe implements plugins.StorageBackend.
+// Returns the static descriptor used by the UI to build the Zone 2 form.
+// Callable before Connect; performs no I/O.
+func (b *Backend) Describe() plugins.PluginDescriptor {
+	return plugins.PluginDescriptor{
+		Type:        "local",
+		DisplayName: "Local / Réseau",
+		Description: "Synchronise depuis un dossier local ou un partage réseau (SMB, NFS…)",
+		Params: []plugins.ParamSpec{
+			{
+				Key:         "rootPath",
+				Label:       "Dossier source",
+				Type:        plugins.ParamTypePath,
+				Required:    true,
+				Placeholder: `D:\Photos\...`,
+				HelpText:    "Répertoire à synchroniser vers le point de sync local",
+			},
+		},
+	}
+}
 
 // ─── Connection ───────────────────────────────────────────────────────────────
 

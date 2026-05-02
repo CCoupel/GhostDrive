@@ -468,6 +468,41 @@ func TestWatch_ClosesOnCancel(t *testing.T) {
 	}
 }
 
+// ─── Describe ────────────────────────────────────────────────────────────────
+
+// TestBackend_Describe verifies the static descriptor returned by Describe().
+// Describe must be callable before Connect and must never perform I/O.
+func TestBackend_Describe(t *testing.T) {
+	b := New() // intentionally NOT connected — Describe must not require Connect
+
+	d := b.Describe()
+
+	// Type must match Name()
+	assert.Equal(t, "local", d.Type,
+		"Describe().Type must equal \"local\"")
+
+	// At least the rootPath param must be declared
+	assert.GreaterOrEqual(t, len(d.Params), 1,
+		"Describe().Params must contain at least one ParamSpec")
+
+	// First param must be rootPath, of type path, and required
+	if len(d.Params) >= 1 {
+		p := d.Params[0]
+		assert.Equal(t, "rootPath", p.Key,
+			"Describe().Params[0].Key must be \"rootPath\"")
+		assert.Equal(t, plugins.ParamTypePath, p.Type,
+			"Describe().Params[0].Type must be ParamTypePath")
+		assert.True(t, p.Required,
+			"Describe().Params[0].Required must be true")
+	}
+
+	// DisplayName and Description must be non-empty
+	assert.NotEmpty(t, d.DisplayName,
+		"Describe().DisplayName must not be empty")
+	assert.NotEmpty(t, d.Description,
+		"Describe().Description must not be empty")
+}
+
 // ─── GetQuota ────────────────────────────────────────────────────────────────
 
 func TestGetQuota_Connected(t *testing.T) {

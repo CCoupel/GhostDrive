@@ -110,6 +110,10 @@ func (m *mockBackend) Watch(_ context.Context, _ string) (<-chan plugins.FileEve
 
 func (m *mockBackend) GetQuota(_ context.Context) (int64, int64, error) { return -1, -1, nil }
 
+func (m *mockBackend) Describe() plugins.PluginDescriptor {
+	return plugins.PluginDescriptor{Type: "mock"}
+}
+
 // addRemoteFile adds a file directly to the mock backend.
 func (m *mockBackend) addRemoteFile(path string, size int64, modTime time.Time) {
 	m.files[path] = plugins.FileInfo{

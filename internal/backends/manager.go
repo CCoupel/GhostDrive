@@ -10,7 +10,6 @@ import (
 	"github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/CCoupel/GhostDrive/plugins"
-	_ "github.com/CCoupel/GhostDrive/plugins/local" // registers "local" backend via init()
 )
 
 // BackendManager manages the lifecycle of storage backends.

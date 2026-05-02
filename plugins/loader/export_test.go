@@ -20,3 +20,15 @@ func (l *GRPCLoader) GetPluginClientForTest(name string) (*goplugin.Client, bool
 	}
 	return entry.client, true
 }
+
+// GetFactoryClientsForTest returns a snapshot of all goplugin.Client instances
+// that have been spawned via factory closures (one per plugins.Get() call).
+// Used by integration tests to verify that Shutdown kills every factory client
+// (non-regression for issue #86 where factory clients were discarded with "_").
+func (l *GRPCLoader) GetFactoryClientsForTest() []*goplugin.Client {
+	l.factoryMu.Lock()
+	defer l.factoryMu.Unlock()
+	result := make([]*goplugin.Client, len(l.factoryClients))
+	copy(result, l.factoryClients)
+	return result
+}

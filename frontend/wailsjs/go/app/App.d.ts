@@ -37,6 +37,8 @@ export function GetLoadedPlugins():Promise<Array<loader.PluginInfo>>;
 
 export function GetMountPoint():Promise<string>;
 
+export function GetPluginDescriptors():Promise<Array<plugins.PluginDescriptor>>;
+
 export function GetSyncState():Promise<types.SyncState>;
 
 export function GetVersion():Promise<string>;
@@ -72,3 +74,5 @@ export function StopSync(arg1:string):Promise<void>;
 export function TestBackendConnection(arg1:plugins.BackendConfig):Promise<types.BackendStatus>;
 
 export function UnmountDrive():Promise<void>;
+
+export function UpdateBackend(arg1:plugins.BackendConfig):Promise<plugins.BackendConfig>;

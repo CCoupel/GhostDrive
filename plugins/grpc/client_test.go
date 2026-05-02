@@ -180,6 +180,10 @@ func (m *mockBackend) GetQuota(_ context.Context) (free, total int64, err error)
 	return 1000, 2000, nil
 }
 
+func (m *mockBackend) Describe() plugins.PluginDescriptor {
+	return plugins.PluginDescriptor{Type: "mock", DisplayName: "Mock Backend (test)"}
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 func TestGRPCBackend_Version(t *testing.T) {

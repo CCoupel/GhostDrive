@@ -5,7 +5,37 @@ All notable changes to GhostDrive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] — 2026-05-02
+
+### Added
+
+- **Plugin WebDAV** : implémentation complète `StorageBackend` via gRPC subprocess dynamique. Supporte Basic Auth et Bearer Token, TLS configurable (`tlsSkipVerify`), Watch par polling PROPFIND, GetQuota gracieux. Compatible Synology, TrueNAS, Nextcloud. (#23, #24)
+- **Multi-instance** : le loader spawne un subprocess indépendant par `plugins.Get()`, permettant plusieurs backends de même type. (#24)
+- **Plugin Introspection** : `Describe() PluginDescriptor` ajouté à l'interface `StorageBackend` — retourne type, displayName, description, et liste des `ParamSpec`. Callable avant `Connect()`. (#79)
+- **Types ParamSpec** : description des paramètres frontend — clé, libellé, type (string/password/path/select/bool/number), obligatoire, défaut, placeholder, options, helpText. (#79)
+- **RPC Describe** : nouveau RPC gRPC dans le bridge (DescribeRequest, DescribeResponse, ParamSpecProto). (#79)
+- **ServeInProcess()** : serveur gRPC in-memory (bufconn) pour les plugins statiques — tests sans subprocess. (#79)
+- **Dynamic SyncPointForm** : Zone 2 rendue dynamiquement depuis les `Params` du `PluginDescriptor`. Support des 6 types de champs. (#78)
+- **Binding GetPluginDescriptors()** : endpoint Wails retournant les descripteurs de tous les plugins disponibles. (#78)
+- **CI plugins** : auto-découverte des plugins (`plugins/*/cmd/`) dans le pipeline de release — binaires publiés aux côtés de l'exe principal.
+
+### Fixed
+
+- **WebDAV pollMs default** : `pollInterval` défaut corrigé de 30ms à 30000ms — évite la surcharge CPU. (#80)
+- **plugins.Has()** : nouveau helper — élimine un goroutine leak dans `validateBackendConfig`. (#80)
+- **Plugin subprocess** : fenêtre console masquée sur Windows + logs centralisés dans `%APPDATA%\GhostDrive\logs\ghostdrive.log` (rotation 10 MB, 3 backups, `GHOSTDRIVE_DEBUG=1`). (#81)
+- **WebDAV basePath** : paramètre `basePath` pour chroot du backend sur le serveur distant — rétrocompatible avec `RemotePath`. (#82)
+- **WebDAV GetQuota** : PROPFIND dédié + itération sur tous les propstats — corrige le retour N/A sur les serveurs RFC 4331. (#83)
+- **Loader** : factory clients trackés et tués dans `Shutdown()` — élimine les subprocesses plugins orphelins. (#86)
+- **Édition backend** : cliquer sur la carte ouvre le formulaire pré-rempli ; `UpdateBackend` corrige la race condition (re-cherche l'index sous WriteLock) et relance AutoSync après reconnexion. (#84)
+- **Carte backend — Distant** : affiche `params.basePath` en priorité, fallback sur `remotePath`. (#84)
+- **Quota non disponible** : la carte affiche "Quota non disponible" (gris) au lieu de "N/A" quand RFC 4331 non supporté. (#87)
+
+### Tests
+
+- 35+ tests d'intégration WebDAV, tests loader race-free, 19 tests vitest UI — 76.4% coverage Go. (#25)
+
+---
 
 ## [0.7.0] — 2026-04-29
 
@@ -215,6 +245,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ci.yml` réutilisé dans `build.yml` via `workflow_call` (pas de duplication)
 - Actions upgradées vers les versions compatibles Node.js 24 : checkout@v6, setup-go@v6, setup-node@v6, upload-artifact@v7, download-artifact@v8
 
+[0.8.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.8.0
+[0.7.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.7.0
 [0.6.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.6.0
 [0.5.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.5.0
 [0.4.0]: https://github.com/CCoupel/GhostDrive/releases/tag/v0.4.0

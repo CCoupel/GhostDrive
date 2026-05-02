@@ -136,6 +136,30 @@ jobs:
           wails build -platform ${{ matrix.goos }}/${{ matrix.goarch }} -o "$FILE" -skipbindings
           echo "✅ ${{ matrix.goos }}/${{ matrix.goarch }} → $FILE"
 
+      - name: Build plugins (auto-discovery — pure Go, CGO_ENABLED=0)
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          SUFFIX="${{ matrix.suffix }}"
+          mkdir -p build/plugins
+          built=0
+          # Discover plugins: any plugins/*/cmd/ directory with buildable Go files.
+          # go list returns nothing for //go:build ignore or empty packages → safely skipped.
+          for cmd_dir in plugins/*/cmd; do
+            [ -d "$cmd_dir" ] || continue
+            plugin_name=$(basename "$(dirname "$cmd_dir")")
+            pkg=$(go list "./$cmd_dir/" 2>/dev/null) || continue
+            [ -z "$pkg" ] && continue
+            out="build/plugins/ghostdrive-${plugin_name}-v${VERSION}-${SUFFIX}"
+            go build -ldflags="-s -w" -o "$out" "./$cmd_dir/"
+            echo "✅ ${plugin_name} → $out (place in plugins/ subfolder)"
+            built=$((built + 1))
+          done
+          echo "Total plugins built: $built"
+
       - name: Locate binary
         id: bin
         run: |
@@ -151,6 +175,12 @@ jobs:
         with:
           name: binary-${{ matrix.target }}
           path: ${{ steps.bin.outputs.path }}
+          retention-days: 1
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugins-${{ matrix.target }}
+          path: build/plugins/
           retention-days: 1
 
   # ============================================
@@ -184,7 +214,9 @@ jobs:
           tag_name: v${{ needs.version.outputs.version }}
           name: GhostDrive v${{ needs.version.outputs.version }}
           body_path: release_notes.md
-          files: artifacts/binary-*/*
+          files: |
+            artifacts/binary-*/*
+            artifacts/plugins-*/*
           draft: false
           prerelease: false
         env:

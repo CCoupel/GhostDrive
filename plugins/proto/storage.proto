@@ -139,6 +139,30 @@ message QuotaResponse {
   string error = 3;
 }
 
+// ─── Describe ────────────────────────────────────────────────────────────────
+// Fields 20–27 are used for Describe messages to avoid conflicts with the
+// reserve 10–19 declared in BackendConfigProto.
+
+message ParamSpecProto {
+  string key         = 20;
+  string label       = 21;
+  string type        = 22;   // "string" | "password" | "path" | "select" | "bool" | "number"
+  bool   required    = 23;
+  string default_val = 24;
+  string placeholder = 25;
+  repeated string options  = 26;
+  string help_text   = 27;
+}
+
+message DescribeRequest {}
+
+message DescribeResponse {
+  string type         = 20;
+  string display_name = 21;
+  string description  = 22;
+  repeated ParamSpecProto params = 23;
+}
+
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 // Protocol version: 1 (loader.HandshakeConfig.ProtocolVersion).
@@ -169,4 +193,7 @@ service StorageService {
 
   // Quota
   rpc GetQuota  (QuotaRequest)          returns (QuotaResponse);
+
+  // Plugin introspection — callable before Connect
+  rpc Describe  (DescribeRequest)       returns (DescribeResponse);
 }

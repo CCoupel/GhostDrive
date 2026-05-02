@@ -153,6 +153,64 @@ type BackendConfig struct {
 // not block.
 type ProgressCallback func(done, total int64)
 
+// ─── Plugin Descriptor types ─────────────────────────────────────────────────
+
+// ParamType describes the expected UI widget and validation for a plugin parameter.
+type ParamType string
+
+const (
+	// ParamTypeString renders a plain text input.
+	ParamTypeString ParamType = "string"
+	// ParamTypePassword renders a masked text input.
+	ParamTypePassword ParamType = "password"
+	// ParamTypePath renders a text input with a "Browse…" button that calls SelectDirectory.
+	ParamTypePath ParamType = "path"
+	// ParamTypeSelect renders a drop-down selector; Options must be non-empty.
+	ParamTypeSelect ParamType = "select"
+	// ParamTypeBool renders a checkbox.
+	ParamTypeBool ParamType = "bool"
+	// ParamTypeNumber renders a numeric input.
+	ParamTypeNumber ParamType = "number"
+)
+
+// ParamSpec describes a single configuration parameter for a plugin's Zone 2 (Remote).
+// The frontend uses ParamSpec to generate form fields dynamically.
+type ParamSpec struct {
+	// Key is the map key in BackendConfig.Params (e.g. "url", "username").
+	Key string `json:"key"`
+	// Label is the human-readable field label shown in the UI.
+	Label string `json:"label"`
+	// Type determines the widget type and input validation.
+	Type ParamType `json:"type"`
+	// Required indicates that the field must not be empty on form submission.
+	Required bool `json:"required"`
+	// Default is the pre-filled value shown in the input (may be empty).
+	Default string `json:"default"`
+	// Placeholder is the greyed-out hint text inside the input.
+	Placeholder string `json:"placeholder"`
+	// Options contains the allowed values for ParamTypeSelect fields.
+	// Ignored for other types.
+	Options []string `json:"options,omitempty"`
+	// HelpText is an optional explanatory sentence displayed below the field.
+	HelpText string `json:"helpText,omitempty"`
+}
+
+// PluginDescriptor is the static metadata returned by StorageBackend.Describe().
+// The frontend uses it to generate the Zone 2 (Remote) section of the backend
+// configuration form dynamically, without needing to hard-code per-plugin UI.
+type PluginDescriptor struct {
+	// Type is the plugin type identifier — same value as Name().
+	// Example: "local", "webdav".
+	Type string `json:"type"`
+	// DisplayName is the human-readable label shown in the backend-type selector.
+	DisplayName string `json:"displayName"`
+	// Description is a short one-sentence summary of what the plugin does.
+	Description string `json:"description"`
+	// Params defines the configuration fields for Zone 2 (Remote).
+	// An empty slice is valid for plugins with no remote-specific configuration.
+	Params []ParamSpec `json:"params"`
+}
+
 // ─── Interface ───────────────────────────────────────────────────────────────
 
 // StorageBackend is the contract that every GhostDrive storage plugin must
@@ -178,6 +236,13 @@ type StorageBackend interface {
 	// The value must match the BackendConfig.Type field used in the config file.
 	// Immutable; may be called before Connect.
 	Name() string
+
+	// ── Description ─────────────────────────────────────────────────────────
+
+	// Describe returns the plugin's static descriptor used by the UI to generate
+	// configuration forms dynamically. Must be callable before Connect; must not
+	// perform any I/O. A minimal descriptor (just Type == Name()) is always valid.
+	Describe() PluginDescriptor
 
 	// ── Connection ──────────────────────────────────────────────────────────
 

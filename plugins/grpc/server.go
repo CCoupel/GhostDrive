@@ -245,6 +245,32 @@ func (s *GRPCBackendServer) GetQuota(ctx context.Context, _ *storagepb.QuotaRequ
 	return &storagepb.QuotaResponse{Free: free, Total: total}, nil
 }
 
+// ── Describe ─────────────────────────────────────────────────────────────────
+
+// Describe returns the plugin's static descriptor. Callable before Connect.
+func (s *GRPCBackendServer) Describe(_ context.Context, _ *storagepb.DescribeRequest) (*storagepb.DescribeResponse, error) {
+	d := s.Impl.Describe()
+	params := make([]*storagepb.ParamSpecProto, 0, len(d.Params))
+	for _, p := range d.Params {
+		params = append(params, &storagepb.ParamSpecProto{
+			Key:         p.Key,
+			Label:       p.Label,
+			Type:        string(p.Type),
+			Required:    p.Required,
+			DefaultVal:  p.Default,
+			Placeholder: p.Placeholder,
+			Options:     p.Options,
+			HelpText:    p.HelpText,
+		})
+	}
+	return &storagepb.DescribeResponse{
+		Type:        d.Type,
+		DisplayName: d.DisplayName,
+		Description: d.Description,
+		Params:      params,
+	}, nil
+}
+
 // ── Error mapping ─────────────────────────────────────────────────────────────
 
 // mapBackendError converts a plugins.StorageBackend error to a gRPC status

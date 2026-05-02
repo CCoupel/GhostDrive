@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   Trash2, FolderOpen, RefreshCw, Play, Pause, Square,
-  AlertTriangle, Power, PowerOff,
+  AlertTriangle, Power, PowerOff, Pencil,
 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Modal } from '../ui/Modal';
@@ -16,10 +16,11 @@ interface BackendConfigCardProps {
   onRemove: (id: string) => void;
   onToggleEnabled: (id: string, enabled: boolean) => Promise<void>;
   onToggleAutoSync: (id: string, autoSync: boolean) => Promise<void>;
+  onEdit: (config: BackendConfig) => void;
 }
 
 export function BackendConfigCard({
-  config, status, syncState, onRemove, onToggleEnabled, onToggleAutoSync,
+  config, status, syncState, onRemove, onToggleEnabled, onToggleAutoSync, onEdit,
 }: BackendConfigCardProps) {
   const [busy, setBusy] = useState(false);
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
@@ -96,8 +97,15 @@ export function BackendConfigCard({
     <>
       <div className={`border border-surface-border rounded-lg p-3 bg-white${!isEnabled ? ' opacity-70' : ''}`}>
         <div className="flex items-start justify-between gap-2">
-          {/* ── Left: info ─────────────────────────────────── */}
-          <div className="flex-1 min-w-0">
+          {/* ── Left: info — cliquable pour éditer ─────────── */}
+          <div
+            className="flex-1 min-w-0 cursor-pointer"
+            onClick={() => onEdit(config)}
+            role="button"
+            tabIndex={0}
+            aria-label={`Modifier le backend ${config.name}`}
+            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') onEdit(config); }}
+          >
             <div className="flex items-center gap-2 flex-wrap">
               <span className={dotClass} />
               <h3 className="font-medium text-gray-900 truncate">{config.name}</h3>
@@ -138,7 +146,7 @@ export function BackendConfigCard({
               </p>
               <p className="text-xs text-gray-400 truncate">
                 <span className="font-medium text-gray-500">Distant :</span>{' '}
-                {config.remotePath || '—'}
+                {config.params?.basePath || config.remotePath || '—'}
               </p>
               <p className="text-xs text-gray-400 truncate">
                 {config.params?.url ?? config.params?.mountPath ?? ''}
@@ -151,10 +159,13 @@ export function BackendConfigCard({
               )}
             </div>
 
-            {status && isConnected && (
+            {status && isConnected && status.freeSpace >= 0 && (
               <p className="text-xs text-gray-400 mt-0.5">
                 Libre : {formatSpace(status.freeSpace)} / Total : {formatSpace(status.totalSpace)}
               </p>
+            )}
+            {status && isConnected && status.freeSpace < 0 && (
+              <p className="text-xs text-gray-400 mt-0.5">Quota non disponible</p>
             )}
             {status?.error && isEnabled && (
               <p className="text-xs text-red-500 mt-0.5 truncate" title={status.error}>
@@ -210,6 +221,9 @@ export function BackendConfigCard({
 
         {/* ── Action buttons ─────────────────────────────────── */}
         <div className="flex flex-wrap gap-1.5 mt-2.5">
+          <Button size="sm" variant="ghost" onClick={() => onEdit(config)} aria-label="Modifier ce backend">
+            <Pencil size={12} /> Modifier
+          </Button>
           <Button size="sm" variant="ghost" onClick={() => ghostdriveApi.openSyncFolder(config.id)}>
             <FolderOpen size={12} /> Ouvrir
           </Button>

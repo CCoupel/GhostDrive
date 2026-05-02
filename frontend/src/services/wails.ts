@@ -5,6 +5,7 @@ import type {
   BackendConfig,
   BackendStatus,
   DriveStatus,
+  PluginDescriptor,
   SyncState,
   FileInfo,
   CacheStats,
@@ -25,6 +26,9 @@ export const ghostdriveApi = {
 
   addBackend: (config: BackendConfig): Promise<BackendConfig> =>
     App.AddBackend(config as any) as unknown as Promise<BackendConfig>,
+
+  updateBackend: (config: BackendConfig): Promise<BackendConfig> =>
+    App.UpdateBackend(config as any) as unknown as Promise<BackendConfig>,
 
   removeBackend: (backendId: string): Promise<void> =>
     App.RemoveBackend(backendId),
@@ -58,6 +62,10 @@ export const ghostdriveApi = {
 
   getAvailableBackendTypes: (): Promise<string[]> =>
     (App as any).GetAvailableBackendTypes() as Promise<string[]>,
+
+  /** Retourne les descripteurs de tous les plugins disponibles (local + dynamiques). */
+  getPluginDescriptors: (): Promise<PluginDescriptor[]> =>
+    (App as any).GetPluginDescriptors() as Promise<PluginDescriptor[]>,
 
   setBackendEnabled: (backendId: string, enabled: boolean): Promise<void> =>
     App.SetBackendEnabled(backendId, enabled),

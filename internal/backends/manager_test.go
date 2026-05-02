@@ -2,12 +2,21 @@ package backends
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/CCoupel/GhostDrive/plugins"
+	"github.com/CCoupel/GhostDrive/plugins/local"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestMain registers the "local" plugin explicitly (init()-based auto-register
+// was removed in v1.1.0 — registration is now done by app.Startup()).
+func TestMain(m *testing.M) {
+	plugins.Register("local", func() plugins.StorageBackend { return local.New() })
+	os.Exit(m.Run())
+}
 
 // mockBackend is a minimal StorageBackend stub for testing.
 type mockBackend struct {
@@ -35,6 +44,9 @@ func (m *mockBackend) Watch(_ context.Context, _ string) (<-chan plugins.FileEve
 	return make(chan plugins.FileEvent), nil
 }
 func (m *mockBackend) GetQuota(_ context.Context) (int64, int64, error) { return -1, -1, nil }
+func (m *mockBackend) Describe() plugins.PluginDescriptor {
+	return plugins.PluginDescriptor{Type: "mock"}
+}
 
 // mockBackendFactory temporarily overrides InstantiateBackend for tests.
 func withMockFactory(t *testing.T) func() {

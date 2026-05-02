@@ -1,16 +1,23 @@
 package registry_test
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	// Import static plugins so they register themselves via init().
-	_ "github.com/CCoupel/GhostDrive/plugins/local"
-
+	"github.com/CCoupel/GhostDrive/plugins"
+	"github.com/CCoupel/GhostDrive/plugins/local"
 	"github.com/CCoupel/GhostDrive/plugins/registry"
 )
+
+// TestMain registers the "local" plugin explicitly (init()-based auto-register
+// was removed in v1.1.0 — registration is now done by app.Startup()).
+func TestMain(m *testing.M) {
+	plugins.Register("local", func() plugins.StorageBackend { return local.New() })
+	os.Exit(m.Run())
+}
 
 // TestDynamicRegistry_StartEmpty verifies that starting the registry against
 // an empty (or non-existent) plugins directory does not return an error.

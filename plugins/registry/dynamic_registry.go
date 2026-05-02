@@ -100,3 +100,9 @@ func (r *DynamicRegistry) ListAvailablePlugins() []loader.PluginInfo {
 func (r *DynamicRegistry) ListDynamicPlugins() []loader.PluginInfo {
 	return r.loader.GetLoadedPlugins()
 }
+
+// GetPluginDescriptors returns descriptors for all successfully loaded dynamic
+// plugins. It delegates to the underlying GRPCLoader's cached descriptors.
+func (r *DynamicRegistry) GetPluginDescriptors() []plugins.PluginDescriptor {
+	return r.loader.GetPluginDescriptors()
+}

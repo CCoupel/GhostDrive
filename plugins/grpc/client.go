@@ -338,6 +338,36 @@ func (b *GRPCBackend) GetQuota(ctx context.Context) (free, total int64, err erro
 	return resp.GetFree(), resp.GetTotal(), nil
 }
 
+// ── Describe ─────────────────────────────────────────────────────────────────
+
+// Describe implements plugins.StorageBackend.
+// Returns a minimal descriptor on RPC failure (never panics).
+func (b *GRPCBackend) Describe() plugins.PluginDescriptor {
+	resp, err := b.client.Describe(context.Background(), &storagepb.DescribeRequest{})
+	if err != nil {
+		return plugins.PluginDescriptor{Type: b.Name()}
+	}
+	params := make([]plugins.ParamSpec, 0, len(resp.GetParams()))
+	for _, p := range resp.GetParams() {
+		params = append(params, plugins.ParamSpec{
+			Key:         p.GetKey(),
+			Label:       p.GetLabel(),
+			Type:        plugins.ParamType(p.GetType()),
+			Required:    p.GetRequired(),
+			Default:     p.GetDefaultVal(),
+			Placeholder: p.GetPlaceholder(),
+			Options:     p.GetOptions(),
+			HelpText:    p.GetHelpText(),
+		})
+	}
+	return plugins.PluginDescriptor{
+		Type:        resp.GetType(),
+		DisplayName: resp.GetDisplayName(),
+		Description: resp.GetDescription(),
+		Params:      params,
+	}
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // mapGRPCError converts well-known gRPC status codes to GhostDrive sentinel errors.

@@ -11,10 +11,17 @@ import (
 	"github.com/CCoupel/GhostDrive/internal/placeholder"
 	internalsync "github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/plugins"
-	_ "github.com/CCoupel/GhostDrive/plugins/local" // registers "local" via init()
+	"github.com/CCoupel/GhostDrive/plugins/local"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestMain registers the "local" plugin explicitly (init()-based auto-register
+// was removed in v1.1.0 — registration is now done by app.Startup()).
+func TestMain(m *testing.M) {
+	plugins.Register("local", func() plugins.StorageBackend { return local.New() })
+	os.Exit(m.Run())
+}
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -31,9 +38,10 @@ func newTestApp(t *testing.T) *App {
 			c.GhostDriveRoot = root
 			return c
 		}(),
-		engines: make(map[string]*internalsync.Engine),
-		manager: backends.NewBackendManager(nil),
-		drive:   placeholder.New(),
+		engines:     make(map[string]*internalsync.Engine),
+		manager:     backends.NewBackendManager(nil),
+		drive:       placeholder.New(),
+		descriptors: make(map[string]plugins.PluginDescriptor),
 	}
 }
 
@@ -308,4 +316,178 @@ func TestShutdown_CallsUnmount(t *testing.T) {
 	})
 	// After Shutdown, drive must still report not-mounted.
 	assert.False(t, a.GetDriveStatus().Mounted)
+}
+
+// ─── Case 10 — GetPluginDescriptors returns at least "local" after Startup ───
+//
+// This test validates the contract defined in contracts/plugin-describe.md §5:
+//   - GetPluginDescriptors() returns the descriptors of all available plugins.
+//   - After Startup(), the "local" descriptor must be present (registered via
+//     ServeInProcess in app.Startup).
+//   - The result is never nil — an empty slice is returned when no plugins are loaded.
+//
+// Depends on:
+//   - plugins/plugin.go: PluginDescriptor, ParamSpec, ParamType types (#79)
+//   - plugins/grpc/inprocess.go: ServeInProcess function (#79)
+//   - internal/app/app.go: GetPluginDescriptors() binding + descriptors cache (#79)
+
+func TestGetPluginDescriptors_ContainsLocal(t *testing.T) {
+	// Use a sub-directory that does not yet exist as GhostDriveRoot.
+	baseDir := t.TempDir()
+	ghostRoot := filepath.Join(baseDir, "GhostDrive")
+	cfgPath := filepath.Join(baseDir, "config.json")
+
+	// Write a minimal config.json with our temp GhostDriveRoot.
+	testCfg := config.DefaultConfig()
+	testCfg.GhostDriveRoot = ghostRoot
+	require.NoError(t, config.Save(testCfg, cfgPath))
+
+	a := &App{
+		cfgPath: cfgPath,
+		cfg:     testCfg,
+		engines: make(map[string]*internalsync.Engine),
+		manager: backends.NewBackendManager(nil),
+	}
+
+	// Startup registers the "local" plugin via ServeInProcess and populates
+	// a.descriptors.
+	a.Startup(nil)
+
+	// GetPluginDescriptors must not return nil.
+	descriptors := a.GetPluginDescriptors()
+	require.NotNil(t, descriptors,
+		"GetPluginDescriptors must never return nil")
+
+	// Build a map by Type for easier assertions.
+	byType := make(map[string]plugins.PluginDescriptor, len(descriptors))
+	for _, d := range descriptors {
+		byType[d.Type] = d
+	}
+
+	// "local" must be present.
+	localDesc, ok := byType["local"]
+	assert.True(t, ok,
+		"GetPluginDescriptors must contain a descriptor with Type==\"local\" after Startup")
+
+	if ok {
+		assert.Equal(t, "local", localDesc.Type)
+		assert.NotEmpty(t, localDesc.DisplayName,
+			"local descriptor DisplayName must not be empty")
+		assert.GreaterOrEqual(t, len(localDesc.Params), 1,
+			"local descriptor must contain at least one ParamSpec")
+	}
+}
+
+func TestGetPluginDescriptors_NeverNilWhenNoPlugins(t *testing.T) {
+	// A freshly created App (before Startup) must return an empty slice, not nil.
+	a := newTestApp(t)
+
+	descriptors := a.GetPluginDescriptors()
+	require.NotNil(t, descriptors,
+		"GetPluginDescriptors must return an empty slice (not nil) before Startup")
+}
+
+// ─── UpdateBackend — non-regression tests for bugfix #84 ─────────────────────
+
+// TestUpdateBackend_NotFound verifies that UpdateBackend returns an error
+// when the backend ID does not exist in the configuration.
+func TestUpdateBackend_NotFound(t *testing.T) {
+	a := newTestApp(t)
+	_, err := a.UpdateBackend(plugins.BackendConfig{
+		ID:   "does-not-exist",
+		Name: "Ghost",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestUpdateBackend_ChangesName verifies that UpdateBackend correctly applies
+// a name change and returns the updated BackendConfig.
+func TestUpdateBackend_ChangesName(t *testing.T) {
+	a := newTestApp(t)
+	tmp := t.TempDir()
+
+	rootPath := filepath.Join(tmp, "source")
+	require.NoError(t, os.MkdirAll(rootPath, 0755))
+
+	bc := plugins.BackendConfig{
+		Name:       "OldName",
+		Type:       "local",
+		RemotePath: "/remote",
+		Params:     map[string]string{"rootPath": rootPath},
+	}
+	added, err := a.AddBackend(bc)
+	require.NoError(t, err)
+
+	// Change the name and update.
+	added.Name = "NewName"
+	updated, err := a.UpdateBackend(added)
+	require.NoError(t, err)
+	assert.Equal(t, "NewName", updated.Name, "UpdateBackend must reflect the new name")
+
+	// Verify persistence in in-memory config.
+	a.mu.RLock()
+	var found bool
+	for _, b := range a.cfg.Backends {
+		if b.ID == added.ID {
+			found = true
+			assert.Equal(t, "NewName", b.Name, "persisted backend must carry the new name")
+		}
+	}
+	a.mu.RUnlock()
+	assert.True(t, found, "updated backend must remain in cfg.Backends")
+}
+
+// TestUpdateBackend_PreservesID verifies that the backend ID is not mutated
+// by UpdateBackend (immutable field contract).
+func TestUpdateBackend_PreservesID(t *testing.T) {
+	a := newTestApp(t)
+	tmp := t.TempDir()
+
+	rootPath := filepath.Join(tmp, "source")
+	require.NoError(t, os.MkdirAll(rootPath, 0755))
+
+	bc := plugins.BackendConfig{
+		Name:       "IDTest",
+		Type:       "local",
+		RemotePath: "/remote",
+		Params:     map[string]string{"rootPath": rootPath},
+	}
+	added, err := a.AddBackend(bc)
+	require.NoError(t, err)
+
+	originalID := added.ID
+	require.NotEmpty(t, originalID, "AddBackend must assign a non-empty ID")
+
+	// Rename and update — ID must be preserved.
+	added.Name = "IDTestRenamed"
+	updated, err := a.UpdateBackend(added)
+	require.NoError(t, err)
+	assert.Equal(t, originalID, updated.ID,
+		"UpdateBackend must not mutate the backend ID")
+}
+
+// TestUpdateBackend_UniquenessExcludesSelf verifies that updating a backend
+// while keeping the same name does not trigger a "duplicate name" validation
+// error (self-exclusion guard in validateBackendConfig via ex.ID == bc.ID).
+func TestUpdateBackend_UniquenessExcludesSelf(t *testing.T) {
+	a := newTestApp(t)
+	tmp := t.TempDir()
+
+	rootPath := filepath.Join(tmp, "source")
+	require.NoError(t, os.MkdirAll(rootPath, 0755))
+
+	bc := plugins.BackendConfig{
+		Name:       "SameName",
+		Type:       "local",
+		RemotePath: "/remote",
+		Params:     map[string]string{"rootPath": rootPath},
+	}
+	added, err := a.AddBackend(bc)
+	require.NoError(t, err)
+
+	// Call UpdateBackend with identical config — must not fail with "already exists".
+	_, err = a.UpdateBackend(added)
+	require.NoError(t, err,
+		"UpdateBackend with unchanged name must not trigger duplicate-name error")
 }

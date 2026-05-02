@@ -103,3 +103,16 @@ func (m *MockPlugin) Watch(ctx context.Context, _ string) (<-chan plugins.FileEv
 func (m *MockPlugin) GetQuota(_ context.Context) (free, total int64, err error) {
 	return -1, -1, nil
 }
+
+// ── Descriptor ────────────────────────────────────────────────────────────────
+
+// Describe returns a minimal PluginDescriptor for the mock backend.
+// It has no required params so integration tests can connect without extra config.
+func (m *MockPlugin) Describe() plugins.PluginDescriptor {
+	return plugins.PluginDescriptor{
+		Type:        "mock",
+		DisplayName: "Mock Backend",
+		Description: "No-op mock backend used in integration tests.",
+		Params:      []plugins.ParamSpec{},
+	}
+}

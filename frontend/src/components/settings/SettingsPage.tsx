@@ -9,8 +9,9 @@ import { useSyncStatus } from '../../hooks/useSyncStatus';
 import type { BackendConfig } from '../../types/ghostdrive';
 
 export function SettingsPage() {
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [showAddModal, setShowAddModal]       = useState(false);
+  const [editingConfig, setEditingConfig]     = useState<BackendConfig | null>(null);
+  const [removeError, setRemoveError]         = useState<string | null>(null);
 
   const {
     configs, statuses, loading: backendsLoading,
@@ -24,6 +25,11 @@ export function SettingsPage() {
   const handleAddSuccess = (_config: BackendConfig) => {
     reload();
     setShowAddModal(false);
+  };
+
+  const handleEditSuccess = (_config: BackendConfig) => {
+    reload();
+    setEditingConfig(null);
   };
 
   const handleRemove = async (id: string) => {
@@ -64,6 +70,7 @@ export function SettingsPage() {
               onRemove={handleRemove}
               onToggleEnabled={setEnabled}
               onToggleAutoSync={setAutoSync}
+              onEdit={setEditingConfig}
             />
           ))}
 
@@ -88,6 +95,22 @@ export function SettingsPage() {
           onCancel={() => setShowAddModal(false)}
           existingNames={existingNames}
         />
+      </Modal>
+
+      <Modal
+        open={editingConfig !== null}
+        onClose={() => setEditingConfig(null)}
+        title="Modifier le backend"
+      >
+        {editingConfig && (
+          <SyncPointForm
+            key={editingConfig.id}
+            initialConfig={editingConfig}
+            onSuccess={handleEditSuccess}
+            onCancel={() => setEditingConfig(null)}
+            existingNames={existingNames}
+          />
+        )}
       </Modal>
     </div>
   );

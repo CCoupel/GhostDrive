@@ -80,6 +80,21 @@ type EchoPlugin struct {
 // The value is used as the BackendConfig.Type in the application config.
 func (e *EchoPlugin) Name() string { return "echo" }
 
+// Describe implements plugins.StorageBackend. Returns the static descriptor
+// used by the UI to generate the Zone 2 configuration form.
+// Callable before Connect; performs no I/O.
+func (e *EchoPlugin) Describe() plugins.PluginDescriptor {
+	return plugins.PluginDescriptor{
+		Type:        "echo",
+		DisplayName: "Echo (test)",
+		Description: "Plugin de référence — toutes les opérations sont des no-ops.",
+		Params: []plugins.ParamSpec{
+			{Key: "delay", Label: "Délai simulé (ms)", Type: plugins.ParamTypeNumber, Required: false, Default: "0"},
+			{Key: "rootPath", Label: "Chemin racine (requis)", Type: plugins.ParamTypePath, Required: true, Placeholder: "/tmp/echo"},
+		},
+	}
+}
+
 // ── Connection ────────────────────────────────────────────────────────────────
 
 // Connect validates the required "rootPath" param and marks the plugin as

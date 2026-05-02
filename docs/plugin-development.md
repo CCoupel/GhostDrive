@@ -214,6 +214,121 @@ return errors.New("myplugin: not connected")
 |---------|-----------|---------|
 | `GetQuota()` | `GetQuota(ctx context.Context) (free, total int64, err error)` | Retourne l'espace libre et total (en octets) du backend. Les plugins qui ne supportent pas la quota doivent retourner `(-1, -1, nil)` plutôt qu'une erreur. Retourne `ErrNotConnected` si pas connecté. |
 
+#### Introspection du plugin
+
+| Méthode | Signature | Contrat |
+|---------|-----------|---------|
+| `Describe()` | `Describe() PluginDescriptor` | Retourne un descripteur statique du plugin : type, displayName, description, et liste des paramètres (`ParamSpec`) requis pour la configuration. Callable AVANT `Connect()` — ne doit effectuer aucun I/O, aucune connexion au backend. Ne retourne jamais d'erreur : un descripteur minimal (avec juste `Type = Name()`) est toujours valide. |
+
+### Types d'introspection
+
+#### `ParamType`
+
+Énumération des types de champs supportés dans la UI de configuration :
+
+```go
+type ParamType string
+
+const (
+    ParamTypeString   ParamType = "string"   // Input texte standard
+    ParamTypePassword ParamType = "password" // Input masqué (type="password")
+    ParamTypePath     ParamType = "path"     // Bouton "Parcourir" + SelectDirectory
+    ParamTypeSelect   ParamType = "select"   // Dropdown (Options requis)
+    ParamTypeBool     ParamType = "bool"     // Checkbox
+    ParamTypeNumber   ParamType = "number"   // Input numérique
+)
+```
+
+#### `ParamSpec`
+
+Description d'un paramètre de configuration :
+
+```go
+type ParamSpec struct {
+    Key         string    // Clé dans BackendConfig.Params (ex: "url", "username")
+    Label       string    // Libellé UI (ex: "URL serveur WebDAV")
+    Type        ParamType // Type de champ
+    Required    bool      // Champ obligatoire
+    Default     string    // Valeur pré-remplie (peut être vide)
+    Placeholder string    // Hint affiché dans l'input
+    Options     []string  // Utilisé seulement si Type == ParamTypeSelect
+    HelpText    string    // Texte d'aide sous le champ (optionnel)
+}
+```
+
+#### `PluginDescriptor`
+
+Résumé statique du plugin, retourné par `Describe()` :
+
+```go
+type PluginDescriptor struct {
+    Type        string      // Même valeur que Name() (ex: "local", "webdav")
+    DisplayName string      // Libellé affiché dans le sélecteur de type
+    Description string      // Description courte (ex: "Synchronise via WebDAV")
+    Params      []ParamSpec // Spécification des champs de configuration
+}
+```
+
+### Exemple : implémenter `Describe()` pour WebDAV
+
+```go
+func (w *WebDAVBackend) Describe() plugins.PluginDescriptor {
+    return plugins.PluginDescriptor{
+        Type:        "webdav",
+        DisplayName: "WebDAV",
+        Description: "Synchronise via un serveur WebDAV (Nextcloud, ownCloud, NAS…)",
+        Params: []plugins.ParamSpec{
+            {
+                Key:         "url",
+                Label:       "URL serveur",
+                Type:        plugins.ParamTypeString,
+                Required:    true,
+                Placeholder: "https://nas.local/dav",
+                HelpText:    "Adresse complète du serveur WebDAV",
+            },
+            {
+                Key:      "authType",
+                Label:    "Authentification",
+                Type:     plugins.ParamTypeSelect,
+                Required: false,
+                Default:  "basic",
+                Options:  []string{"basic", "bearer"},
+                HelpText: "Méthode d'authentification",
+            },
+            {
+                Key:         "username",
+                Label:       "Nom d'utilisateur",
+                Type:        plugins.ParamTypeString,
+                Required:    false,
+                Placeholder: "admin",
+            },
+            {
+                Key:      "password",
+                Label:    "Mot de passe",
+                Type:     plugins.ParamTypePassword,
+                Required: false,
+            },
+            {
+                Key:      "tlsSkipVerify",
+                Label:    "Ignorer erreurs TLS",
+                Type:     plugins.ParamTypeBool,
+                Required: false,
+                Default:  "false",
+                HelpText: "Accepter les certificats auto-signés",
+            },
+            {
+                Key:      "pollInterval",
+                Label:    "Intervalle Watch (ms)",
+                Type:     plugins.ParamTypeNumber,
+                Required: false,
+                Default:  "30000",
+                HelpText: "Intervalle de polling PROPFIND (millisecondes)",
+            },
+        },
+    }
+}
+```
+
 ---
 
 ## 3. Créer un plugin externe (go-plugin) — guide pas-à-pas
@@ -546,6 +661,37 @@ fn main() {
 
 ## 6. Tests
 
+### ServeInProcess — démarrer un serveur gRPC in-memory
+
+La fonction `ServeInProcess(impl StorageBackend)` (dans `plugins/grpc/inprocess.go`) démarre un serveur gRPC in-memory via bufconn et retourne un client `GRPCBackend` connecté à ce serveur :
+
+```go
+import "github.com/CCoupel/GhostDrive/plugins/grpc"
+
+func main() {
+    // Créer une implémentation de StorageBackend
+    backend := &MyPlugin{}
+    
+    // Démarrer le serveur in-process
+    grpcBackend, cleanup, err := grpc.ServeInProcess(backend)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer cleanup() // Arrêter le serveur
+    
+    // Utiliser grpcBackend comme une instance normale
+    err = grpcBackend.Connect(config)
+    if err != nil {
+        // ... gérer l'erreur
+    }
+}
+```
+
+**Cas d'usage** :
+- Tester la bridge gRPC sans spawner un subprocess
+- Valider la sérialisation/désérialisation des messages proto
+- Tests d'intégration dans la suite de tests GhostDrive
+
 ### Pattern bufconn pour les tests unitaires gRPC
 
 L'approche `bufconn` (in-process buffer connection) permet de tester votre bridge gRPC sans vraiment faire du networking. C'est le pattern utilisé dans `plugins/grpc/client_test.go` :
@@ -652,6 +798,95 @@ Visez une couverture minimale de **70%** sur votre plugin.
 - [ ] Commentaires godoc sur chaque méthode
 - [ ] `contracts/backend-config.md` — section du plugin avec les Params obligatoires
 - [ ] Branche : `feat/myplugin` ou équivalent
+
+---
+
+## 8. Exemple : Plugin WebDAV
+
+Le plugin WebDAV (`plugins/webdav/`, v0.8.0+) est une implémentation réelle complète de `StorageBackend` à utiliser comme référence.
+
+### Structure
+
+```
+plugins/webdav/
+├── webdav.go             # Implémentation StorageBackend
+├── webdav_test.go        # 35 tests d'intégration
+├── Makefile              # Build Windows/Linux
+├── go.mod
+└── ...
+```
+
+### Caractéristiques
+
+- **Auth** : Basic Auth (`username` + `password`) ou Bearer Token (`token`)
+- **TLS** : paramètre `tlsSkipVerify` pour désactiver la vérification de certificat
+- **Watch** : polling PROPFIND avec intervalle configurable en millisecondes (`pollInterval`)
+- **GetQuota** : retourne gracieusement `(-1, -1, nil)` si le serveur WebDAV ne supporte pas la quota
+- **Compatibility** : testée avec Synology, TrueNAS, Nextcloud
+
+### Exemple de Connect
+
+```go
+func (w *WebDAVBackend) Connect(cfg plugins.BackendConfig) error {
+    // Valider les params
+    url := cfg.Params["url"]
+    authType := cfg.Params["authType"] // "basic" ou "bearer"
+    
+    if url == "" {
+        return fmt.Errorf("webdav: url param is required")
+    }
+    
+    // Configurer le client WebDAV
+    c := &webdav.HTTPClient{
+        Transport: &http.Transport{
+            TLSClientConfig: &tls.Config{
+                InsecureSkipVerify: cfg.Params["tlsSkipVerify"] == "true",
+            },
+        },
+    }
+    
+    // Ajouter l'authentification
+    if authType == "basic" {
+        c.Transport.(*http.Transport).MaxIdleConns = 10
+        // Créer un client avec Basic Auth (via go-http-auth)
+    }
+    
+    // Prober le backend — PROPFIND sur RemotePath
+    w.client = c
+    w.config = cfg
+    
+    // Vérifier la connectivité
+    if _, err := w.List(context.Background(), cfg.RemotePath); err != nil {
+        return fmt.Errorf("webdav: connect: probe failed: %w", err)
+    }
+    
+    w.connected = true
+    return nil
+}
+```
+
+### Tests
+
+- 35 tests unitaires : Connect/Disconnect, Upload/Download, Delete/Move, List/Stat, CreateDir, Watch, GetQuota
+- Serveur WebDAV in-memory (`golang.org/x/net/webdav`) pour les tests d'intégration
+- Coverage 76.8%
+- Aucune race condition détectée
+
+### Params WebDAV (contracts/backend-config.md)
+
+```
+| Param            | Type   | Obligatoire | Exemple                |
+|------------------|--------|-------------|------------------------|
+| url              | string | ✓           | `https://nas.local/dav` |
+| authType         | string | ✓           | `basic` ou `bearer`    |
+| username         | string | Si basic    | `admin`                |
+| password         | string | Si basic    | `***`                  |
+| token            | string | Si bearer   | `Bearer xyz...`        |
+| tlsSkipVerify    | string |             | `"true"` (défaut: "")  |
+| pollInterval     | string |             | `2000` ms (défaut: 5s) |
+```
+
+Consultez `plugins/webdav/webdav.go` pour une implémentation de référence complète.
 
 ---
 
