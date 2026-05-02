@@ -1,42 +1,26 @@
-import { useState, useCallback } from 'react';
+import { useState } from 'react';
 import { HardDrive, Home, ChevronRight } from 'lucide-react';
 import { RemoteFileList } from '../components/status/RemoteFileList';
-import { useDriveStatus } from '../hooks/useDriveStatus';
+import { useDriveStatuses } from '../hooks/useDriveStatus';
 import { useBackends } from '../hooks/useBackends';
-import { ghostdriveApi } from '../services/wails';
-import { Button } from '../components/ui/Button';
 
 /**
- * FileBrowserPage — onglet "GhD:"
+ * FileBrowserPage — onglet "Drive"
  *
  * Affiche les fichiers distants de chaque backend connecté.
- * - Sélecteur de backend (onglets par nom)
+ * - Sélecteur de backend (onglets par nom) avec badge drive par backend
  * - Breadcrumb de navigation en profondeur
- * - Badge état du drive GhD: via useDriveStatus
+ *
+ * v1.1.x : les drives sont montés/démontés via le toggle "Activer" dans l'onglet Backends.
+ * Les boutons MonterGhD:/Démonter ont été supprimés (#88).
  */
 export function FileBrowserPage() {
   const [selectedBackendId, setSelectedBackendId] = useState<string | null>(null);
   // pathStack[0] est toujours '' (racine), les éléments suivants sont des chemins empilés
   const [pathStack, setPathStack] = useState<string[]>(['']);
 
-  const [driveBusy, setDriveBusy] = useState(false);
-
   const { configs, statuses, loading: backendsLoading } = useBackends();
-  const { mounted, mountPoint, lastError } = useDriveStatus();
-
-  const handleMount = useCallback(async () => {
-    setDriveBusy(true);
-    try { await ghostdriveApi.mountDrive(); }
-    catch { /* error surfaces via drive:error event → lastError */ }
-    finally { setDriveBusy(false); }
-  }, []);
-
-  const handleUnmount = useCallback(async () => {
-    setDriveBusy(true);
-    try { await ghostdriveApi.unmountDrive(); }
-    catch { /* error surfaces via drive:error event → lastError */ }
-    finally { setDriveBusy(false); }
-  }, []);
+  const { driveStatuses } = useDriveStatuses();
 
   // Backends disponibles pour la navigation : activés et connectés
   const connectedBackends = configs.filter(c => {
@@ -74,51 +58,14 @@ export function FileBrowserPage() {
   return (
     <div className="flex flex-col h-full overflow-hidden">
 
-      {/* ── Header : titre + badge + bouton mont/démontage ── */}
-      <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-3 bg-white border-b border-surface-border">
-        <div className="flex items-center gap-2">
-          <HardDrive size={16} className="text-brand" aria-hidden="true" />
-          <span className="text-sm font-semibold text-gray-800">
-            Drive {mountPoint || 'GhD:'}
-          </span>
-          <span
-            className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-              mounted ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
-            }`}
-          >
-            {mounted ? `${mountPoint || 'GhD:'} monté` : 'Non monté'}
-          </span>
-        </div>
-
-        {mounted ? (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={handleUnmount}
-            disabled={driveBusy}
-            aria-label="Démonter le drive GhD:"
-          >
-            {driveBusy ? '...' : 'Démonter'}
-          </Button>
-        ) : (
-          <Button
-            size="sm"
-            variant="primary"
-            onClick={handleMount}
-            disabled={driveBusy}
-            aria-label="Monter le drive GhD:"
-          >
-            {driveBusy ? '...' : 'Monter GhD:'}
-          </Button>
-        )}
+      {/* ── Header ── */}
+      <div className="shrink-0 flex items-center gap-2 px-4 py-3 bg-white border-b border-surface-border">
+        <HardDrive size={16} className="text-brand" aria-hidden="true" />
+        <span className="text-sm font-semibold text-gray-800">Fichiers distants</span>
+        <span className="text-xs text-gray-400">
+          — activez un backend pour monter son drive virtuel
+        </span>
       </div>
-
-      {/* Drive last error */}
-      {lastError && (
-        <div className="shrink-0 px-4 py-1.5 bg-red-50 text-xs text-red-600 border-b border-red-200" role="alert">
-          {lastError}
-        </div>
-      )}
 
       {/* ── No backends connected ── */}
       {!backendsLoading && connectedBackends.length === 0 && (
@@ -126,7 +73,7 @@ export function FileBrowserPage() {
           <HardDrive size={32} className="text-gray-200" aria-hidden="true" />
           <p className="text-sm">Aucun backend connecté.</p>
           <p className="text-xs">
-            Ajoutez et activez un backend dans l'onglet <strong>Backends</strong>.
+            Ajoutez et activez un backend dans l&apos;onglet <strong>Backends</strong>.
           </p>
         </div>
       )}
@@ -134,28 +81,43 @@ export function FileBrowserPage() {
       {connectedBackends.length > 0 && (
         <div className="flex flex-col flex-1 overflow-hidden">
 
-          {/* ── Backend selector tabs ── */}
+          {/* ── Backend selector tabs with per-backend drive badge ── */}
           <div
             className="shrink-0 flex gap-0.5 px-3 pt-2 bg-white border-b border-surface-border overflow-x-auto"
             role="tablist"
             aria-label="Sélection du backend"
           >
-            {connectedBackends.map(bc => (
-              <button
-                key={bc.id}
-                role="tab"
-                aria-selected={selectedBackendId === bc.id}
-                onClick={() => handleSelectBackend(bc.id)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-t border-b-2 -mb-px
-                  whitespace-nowrap transition-colors
-                  ${selectedBackendId === bc.id
-                    ? 'border-brand text-brand bg-surface-secondary'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                  }`}
-              >
-                {bc.name}
-              </button>
-            ))}
+            {connectedBackends.map(bc => {
+              const ds = driveStatuses[bc.id];
+              const isMounted = ds?.mounted ?? false;
+              const mountLabel = bc.mountPoint || ds?.mountPoint || '';
+              return (
+                <button
+                  key={bc.id}
+                  role="tab"
+                  aria-selected={selectedBackendId === bc.id}
+                  onClick={() => handleSelectBackend(bc.id)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-t border-b-2 -mb-px
+                    whitespace-nowrap transition-colors
+                    ${selectedBackendId === bc.id
+                      ? 'border-brand text-brand bg-surface-secondary'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    }`}
+                >
+                  {bc.name}
+                  {mountLabel && (
+                    <span
+                      className={`inline-flex items-center gap-0.5 text-xs px-1 py-0.5 rounded font-mono
+                        ${isMounted ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400'}`}
+                      title={isMounted ? `Drive ${mountLabel} monté` : `Drive ${mountLabel} non monté`}
+                    >
+                      <HardDrive size={9} aria-hidden="true" />
+                      {mountLabel}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
 
           {/* ── No backend selected ── */}

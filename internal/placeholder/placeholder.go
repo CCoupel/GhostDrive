@@ -37,8 +37,10 @@ type MountedBackend struct {
 
 // DriveStatus holds the observable state of the virtual drive.
 type DriveStatus struct {
-	Mounted      bool
-	MountPoint   string            // e.g. "G:" or `C:\GhostDrive\GhD\`
-	BackendPaths map[string]string // backendID → path under the drive root
-	LastError    string            // last mount/unmount error message; empty if none
+	Mounted      bool              `json:"mounted"`
+	MountPoint   string            `json:"mountPoint"`   // e.g. "G:" or `C:\GhostDrive\GhD\`
+	BackendID    string            `json:"backendID"`    // backend that owns this drive (set by DriveManager)
+	BackendName  string            `json:"backendName"`  // human-readable backend name (set by DriveManager)
+	BackendPaths map[string]string `json:"backendPaths"` // backendID → path under the drive root
+	LastError    string            `json:"lastError"`    // last mount/unmount error message; empty if none
 }

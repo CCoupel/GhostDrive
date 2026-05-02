@@ -7,7 +7,8 @@ import { AboutPage } from './pages/AboutPage';
 import { FileBrowserPage } from './pages/FileBrowserPage';
 import { useSyncStatus } from './hooks/useSyncStatus';
 import { useBackends } from './hooks/useBackends';
-import { ghostdriveApi, onEvent } from './services/wails';
+import { useDriveStatuses } from './hooks/useDriveStatus';
+import { ghostdriveApi } from './services/wails';
 import type { AppConfig } from './types/ghostdrive';
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -25,10 +26,10 @@ type View = 'backends' | 'configuration' | 'about' | 'drive';
 export function App() {
   const [view, setView] = useState<View>('backends');
   const [appConfig, setAppConfig] = useState<AppConfig>(DEFAULT_CONFIG);
-  const [driveMounted, setDriveMounted] = useState(false);
 
   const { syncState } = useSyncStatus();
   const { configs } = useBackends();
+  const { anyMounted: driveMounted } = useDriveStatuses();
 
   // Stable reference — TrayStatus registers the 'tray:open-settings' Wails
   // event listener; keep the callback stable to avoid re-registering on every render.
@@ -38,13 +39,6 @@ export function App() {
     ghostdriveApi.getConfig()
       .then(setAppConfig)
       .catch(() => {});
-  }, []);
-
-  // Track drive mount state for the GhD: tab badge
-  useEffect(() => {
-    const unsubMounted   = onEvent('drive:mounted',   () => setDriveMounted(true));
-    const unsubUnmounted = onEvent('drive:unmounted', () => setDriveMounted(false));
-    return () => { unsubMounted(); unsubUnmounted(); };
   }, []);
 
   return (

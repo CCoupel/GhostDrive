@@ -76,11 +76,21 @@ export const ghostdriveApi = {
   getVersion: (): Promise<string> => App.GetVersion(),
   quit: (): Promise<void> => App.Quit(),
 
-  // Drive virtuel (WinFsp) — bindings générés par Wails v0.5.0
+  // Drive virtuel (WinFsp) — par backend depuis v1.1.x #88
+
+  /**
+   * Retourne l'état de montage de tous les drives virtuels (map backendID → DriveStatus).
+   * Remplace getDriveStatus() depuis v1.1.x.
+   */
+  getDriveStatuses: (): Promise<Record<string, DriveStatus>> =>
+    (App as any).GetDriveStatuses() as Promise<Record<string, DriveStatus>>,
+
+  /**
+   * @deprecated depuis v1.1.x — utiliser getDriveStatuses() à la place.
+   * Conservé pour compatibilité pendant la migration.
+   */
   getDriveStatus: (): Promise<DriveStatus> =>
     App.GetDriveStatus() as unknown as Promise<DriveStatus>,
-  mountDrive: (): Promise<void> => App.MountDrive(),
-  unmountDrive: (): Promise<void> => App.UnmountDrive(),
 
   /** Retourne les lettres de lecteur Windows disponibles (ex: ['E:', 'F:', 'G:']). */
   getAvailableDriveLetters: (): Promise<string[]> =>

@@ -16,6 +16,9 @@ import type {
 } from '../../types/ghostdrive';
 import { formatSpace } from '../../utils/formatBytes';
 
+// Regex: Windows drive letter like "E:"
+const DRIVE_LETTER_RE = /^[A-Za-z]:$/;
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 const WINDOWS_INVALID_CHARS_RE = /[\\/:*?"<>|]/;
 const GHOST_DRIVE_ROOT = 'C:\\GhostDrive';
@@ -51,14 +54,16 @@ type TestState =
   | { status: 'fail'; message: string };
 
 interface SyncPointFormProps {
-  onSuccess:        (config: BackendConfig) => void;
-  onCancel:         () => void;
+  onSuccess:            (config: BackendConfig) => void;
+  onCancel:             () => void;
   /** Noms existants pour la validation d'unicité (insensible à la casse) */
-  existingNames?:   string[];
+  existingNames?:       string[];
+  /** Points de montage existants pour la validation d'unicité (insensible à la casse) */
+  existingMountPoints?: string[];
   /** Warning non bloquant affiché si le rootPath remote est déjà utilisé */
-  warningMessage?:  string;
+  warningMessage?:      string;
   /** Config initiale — si fournie, le formulaire s'ouvre en mode édition */
-  initialConfig?:   BackendConfig;
+  initialConfig?:       BackendConfig;
 }
 
 // ── DynamicParamField ─────────────────────────────────────────────────────────
@@ -184,6 +189,7 @@ function buildDraft(
   remoteParams: Record<string, string>,
   descriptor:   PluginDescriptor | undefined,
   backendType:  BackendType,
+  mountPoint:   string,
 ): Omit<BackendConfig, 'id'> {
   const localPath = localZone.localPathMode === 'manual'
     ? (localZone.manualPath ?? '')
@@ -203,11 +209,12 @@ function buildDraft(
   return {
     name:       localZone.name,
     type:       backendType,
-    enabled:    true,
+    enabled:    false,   // #85 — toujours false à la création, activé via le toggle
     autoSync:   false,
     localPath,
     syncDir:    localPath,
     remotePath: '/',
+    mountPoint,
     params,
   };
 }
@@ -218,6 +225,7 @@ export function SyncPointForm({
   onSuccess,
   onCancel,
   existingNames,
+  existingMountPoints,
   warningMessage,
   initialConfig,
 }: SyncPointFormProps) {
@@ -235,6 +243,16 @@ export function SyncPointForm({
   const [submitting, setSubmitting]                 = useState(false);
   const [submitError, setSubmitError]               = useState<string | null>(null);
   const [ghostDriveRoot, setGhostDriveRoot]         = useState(GHOST_DRIVE_ROOT);
+
+  // ── Mount point state ─────────────────────────────────────────────────────
+  /** 'letter' = Windows drive letter dropdown, 'path' = free-text path */
+  const [mountPointMode, setMountPointMode] = useState<'letter' | 'path'>(() => {
+    const mp = initialConfig?.mountPoint ?? '';
+    return mp && !DRIVE_LETTER_RE.test(mp) ? 'path' : 'letter';
+  });
+  const [mountPoint, setMountPoint]       = useState<string>(initialConfig?.mountPoint ?? '');
+  const [availableLetters, setAvLetters]  = useState<string[]>([]);
+  const [mountPointError, setMpError]     = useState<string | null>(null);
 
   // Descripteur du plugin actif
   const currentDescriptor = useMemo(
@@ -261,6 +279,22 @@ export function SyncPointForm({
     GetGhostDriveRoot()
       .then(r => { if (r) setGhostDriveRoot(r); })
       .catch(() => { /* conserve la valeur par défaut */ });
+  }, []);
+
+  // Chargement des lettres disponibles — pré-sélectionne la première si création
+  useEffect(() => {
+    ghostdriveApi.getAvailableDriveLetters()
+      .then(letters => {
+        const list = letters ?? [];
+        setAvLetters(list);
+        // En mode création, pré-sélectionner la première lettre disponible si pas encore définie
+        if (!isEditMode && list.length > 0) {
+          setMountPoint(prev => prev || list[0]);
+        }
+      })
+      .catch(() => setAvLetters([]));
+    // isEditMode et initialConfig?.mountPoint sont stables (valeurs à la création)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Zone LOCAL (partagée)
@@ -303,6 +337,14 @@ export function SyncPointForm({
     [existingNames, initialConfig],
   );
 
+  // Liste des points de montage existants (minuscule) — exclut le backend courant en mode édition
+  const existingMountPointsLower = useMemo(
+    () => (existingMountPoints ?? [])
+      .map(mp => mp.toLowerCase())
+      .filter(mp => initialConfig ? mp !== (initialConfig.mountPoint ?? '').toLowerCase() : true),
+    [existingMountPoints, initialConfig],
+  );
+
   // Feedback unicité du nom en temps réel.
   // IMPORTANT: localZoneForm (useForm return value) is a new object reference on every render
   // in react-hook-form v7. Including it in the dep array would re-run this effect on every
@@ -336,10 +378,26 @@ export function SyncPointForm({
     setSubmitError(null);
   };
 
-  /** Valide les deux zones et retourne les données, ou null si invalide */
+  // Valide le point de montage — retourne true si valide
+  const validateMountPoint = (): boolean => {
+    const mp = mountPoint.trim();
+    if (!mp) {
+      setMpError('Le point de montage est requis');
+      return false;
+    }
+    if (existingMountPointsLower.includes(mp.toLowerCase())) {
+      setMpError('Ce point de montage est déjà utilisé par un autre backend');
+      return false;
+    }
+    setMpError(null);
+    return true;
+  };
+
+  /** Valide les deux zones et le point de montage — retourne les données, ou null si invalide */
   const validateAndGetData = async (): Promise<{
     localZone:    LocalZoneForm;
     remoteParams: Record<string, string>;
+    mountPoint:   string;
   } | null> => {
     const localValid = await localZoneForm.trigger();
 
@@ -350,6 +408,9 @@ export function SyncPointForm({
       return null;
     }
     if (!localValid) return null;
+
+    // Validation du point de montage
+    if (!validateMountPoint()) return null;
 
     // Validation manuelle des champs Remote requis
     if (!currentDescriptor) {
@@ -364,7 +425,7 @@ export function SyncPointForm({
       }
     }
     setSubmitError(null);
-    return { localZone: localZoneForm.getValues(), remoteParams };
+    return { localZone: localZoneForm.getValues(), remoteParams, mountPoint: mountPoint.trim() };
   };
 
   const handleTest = async () => {
@@ -374,7 +435,7 @@ export function SyncPointForm({
     try {
       const result = await ghostdriveApi.testBackendConnection(
         {
-          ...buildDraft(data.localZone, data.remoteParams, currentDescriptor, backendType),
+          ...buildDraft(data.localZone, data.remoteParams, currentDescriptor, backendType, data.mountPoint),
           id: '',
         } as BackendConfig,
       );
@@ -390,7 +451,7 @@ export function SyncPointForm({
     setSubmitError(null);
     setSubmitting(true);
     try {
-      const draft = buildDraft(data.localZone, data.remoteParams, currentDescriptor, backendType);
+      const draft = buildDraft(data.localZone, data.remoteParams, currentDescriptor, backendType, data.mountPoint);
       if (isEditMode && initialConfig) {
         // Mode édition — préserver enabled/autoSync, passer l'id existant
         const updated = await ghostdriveApi.updateBackend({
@@ -420,6 +481,15 @@ export function SyncPointForm({
   const handleBrowseManualPath = async () => {
     const dir = await SelectDirectory();
     if (dir) localZoneForm.setValue('manualPath', dir, { shouldValidate: true });
+  };
+
+  // Sélecteur de dossier natif — Mount point en mode chemin libre
+  const handleBrowseMountPoint = async () => {
+    const dir = await SelectDirectory();
+    if (dir) {
+      setMountPoint(dir);
+      setMpError(null);
+    }
   };
 
   // Sélecteur de dossier natif — Zone REMOTE (params de type 'path')
@@ -505,6 +575,95 @@ export function SyncPointForm({
               <span className="font-mono text-brand">{ghdPreview}</span>
             </p>
           </div>
+
+          {/* ── Sélecteur de point de montage (lettre de lecteur) ── */}
+          <fieldset>
+            <legend className="text-xs font-medium text-gray-700 mb-1.5">
+              Lettre de lecteur
+            </legend>
+            <div className="flex flex-col gap-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  value="letter"
+                  checked={mountPointMode === 'letter'}
+                  onChange={() => {
+                    setMountPointMode('letter');
+                    // Pre-select first available letter when switching to letter mode
+                    if (availableLetters.length > 0 && !DRIVE_LETTER_RE.test(mountPoint)) {
+                      setMountPoint(availableLetters[0]);
+                    }
+                    setMpError(null);
+                  }}
+                  className="accent-brand"
+                />
+                <span className="text-sm text-gray-700">Lettre Windows</span>
+              </label>
+
+              {mountPointMode === 'letter' && (
+                <div className="ml-5">
+                  {availableLetters.length > 0 ? (
+                    <select
+                      value={mountPoint}
+                      onChange={e => { setMountPoint(e.target.value); setMpError(null); }}
+                      aria-label="Lettre de lecteur"
+                      className="w-32 rounded border border-surface-border px-3 py-1.5 text-sm bg-white
+                        focus:outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
+                    >
+                      {availableLetters.map(l => (
+                        <option key={l} value={l}>{l}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className="text-xs text-amber-600">
+                      Aucune lettre disponible — utilisez un chemin libre.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  value="path"
+                  checked={mountPointMode === 'path'}
+                  onChange={() => {
+                    setMountPointMode('path');
+                    if (DRIVE_LETTER_RE.test(mountPoint)) setMountPoint('');
+                    setMpError(null);
+                  }}
+                  className="accent-brand"
+                />
+                <span className="text-sm text-gray-700">Chemin libre</span>
+              </label>
+
+              {mountPointMode === 'path' && (
+                <div className="ml-5 flex flex-col gap-1">
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="C:\GhostDrive\MonNAS\"
+                      value={mountPoint}
+                      onChange={e => { setMountPoint((e.target as HTMLInputElement).value); setMpError(null); }}
+                      aria-label="Chemin du point de montage"
+                      className="flex-1"
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => void handleBrowseMountPoint()}
+                      className="shrink-0"
+                    >
+                      Parcourir…
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {mountPointError && (
+              <p role="alert" className="text-xs text-red-500 mt-1">{mountPointError}</p>
+            )}
+          </fieldset>
 
           {/* Mode sync-point */}
           <fieldset>

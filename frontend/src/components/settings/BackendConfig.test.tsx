@@ -40,6 +40,7 @@ function makeConfig(overrides: Partial<BackendConfig> = {}): BackendConfig {
     syncDir:    '/sync/test',
     remotePath: '/remote',
     localPath:  '/local/test',
+    mountPoint: 'E:',
     ...overrides,
   };
 }

@@ -109,6 +109,7 @@ export namespace plugins {
 	    syncDir: string;
 	    remotePath: string;
 	    localPath: string;
+	    mountPoint: string;
 	    warning?: string;
 	
 	    static createFrom(source: any = {}) {
@@ -126,6 +127,7 @@ export namespace plugins {
 	        this.syncDir = source["syncDir"];
 	        this.remotePath = source["remotePath"];
 	        this.localPath = source["localPath"];
+	        this.mountPoint = source["mountPoint"];
 	        this.warning = source["warning"];
 	    }
 	}

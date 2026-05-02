@@ -50,6 +50,10 @@ export function GetDriveStatus() {
   return window['go']['app']['App']['GetDriveStatus']();
 }
 
+export function GetDriveStatuses() {
+  return window['go']['app']['App']['GetDriveStatuses']();
+}
+
 export function GetGhostDriveRoot() {
   return window['go']['app']['App']['GetGhostDriveRoot']();
 }
@@ -76,10 +80,6 @@ export function GetVersion() {
 
 export function ListFiles(arg1, arg2) {
   return window['go']['app']['App']['ListFiles'](arg1, arg2);
-}
-
-export function MountDrive() {
-  return window['go']['app']['App']['MountDrive']();
 }
 
 export function OpenSyncFolder(arg1) {
@@ -132,10 +132,6 @@ export function StopSync(arg1) {
 
 export function TestBackendConnection(arg1) {
   return window['go']['app']['App']['TestBackendConnection'](arg1);
-}
-
-export function UnmountDrive() {
-  return window['go']['app']['App']['UnmountDrive']();
 }
 
 export function UpdateBackend(arg1) {

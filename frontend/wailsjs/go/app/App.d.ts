@@ -31,6 +31,8 @@ export function GetConfig():Promise<config.AppConfig>;
 
 export function GetDriveStatus():Promise<placeholder.DriveStatus>;
 
+export function GetDriveStatuses():Promise<{[key: string]: placeholder.DriveStatus}>;
+
 export function GetGhostDriveRoot():Promise<string>;
 
 export function GetLoadedPlugins():Promise<Array<loader.PluginInfo>>;
@@ -44,8 +46,6 @@ export function GetSyncState():Promise<types.SyncState>;
 export function GetVersion():Promise<string>;
 
 export function ListFiles(arg1:string,arg2:string):Promise<Array<plugins.FileInfo>>;
-
-export function MountDrive():Promise<void>;
 
 export function OpenSyncFolder(arg1:string):Promise<void>;
 
@@ -72,7 +72,5 @@ export function StartSync(arg1:string):Promise<void>;
 export function StopSync(arg1:string):Promise<void>;
 
 export function TestBackendConnection(arg1:plugins.BackendConfig):Promise<types.BackendStatus>;
-
-export function UnmountDrive():Promise<void>;
 
 export function UpdateBackend(arg1:plugins.BackendConfig):Promise<plugins.BackendConfig>;

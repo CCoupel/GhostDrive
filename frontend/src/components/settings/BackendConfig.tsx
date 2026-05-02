@@ -1,18 +1,20 @@
 import { useState } from 'react';
 import {
   Trash2, FolderOpen, RefreshCw, Play, Pause, Square,
-  AlertTriangle, Power, PowerOff, Pencil,
+  AlertTriangle, Power, PowerOff, Pencil, HardDrive,
 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Modal } from '../ui/Modal';
 import { ghostdriveApi } from '../../services/wails';
-import type { BackendConfig, BackendStatus, BackendSyncState } from '../../types/ghostdrive';
+import type { BackendConfig, BackendStatus, BackendSyncState, DriveStatus } from '../../types/ghostdrive';
 import { formatSpace } from '../../utils/formatBytes';
 
 interface BackendConfigCardProps {
   config: BackendConfig;
   status?: BackendStatus;
   syncState?: BackendSyncState;
+  /** État du drive virtuel propre à ce backend (v1.1.x #88) */
+  driveStatus?: DriveStatus;
   onRemove: (id: string) => void;
   onToggleEnabled: (id: string, enabled: boolean) => Promise<void>;
   onToggleAutoSync: (id: string, autoSync: boolean) => Promise<void>;
@@ -20,17 +22,19 @@ interface BackendConfigCardProps {
 }
 
 export function BackendConfigCard({
-  config, status, syncState, onRemove, onToggleEnabled, onToggleAutoSync, onEdit,
+  config, status, syncState, driveStatus, onRemove, onToggleEnabled, onToggleAutoSync, onEdit,
 }: BackendConfigCardProps) {
   const [busy, setBusy] = useState(false);
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const [toggleError, setToggleError] = useState<string | null>(null);
 
-  const isEnabled   = config.enabled;
-  const isConnected = isEnabled && (status?.connected ?? false);
-  const syncStatus  = syncState?.status ?? 'idle';
-  const isSyncing   = syncStatus === 'syncing';
-  const isPaused    = syncStatus === 'paused';
+  const isEnabled    = config.enabled;
+  const isConnected  = isEnabled && (status?.connected ?? false);
+  const syncStatus   = syncState?.status ?? 'idle';
+  const isSyncing    = syncStatus === 'syncing';
+  const isPaused     = syncStatus === 'paused';
+  const driveMounted = driveStatus?.mounted ?? false;
+  const driveLetter  = config.mountPoint || driveStatus?.mountPoint || '';
 
   // 3-state status dot: grey = disabled, green = connected, red = error
   const dotClass = !isEnabled
@@ -120,6 +124,21 @@ export function BackendConfigCard({
                 </span>
               )}
 
+              {/* Drive mount point badge (v1.1.x #88) */}
+              {driveLetter && (
+                <span
+                  className={`inline-flex items-center gap-0.5 text-xs px-1.5 py-0.5 rounded font-mono font-medium
+                    ${driveMounted
+                      ? 'bg-green-50 text-green-700'
+                      : 'bg-gray-100 text-gray-400'
+                    }`}
+                  title={driveMounted ? `Drive ${driveLetter} monté` : `Drive ${driveLetter} non monté`}
+                >
+                  <HardDrive size={10} aria-hidden="true" />
+                  {driveLetter}
+                </span>
+              )}
+
               {/* Manual badge (enabled but autoSync off and not actively syncing) */}
               {isEnabled && !config.autoSync && syncStatus === 'idle' && (
                 <span className="text-xs px-1.5 py-0.5 rounded bg-gray-50 text-gray-400">
@@ -181,6 +200,12 @@ export function BackendConfigCard({
             {syncState && syncState.pending > 0 && (
               <p className="text-xs text-gray-400 mt-0.5">
                 {syncState.pending} fichier{syncState.pending > 1 ? 's' : ''} en attente
+              </p>
+            )}
+            {driveStatus?.lastError && (
+              <p className="text-xs text-red-500 mt-0.5 truncate" title={driveStatus.lastError}>
+                <HardDrive size={10} className="inline mr-0.5" aria-hidden="true" />
+                {driveStatus.lastError}
               </p>
             )}
           </div>

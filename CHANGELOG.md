@@ -5,6 +5,37 @@ All notable changes to GhostDrive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-05-02
+
+### Features
+
+- **Drive virtuel par backend** : chaque backend dispose désormais de son propre point de montage (lettre de lecteur ex. `E:` ou chemin absolu). Remplace le drive partagé `GhD:` global. (#88)
+- **Activation/désactivation contrôle le drive** : activer un backend monte son drive virtuel immédiatement ; désactiver le démonte proprement sans redémarrage. (#85)
+- **Nouveau backend créé désactivé par défaut** : l'utilisateur active explicitement après configuration. (#85)
+- **Sélecteur de lettre de lecteur** dans le formulaire de configuration backend. (#88)
+- **Badge état drive** par backend dans la liste des backends (icône HardDrive vert/gris). (#85 #88)
+- **`GetDriveStatuses()`** : nouveau binding Wails retournant l'état de chaque drive par `backendID`. (#88)
+
+### Bug Fixes
+
+- **GetQuota error → -1** : quand `GetQuota` retourne une erreur, `FreeSpace` et `TotalSpace` sont maintenant `-1` (au lieu de `0`) — l'UI affiche correctement "Quota non disponible". (#89)
+- **RemoveBackend démonte le drive** : supprimer un backend actif démonte son drive virtuel avant de le retirer. (#85)
+- **Events `drive:*` camelCase** : les payloads des événements `drive:mounted`, `drive:unmounted`, `drive:error` utilisent désormais le camelCase cohérent avec les types TypeScript.
+
+### Breaking Changes
+
+- Drive `GhD:` global supprimé — chaque backend a son propre point de montage.
+- `AddBackend` : `enabled` forcé à `false` à la création (ignoré si `true` côté frontend).
+- `MountDrive()` et `UnmountDrive()` : bindings Wails supprimés — utiliser `SetBackendEnabled()`.
+- `GetDriveStatus()` : déprécié — utiliser `GetDriveStatuses()`.
+
+### Tests
+
+- 13 nouveaux tests Go (`DriveManager`, `RemoveBackend`, `AddBackend`, `validateBackendConfig`, `SetBackendEnabled`, `Startup` migration)
+- 5 nouveaux tests React (`SyncPointForm` : mountPoint, enabled=false, conflit)
+
+---
+
 ## [1.0.0] — 2026-05-02
 
 ### Added

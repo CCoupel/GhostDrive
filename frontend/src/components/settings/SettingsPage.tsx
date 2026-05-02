@@ -6,6 +6,7 @@ import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { useBackends } from '../../hooks/useBackends';
 import { useSyncStatus } from '../../hooks/useSyncStatus';
+import { useDriveStatuses } from '../../hooks/useDriveStatus';
 import type { BackendConfig } from '../../types/ghostdrive';
 
 export function SettingsPage() {
@@ -18,9 +19,16 @@ export function SettingsPage() {
     removeBackend, reload, setEnabled, setAutoSync,
   } = useBackends();
   const { syncState } = useSyncStatus();
+  const { driveStatuses } = useDriveStatuses();
 
   // Stable reference — prevents infinite re-render in SyncPointForm useMemo
   const existingNames = useMemo(() => configs.map(c => c.name), [configs]);
+
+  // Points de montage existants pour la validation d'unicité dans SyncPointForm
+  const existingMountPoints = useMemo(
+    () => configs.map(c => c.mountPoint ?? '').filter(Boolean),
+    [configs],
+  );
 
   const handleAddSuccess = (_config: BackendConfig) => {
     reload();
@@ -67,6 +75,7 @@ export function SettingsPage() {
               config={cfg}
               status={statuses.find(s => s.backendId === cfg.id)}
               syncState={syncState.backends.find(b => b.backendId === cfg.id)}
+              driveStatus={driveStatuses[cfg.id]}
               onRemove={handleRemove}
               onToggleEnabled={setEnabled}
               onToggleAutoSync={setAutoSync}
@@ -94,6 +103,7 @@ export function SettingsPage() {
           onSuccess={handleAddSuccess}
           onCancel={() => setShowAddModal(false)}
           existingNames={existingNames}
+          existingMountPoints={existingMountPoints}
         />
       </Modal>
 
@@ -109,6 +119,7 @@ export function SettingsPage() {
             onSuccess={handleEditSuccess}
             onCancel={() => setEditingConfig(null)}
             existingNames={existingNames}
+            existingMountPoints={existingMountPoints}
           />
         )}
       </Modal>

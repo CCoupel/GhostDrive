@@ -141,6 +141,10 @@ type BackendConfig struct {
 	// copy of the remote data.  In Auto mode it is derived from GhostDriveRoot
 	// and the backend Name; in Manual mode it is set by the user.
 	LocalPath string `json:"localPath"`
+	// MountPoint is the Windows drive letter (e.g. "E:") or absolute path where
+	// GhostDrive mounts the virtual drive for this backend.
+	// Auto-assigned (first available letter ≥ E:) when empty at AddBackend or Startup.
+	MountPoint string `json:"mountPoint"`
 	// Warning carries a non-blocking validation message returned by AddBackend
 	// when a soft conflict is detected (e.g. rootPath already used by another
 	// backend).  Empty when no warning applies.

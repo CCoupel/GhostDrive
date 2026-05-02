@@ -91,6 +91,8 @@ export interface BackendConfig {
   remotePath: string;
   /** Chemin local sur le PC (vide = Auto, le backend calcule). Ajouté v0.4.0 #51 */
   localPath: string;
+  /** Point de montage du drive virtuel : lettre Windows ("E:") ou chemin absolu. Ajouté v1.1.x #88 */
+  mountPoint: string;
   /** Avertissement non bloquant retourné par le backend (ex. rootPath déjà utilisé) */
   warning?: string;
 }
@@ -116,14 +118,16 @@ export interface ProgressEvent {
 }
 
 /**
- * DriveStatus — matches placeholder.DriveStatus (Go, no JSON tags →
- * field names are capitalized on the wire).
+ * DriveStatus — matches placeholder.DriveStatus (Go, all fields have json tags → camelCase wire).
+ * Updated v1.1.x: added backendID, backendName; all fields now camelCase.
  */
 export interface DriveStatus {
-  Mounted: boolean;
-  MountPoint: string;   // renamed from DriveLetter in commit a7416cd
-  BackendPaths: Record<string, string>; // backendID → path under drive root
-  LastError: string;    // empty string when no error
+  mounted: boolean;
+  mountPoint: string;
+  backendID: string;    // ID of the backend that owns this drive (v1.1.x #88)
+  backendName: string;  // Human-readable backend name (v1.1.x #88)
+  backendPaths: Record<string, string>; // backendID → path under drive root
+  lastError: string;    // empty string when no error
 }
 
 export interface CacheStats {
@@ -158,9 +162,25 @@ export type WailsEventMap = {
   'app:ready': { version: string; backendsCount: number };
   'tray:open-settings': undefined;
   'tray:action': { action: TrayAction };
-  'drive:mounted': DriveStatus;
-  'drive:unmounted': Record<string, never>;
-  'drive:error': DriveStatus;
+  /** drive:mounted — emitted after a per-backend drive is mounted (v1.1.x: includes backendID/backendName) */
+  'drive:mounted': {
+    backendID: string;
+    backendName: string;
+    mountPoint: string;
+    backendPaths: Record<string, string>;
+  };
+  /** drive:unmounted — emitted after a per-backend drive is unmounted (v1.1.x: includes backendID/backendName) */
+  'drive:unmounted': {
+    backendID: string;
+    backendName: string;
+    mountPoint: string;
+  };
+  /** drive:error — emitted when a drive mount/unmount fails (v1.1.x: includes backendID/backendName) */
+  'drive:error': {
+    backendID: string;
+    backendName: string;
+    error: string;
+  };
 };
 
 export type WailsEventName = keyof WailsEventMap;

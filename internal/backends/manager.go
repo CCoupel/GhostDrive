@@ -132,6 +132,11 @@ func (m *BackendManager) ListStatuses() []types.BackendStatus {
 			if free, total, err := e.b.GetQuota(context.Background()); err == nil {
 				s.FreeSpace = free
 				s.TotalSpace = total
+			} else {
+				// #89 — GetQuota failed or unsupported: use -1 to signal
+				// "quota unknown" (distinct from "0 bytes free").
+				s.FreeSpace = -1
+				s.TotalSpace = -1
 			}
 		}
 		statuses = append(statuses, s)

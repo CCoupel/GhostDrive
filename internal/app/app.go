@@ -35,8 +35,8 @@ type App struct {
 	mu           gosync.RWMutex
 	manager      *backends.BackendManager
 	engines      map[string]*sync.Engine
-	drive        placeholder.VirtualDrive
-	dynRegistry  *pluginsregistry.DynamicRegistry  // v0.6.x dynamic plugin loader
+	driveManager *placeholder.DriveManager          // v1.1.x per-backend drive pool
+	dynRegistry  *pluginsregistry.DynamicRegistry   // v0.6.x dynamic plugin loader
 	descriptors  map[string]plugins.PluginDescriptor // cached plugin descriptors by type
 	localCleanup func()                              // cleanup for ServeInProcess local backend
 }
@@ -51,11 +51,11 @@ func NewApp(cfgPath string) *App {
 		}
 	}
 	return &App{
-		cfgPath:     cfgPath,
-		cfg:         config.DefaultConfig(),
-		engines:     make(map[string]*sync.Engine),
-		drive:       placeholder.New(),
-		descriptors: make(map[string]plugins.PluginDescriptor),
+		cfgPath:      cfgPath,
+		cfg:          config.DefaultConfig(),
+		engines:      make(map[string]*sync.Engine),
+		driveManager: placeholder.NewDriveManager(),
+		descriptors:  make(map[string]plugins.PluginDescriptor),
 	}
 }
 
@@ -91,6 +91,9 @@ func (a *App) Startup(ctx context.Context) {
 	a.cfg = cfg
 	a.cfgPath = path
 	a.manager = backends.NewBackendManager(a)
+	if a.driveManager == nil {
+		a.driveManager = placeholder.NewDriveManager()
+	}
 	a.mu.Unlock()
 
 	// #58 — Auto-create GhostDrive root directory on startup.
@@ -151,26 +154,86 @@ func (a *App) Startup(ctx context.Context) {
 		a.mu.Unlock()
 	}
 
-	// Reconnect saved backends and auto-start sync where configured.
-	for _, bc := range cfg.Backends {
-		if bc.Enabled {
-			if err := a.manager.Add(bc); err != nil {
-				a.emitError(fmt.Sprintf("app: reconnect backend %s: %v", bc.Name, err))
-				continue
+	// v1.1.x — Migration: assign MountPoint to backends that don't have one yet.
+	// This ensures backends created before v1.1.x get a letter without user action.
+	{
+		a.mu.Lock()
+		usedLetters := make([]string, 0, len(a.cfg.Backends))
+		for _, bc := range a.cfg.Backends {
+			if bc.MountPoint != "" {
+				usedLetters = append(usedLetters, bc.MountPoint)
 			}
-			if bc.AutoSync {
-				if err := a.StartSync(bc.ID); err != nil {
-					a.emitError(fmt.Sprintf("app: auto-start sync %s: %v", bc.Name, err))
+		}
+		needsSave := false
+		for i := range a.cfg.Backends {
+			if a.cfg.Backends[i].MountPoint == "" {
+				letter := a.driveManager.AssignAvailableLetter(usedLetters)
+				if letter != "" {
+					a.cfg.Backends[i].MountPoint = letter
+					usedLetters = append(usedLetters, letter)
+					needsSave = true
 				}
+			}
+		}
+		migratedCfg := a.cfg
+		migrationPath := a.cfgPath
+		a.mu.Unlock()
+
+		if needsSave {
+			if saveErr := config.Save(migratedCfg, migrationPath); saveErr != nil {
+				log.Printf("app: save MountPoint migration: %v", saveErr)
 			}
 		}
 	}
 
-	// Auto-mount GhD: if at least one backend is connected.
-	// MountDrive() emits drive:mounted on success and drive:error on failure —
-	// no secondary emit needed here.
-	if err := a.MountDrive(); err != nil {
-		log.Printf("app: auto-mount drive: %v", err)
+	// Reconnect saved backends, auto-start sync, and mount per-backend drives.
+	a.mu.RLock()
+	backendsSnapshot := make([]plugins.BackendConfig, len(a.cfg.Backends))
+	copy(backendsSnapshot, a.cfg.Backends)
+	a.mu.RUnlock()
+
+	for _, bc := range backendsSnapshot {
+		if !bc.Enabled {
+			continue
+		}
+		if err := a.manager.Add(bc); err != nil {
+			a.emitError(fmt.Sprintf("app: reconnect backend %s: %v", bc.Name, err))
+			continue
+		}
+
+		// Mount per-backend virtual drive.
+		if bc.MountPoint != "" {
+			b, ok := a.manager.Get(bc.ID)
+			if ok {
+				mb := placeholder.MountedBackend{
+					ID:      bc.ID,
+					Name:    bc.Name,
+					Backend: b,
+					Config:  bc,
+				}
+				if mountErr := a.driveManager.Mount(bc.ID, bc.MountPoint, mb); mountErr != nil {
+					log.Printf("app: startup mount %s: %v", bc.Name, mountErr)
+					a.emit("drive:error", map[string]any{
+						"backendID":   bc.ID,
+						"backendName": bc.Name,
+						"error":       mountErr.Error(),
+					})
+				} else {
+					a.emit("drive:mounted", map[string]any{
+						"backendID":   bc.ID,
+						"backendName": bc.Name,
+						"mountPoint":  bc.MountPoint,
+						"mounted":     true,
+					})
+				}
+			}
+		}
+
+		if bc.AutoSync {
+			if err := a.StartSync(bc.ID); err != nil {
+				a.emitError(fmt.Sprintf("app: auto-start sync %s: %v", bc.Name, err))
+			}
+		}
 	}
 
 	a.emit("app:ready", map[string]any{
@@ -181,11 +244,12 @@ func (a *App) Startup(ctx context.Context) {
 
 // shutdown is called by Wails when the application is about to quit.
 func (a *App) Shutdown(ctx context.Context) {
-	// #57 — Unmount GhD: before stopping sync engines.
-	if err := a.drive.Unmount(); err != nil {
-		log.Printf("app: shutdown unmount: %v", err)
+	// v1.1.x — Unmount all per-backend drives before stopping sync engines.
+	if a.driveManager != nil {
+		if err := a.driveManager.UnmountAll(); err != nil {
+			log.Printf("app: shutdown unmount all: %v", err)
+		}
 	}
-	a.emit("drive:unmounted", map[string]any{})
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -301,10 +365,18 @@ func (a *App) ReloadPlugins() error {
 
 // ─── Backends ────────────────────────────────────────────────────────────────
 
-// AddBackend validates, saves and connects a new backend.
+// AddBackend validates and saves a new backend.
+// The backend is always created disabled (bc.Enabled is forced to false regardless
+// of what the frontend sends). The user enables it explicitly via SetBackendEnabled.
+//
 // If bc.LocalPath is empty (Auto mode), a sub-directory is created under
 // GetGhostDriveRoot() using the backend Name.
+// If bc.MountPoint is empty, a drive letter is auto-assigned (first available ≥ E:).
 func (a *App) AddBackend(bc plugins.BackendConfig) (plugins.BackendConfig, error) {
+	// v1.1.x — Force disabled at creation: the drive/connection lifecycle is
+	// managed exclusively via SetBackendEnabled.
+	bc.Enabled = false
+
 	// ── Auto LocalPath ────────────────────────────────────────────────────
 	if bc.LocalPath == "" {
 		ghostDriveRoot := a.GetGhostDriveRoot()
@@ -321,6 +393,20 @@ func (a *App) AddBackend(bc plugins.BackendConfig) (plugins.BackendConfig, error
 		bc.SyncDir = bc.LocalPath
 	}
 
+	// ── Auto MountPoint ───────────────────────────────────────────────────
+	if bc.MountPoint == "" {
+		a.mu.RLock()
+		usedLetters := make([]string, 0, len(a.cfg.Backends))
+		for _, ex := range a.cfg.Backends {
+			if ex.MountPoint != "" {
+				usedLetters = append(usedLetters, ex.MountPoint)
+			}
+		}
+		a.mu.RUnlock()
+		bc.MountPoint = a.driveManager.AssignAvailableLetter(usedLetters)
+		// MountPoint may remain "" on non-Windows or when all letters are taken.
+	}
+
 	// ── Validate BEFORE MkdirAll — avoid orphan directories on error ──────
 	warning, err := a.validateBackendConfig(bc)
 	if err != nil {
@@ -333,19 +419,12 @@ func (a *App) AddBackend(bc plugins.BackendConfig) (plugins.BackendConfig, error
 		return bc, fmt.Errorf("creation dossier local: %w", err)
 	}
 
-	// Assign the definitive ID before calling manager.Add so the returned
-	// BackendConfig (and the persisted config) carry the same ID.
-	// manager.Add also generates an ID on its local copy, but that copy is
-	// not returned to the caller, leaving bc.ID == "" without this guard.
+	// Assign the definitive ID (before persisting so the caller gets it back).
 	if bc.ID == "" {
 		bc.ID = backends.GenerateID()
 	}
 
-	if err := a.manager.Add(bc); err != nil {
-		return bc, fmt.Errorf("connection: %w", err)
-	}
-
-	// Persist
+	// Persist (no manager.Add since Enabled = false)
 	a.mu.Lock()
 	a.cfg.Backends = append(a.cfg.Backends, bc)
 	path := a.cfgPath
@@ -359,8 +438,12 @@ func (a *App) AddBackend(bc plugins.BackendConfig) (plugins.BackendConfig, error
 }
 
 // SetBackendEnabled enables or disables a backend by ID.
-// Disabling stops any running sync engine and disconnects the backend.
-// Enabling reconnects the backend and auto-starts sync when AutoSync=true.
+//
+// Enabling (enabled=true): Connect → Mount drive → persist → start AutoSync.
+// Atomically: if Connect or Mount fails, enabled remains false and no state is persisted.
+//
+// Disabling (enabled=false): Unmount drive → StopSync → Disconnect → persist.
+// Emits drive:mounted / drive:unmounted / drive:error accordingly.
 func (a *App) SetBackendEnabled(id string, enabled bool) error {
 	a.mu.Lock()
 	idx := -1
@@ -380,7 +463,23 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 	a.mu.Unlock()
 
 	if !enabled {
-		// Disable path: persist first (state is definitive), then side-effects.
+		// v1.1.x — Unmount drive BEFORE stopping sync / disconnecting.
+		if unmountErr := a.driveManager.Unmount(id); unmountErr != nil {
+			log.Printf("app: SetBackendEnabled unmount %s: %v", bc.Name, unmountErr)
+			a.emit("drive:error", map[string]any{
+				"backendID":   id,
+				"backendName": bc.Name,
+				"error":       unmountErr.Error(),
+			})
+		} else {
+			a.emit("drive:unmounted", map[string]any{
+				"backendID":   id,
+				"backendName": bc.Name,
+				"mountPoint":  bc.MountPoint,
+			})
+		}
+
+		// Persist first (state is definitive), then side-effects.
 		a.mu.RLock()
 		cfg := a.cfg
 		a.mu.RUnlock()
@@ -401,6 +500,46 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 			a.mu.Unlock()
 			return fmt.Errorf("reconnect: %w", err)
 		}
+
+		// v1.1.x — Mount per-backend virtual drive.
+		if bc.MountPoint != "" {
+			b, ok := a.manager.Get(id)
+			if ok {
+				mb := placeholder.MountedBackend{
+					ID:      bc.ID,
+					Name:    bc.Name,
+					Backend: b,
+					Config:  bc,
+				}
+				if mountErr := a.driveManager.Mount(id, bc.MountPoint, mb); mountErr != nil {
+					// Mount failed — rollback: disconnect and revert enabled flag.
+					log.Printf("app: SetBackendEnabled mount %s: %v", bc.Name, mountErr)
+					_ = a.manager.Remove(id)
+					a.mu.Lock()
+					if idx2 := indexByID(a.cfg.Backends, id); idx2 >= 0 {
+						a.cfg.Backends[idx2].Enabled = false
+					}
+					a.mu.Unlock()
+					a.emit("drive:error", map[string]any{
+						"backendID":   id,
+						"backendName": bc.Name,
+						"error":       mountErr.Error(),
+					})
+					return fmt.Errorf("mount drive: %w", mountErr)
+				}
+				// Emit mounted event with current drive status.
+				if s, ok := a.driveManager.GetStatus(id); ok {
+					a.emit("drive:mounted", map[string]any{
+						"backendID":    id,
+						"backendName":  bc.Name,
+						"mountPoint":   s.MountPoint,
+						"backendPaths": s.BackendPaths,
+						"mounted":      s.Mounted,
+					})
+				}
+			}
+		}
+
 		a.mu.RLock()
 		cfg := a.cfg
 		a.mu.RUnlock()
@@ -465,10 +604,16 @@ func indexByID(bcs []plugins.BackendConfig, id string) int {
 	return -1
 }
 
-// RemoveBackend stops sync and removes the backend with the given ID.
+// RemoveBackend stops sync, unmounts the virtual drive, and removes the backend
+// with the given ID from memory and persisted config.
 func (a *App) RemoveBackend(backendID string) error {
 	// Stop sync if running
 	_ = a.StopSync(backendID)
+
+	// v1.1.x — Unmount per-backend drive before disconnecting.
+	if unmountErr := a.driveManager.Unmount(backendID); unmountErr != nil {
+		log.Printf("app: RemoveBackend unmount %s: %v", backendID, unmountErr)
+	}
 
 	if err := a.manager.Remove(backendID); err != nil {
 		// Ignore "not found" — the backend may not be in memory (never connected,
@@ -550,6 +695,45 @@ func (a *App) UpdateBackend(newBC plugins.BackendConfig) (plugins.BackendConfig,
 		if err := a.manager.Add(newBC); err != nil {
 			return newBC, fmt.Errorf("connection: %w", err)
 		}
+
+		// v1.1.x — Handle MountPoint change: if the mount point changed (or drive
+		// was not previously mounted), remount on the new mount point.
+		oldMountPoint := oldBC.MountPoint
+		if newBC.MountPoint != "" && newBC.MountPoint != oldMountPoint {
+			// Unmount old drive (if any) — best-effort, already handled above via
+			// manager.Remove + Stop, but guard in case DriveManager still has it.
+			_ = a.driveManager.Unmount(newBC.ID)
+		}
+		if newBC.MountPoint != "" {
+			b, ok := a.manager.Get(newBC.ID)
+			if ok {
+				mb := placeholder.MountedBackend{
+					ID:      newBC.ID,
+					Name:    newBC.Name,
+					Backend: b,
+					Config:  newBC,
+				}
+				if mountErr := a.driveManager.Mount(newBC.ID, newBC.MountPoint, mb); mountErr != nil {
+					log.Printf("app: UpdateBackend: mount %q: %v", newBC.Name, mountErr)
+					a.emit("drive:error", map[string]any{
+						"backendID":   newBC.ID,
+						"backendName": newBC.Name,
+						"error":       mountErr.Error(),
+					})
+				} else {
+					if s, ok := a.driveManager.GetStatus(newBC.ID); ok {
+						a.emit("drive:mounted", map[string]any{
+							"backendID":    newBC.ID,
+							"backendName":  newBC.Name,
+							"mountPoint":   s.MountPoint,
+							"backendPaths": s.BackendPaths,
+							"mounted":      s.Mounted,
+						})
+					}
+				}
+			}
+		}
+
 		// MAJEUR-2 — restart AutoSync after reconnection
 		if newBC.AutoSync {
 			if syncErr := a.StartSync(newBC.ID); syncErr != nil {
@@ -602,6 +786,10 @@ func (a *App) TestBackendConnection(bc plugins.BackendConfig) (types.BackendStat
 	if free, total, err := b.GetQuota(context.Background()); err == nil {
 		status.FreeSpace = free
 		status.TotalSpace = total
+	} else {
+		// #89 — GetQuota failed or unsupported: use -1 to signal "quota unknown".
+		status.FreeSpace = -1
+		status.TotalSpace = -1
 	}
 	status.Connected = true
 	return status, nil
@@ -894,7 +1082,7 @@ func aggregateStatus(states []types.BackendSyncState) types.SyncStatus {
 	return types.SyncIdle
 }
 
-// ─── Drive Virtuel (WinFsp) ───────────────────────────────────────────────────
+// ─── Drive Virtuel (WinFsp / per-backend) ─────────────────────────────────────
 
 // GetAvailableDriveLetters returns the list of unused Windows drive letters in
 // "X:" format (e.g. ["D:", "G:", "H:"]). On non-Windows platforms returns nil.
@@ -902,8 +1090,9 @@ func (a *App) GetAvailableDriveLetters() []string {
 	return placeholder.AvailableDriveLetters()
 }
 
-// GetMountPoint returns the configured virtual drive mount point.
-// Default: `C:\GhostDrive\GhD\` on Windows, ~/GhostDrive/GhD on other platforms.
+// GetMountPoint returns the global mount point configuration value.
+// Retained for backward-compatibility; in v1.1.x each backend has its own
+// MountPoint stored in BackendConfig.MountPoint.
 func (a *App) GetMountPoint() string {
 	a.mu.RLock()
 	mp := a.cfg.MountPoint
@@ -921,53 +1110,23 @@ func (a *App) GetMountPoint() string {
 	return filepath.Join(home, "GhostDrive", "GhD")
 }
 
-// MountDrive mounts GhD: with all currently connected backends.
-// No-op (returns nil) if the drive is already mounted.
-func (a *App) MountDrive() error {
-	// Collect connected backends.
-	statuses := a.manager.ListStatuses()
-	var mbs []placeholder.MountedBackend
-	for _, s := range statuses {
-		if !s.Connected {
-			continue
-		}
-		b, ok := a.manager.Get(s.BackendID)
-		if !ok {
-			continue
-		}
-		bc, _ := a.manager.GetConfig(s.BackendID)
-		mbs = append(mbs, placeholder.MountedBackend{
-			ID:      s.BackendID,
-			Name:    bc.Name,
-			Backend: b,
-			Config:  bc,
-		})
-	}
-	if len(mbs) == 0 {
-		return fmt.Errorf("winfsp: no connected backend")
-	}
-	mountPoint := a.GetMountPoint()
-	if err := a.drive.Mount(mountPoint, mbs); err != nil {
-		a.emit("drive:error", a.drive.Status())
-		return err
-	}
-	a.emit("drive:mounted", a.drive.Status())
-	return nil
+// GetDriveStatuses returns the current mount status of every per-backend virtual
+// drive keyed by backendID. Delegates to DriveManager.GetAllStatuses().
+//
+// Wails binding: window.go.App.GetDriveStatuses()
+func (a *App) GetDriveStatuses() map[string]placeholder.DriveStatus {
+	return a.driveManager.GetAllStatuses()
 }
 
-// UnmountDrive unmounts GhD: cleanly.  No-op if not mounted.
-func (a *App) UnmountDrive() error {
-	if err := a.drive.Unmount(); err != nil {
-		a.emit("drive:error", a.drive.Status())
-		return err
-	}
-	a.emit("drive:unmounted", map[string]any{})
-	return nil
-}
-
-// GetDriveStatus returns the current state of the virtual drive.
+// GetDriveStatus returns an empty DriveStatus.
+//
+// Deprecated: use GetDriveStatuses() which returns per-backend drive states.
+// Retained in v1.1.x for frontend compatibility during migration.
+//
+// Wails binding: window.go.App.GetDriveStatus()
 func (a *App) GetDriveStatus() placeholder.DriveStatus {
-	return a.drive.Status()
+	log.Printf("app: GetDriveStatus() is deprecated — use GetDriveStatuses()")
+	return placeholder.DriveStatus{}
 }
 
 // GetGhostDriveRoot returns the configurable root directory under which
@@ -1062,6 +1221,8 @@ func (a *App) validateBackendConfig(bc plugins.BackendConfig) (warning string, e
 	nameLower := strings.ToLower(bc.Name)
 	localPathClean := filepath.Clean(bc.LocalPath)
 
+	mountPointUpper := strings.ToUpper(strings.TrimSpace(bc.MountPoint))
+
 	for _, ex := range existing {
 		// Skip self when editing (same ID).
 		if ex.ID != "" && ex.ID == bc.ID {
@@ -1076,6 +1237,14 @@ func (a *App) validateBackendConfig(bc plugins.BackendConfig) (warning string, e
 		// Rule 2 — LocalPath uniqueness (blocking).
 		if bc.LocalPath != "" && filepath.Clean(ex.LocalPath) == localPathClean {
 			return "", fmt.Errorf("ce dossier local est déjà utilisé par le backend %q", ex.Name)
+		}
+
+		// Rule 4 — MountPoint uniqueness (blocking, activated or not).
+		// A disabled backend still reserves its mount point so it can be
+		// re-enabled without conflicts.
+		if bc.MountPoint != "" &&
+			strings.ToUpper(strings.TrimSpace(ex.MountPoint)) == mountPointUpper {
+			return "", fmt.Errorf("ce point de montage est déjà utilisé par le backend %q", ex.Name)
 		}
 
 		// Rule 3 — rootPath duplicate (non-blocking warning).

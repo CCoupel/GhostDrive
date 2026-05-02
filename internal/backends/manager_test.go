@@ -2,6 +2,7 @@ package backends
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -158,6 +159,36 @@ func TestBackendManagerListStatuses(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, connected)
+}
+
+// mockBackendQuotaError is a mockBackend that returns an error from GetQuota,
+// used to verify the #89 fix (FreeSpace = -1 on GetQuota error).
+type mockBackendQuotaError struct {
+	mockBackend
+}
+
+func (m *mockBackendQuotaError) GetQuota(_ context.Context) (int64, int64, error) {
+	return 0, 0, fmt.Errorf("quota: not supported")
+}
+
+// TestListStatuses_GetQuotaError_ReturnsMinus1 verifies that ListStatuses sets
+// FreeSpace = -1 and TotalSpace = -1 when GetQuota returns an error (#89).
+func TestListStatuses_GetQuotaError_ReturnsMinus1(t *testing.T) {
+	m := newTestManager()
+
+	mb := &mockBackendQuotaError{mockBackend{connected: true}}
+	m.mu.Lock()
+	m.backends["q1"] = mb
+	m.configs["q1"] = mockConfig("q1")
+	m.mu.Unlock()
+
+	statuses := m.ListStatuses()
+	require.Len(t, statuses, 1)
+
+	s := statuses[0]
+	assert.True(t, s.Connected, "backend must be connected")
+	assert.Equal(t, int64(-1), s.FreeSpace, "FreeSpace must be -1 when GetQuota returns an error")
+	assert.Equal(t, int64(-1), s.TotalSpace, "TotalSpace must be -1 when GetQuota returns an error")
 }
 
 func TestInstantiateBackendUnknownType(t *testing.T) {
