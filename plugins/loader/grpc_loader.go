@@ -3,12 +3,11 @@
 // each one as a subprocess, negotiates the gRPC handshake, and registers the
 // backend in the global plugins registry.
 //
-// # Cross-platform scanning
+// # Plugin discovery
 //
-// On Windows the loader scans *.exe files.
-// On Linux/macOS it additionally scans extensionless files whose execute bit
-// is set (mode & 0111 != 0). Both types are handled by the same Scan call,
-// so a plugin directory may contain mixed Windows and Linux binaries.
+// The loader scans for *.ghdp files (GhostDrive Plugin) in the plugin
+// directory. This is the universal extension for GhostDrive plugins on all
+// platforms — no per-OS filename convention is required.
 //
 // # Crash supervision
 //
@@ -22,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
@@ -120,7 +118,7 @@ func NewGRPCLoaderWithOptions(opts LoaderOptions) *GRPCLoader {
 	}
 }
 
-// Scan scans pluginsDir for *.exe files, launches each plugin, negotiates the
+// Scan scans pluginsDir for *.ghdp files, launches each plugin, negotiates the
 // handshake, retrieves the backend name, and registers a factory with
 // plugins.Register.
 //
@@ -134,30 +132,10 @@ func (l *GRPCLoader) Scan(pluginsDir string) error {
 	l.pluginsDir = pluginsDir
 	l.mu.Unlock()
 
-	// *.exe — Windows plugin binaries (also matched on Linux: extension is just
-	// a string, no OS magic involved).
-	matches, err := filepath.Glob(filepath.Join(pluginsDir, "*.exe"))
+	// *.ghdp — GhostDrive Plugin binaries (universal extension, cross-platform).
+	matches, err := filepath.Glob(filepath.Join(pluginsDir, "*.ghdp"))
 	if err != nil {
 		return fmt.Errorf("loader: scan %q: %w", pluginsDir, err)
-	}
-
-	// Extensionless files with execute bit — Linux/macOS plugin binaries.
-	// We skip directories, empty files, and anything with an extension (covers
-	// *.md, *.txt, *.so, *.dylib, etc.).
-	allEntries, _ := filepath.Glob(filepath.Join(pluginsDir, "*"))
-	for _, m := range allEntries {
-		if filepath.Ext(m) != "" {
-			// Has an extension — *.exe already handled above, others ignored.
-			continue
-		}
-		info, statErr := os.Stat(m)
-		if statErr != nil || info.IsDir() || info.Size() == 0 {
-			continue
-		}
-		// Executable bit set → treat as a Linux/macOS plugin binary.
-		if info.Mode()&0111 != 0 {
-			matches = append(matches, m)
-		}
 	}
 
 	for _, path := range matches {

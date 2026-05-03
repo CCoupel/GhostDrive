@@ -132,14 +132,14 @@ func (a *App) Startup(ctx context.Context) {
 		})
 	}
 
-	// v0.6.x — Scan <AppDir>/plugins/*.exe and register dynamic backends BEFORE
+	// v0.6.x — Scan <AppDir>/*.ghdp and register dynamic backends BEFORE
 	// the backend reconnection loop so that dynamic types pass validateBackendConfig.
 	appExe, exeErr := os.Executable()
 	if exeErr != nil {
 		log.Printf("app: os.Executable: %v — using os.Args[0]", exeErr)
 		appExe = os.Args[0]
 	}
-	pluginsDir := filepath.Join(filepath.Dir(appExe), "plugins")
+	pluginsDir := filepath.Dir(appExe)
 	a.dynRegistry = pluginsregistry.NewDynamicRegistry(pluginsDir)
 	if err := a.dynRegistry.Start(); err != nil {
 		log.Printf("app: plugin scan %q: %v", pluginsDir, err)
@@ -298,7 +298,7 @@ func (a *App) GetVersion() string {
 
 // GetAvailableBackendTypes returns all available plugin types (static + dynamic).
 // The frontend uses this to populate the "Add backend" type selector.
-// v0.6.x: includes dynamic plugins loaded from <AppDir>/plugins/*.exe.
+// v0.6.x: includes dynamic plugins loaded from <AppDir>/*.ghdp.
 func (a *App) GetAvailableBackendTypes() []string {
 	if a.dynRegistry != nil {
 		infos := a.dynRegistry.ListAvailablePlugins()
@@ -346,7 +346,7 @@ func (a *App) GetPluginDescriptors() []plugins.PluginDescriptor {
 	return result
 }
 
-// ReloadPlugins rescans <AppDir>/plugins/*.exe without restarting the application.
+// ReloadPlugins rescans <AppDir>/*.ghdp without restarting the application.
 // Backends using a dynamic plugin that was reloaded must be reconnected manually.
 // Emits "plugin:reloaded" with the count of newly loaded plugins on success.
 //

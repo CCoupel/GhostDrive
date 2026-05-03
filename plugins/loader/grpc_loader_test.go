@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -59,8 +58,8 @@ func runAllTests(m *testing.M) int {
 		return m.Run()
 	}
 
-	// Use ".exe" extension so the *.exe Glob in Scan finds it on all platforms.
-	mockPluginBinary = filepath.Join(tmpDir, "mock-plugin.exe")
+	// Use ".ghdp" extension so the *.ghdp Glob in Scan finds it on all platforms.
+	mockPluginBinary = filepath.Join(tmpDir, "mock-plugin.ghdp")
 	cmd := exec.Command("go", "build", "-o", mockPluginBinary,
 		"github.com/CCoupel/GhostDrive/plugins/testdata/mock-plugin")
 	cmd.Dir = moduleRoot
@@ -144,15 +143,15 @@ func TestGRPCLoader_ScanDirNotExist(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestGRPCLoader_ScanInvalidExe verifies that a directory containing a
-// file that looks like a plugin (.exe) but is not a valid plugin binary
+// TestGRPCLoader_ScanInvalidGhdp verifies that a directory containing a
+// file that looks like a plugin (.ghdp) but is not a valid plugin binary
 // results in a "failed" entry rather than a panic.
-func TestGRPCLoader_ScanInvalidExe(t *testing.T) {
+func TestGRPCLoader_ScanInvalidGhdp(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create a fake .exe that is not a real go-plugin binary.
-	fakePath := filepath.Join(dir, "badplugin.exe")
-	require.NoError(t, os.WriteFile(fakePath, []byte("not a real exe"), 0755))
+	// Create a fake .ghdp that is not a real go-plugin binary.
+	fakePath := filepath.Join(dir, "badplugin.ghdp")
+	require.NoError(t, os.WriteFile(fakePath, []byte("not a real ghdp"), 0755))
 
 	l := loader.NewGRPCLoader()
 	// Scan should not panic or block; it records the failure internally.
@@ -178,7 +177,7 @@ func TestGRPCLoader_ShutdownNoPlugins(t *testing.T) {
 // even after a scan that produced failed entries.
 func TestGRPCLoader_ShutdownAfterFailedScan(t *testing.T) {
 	dir := t.TempDir()
-	fakePath := filepath.Join(dir, "bad.exe")
+	fakePath := filepath.Join(dir, "bad.ghdp")
 	require.NoError(t, os.WriteFile(fakePath, []byte("garbage"), 0755))
 
 	l := loader.NewGRPCLoader()
@@ -194,7 +193,7 @@ func TestGRPCLoader_ShutdownAfterFailedScan(t *testing.T) {
 // for a failed plugin (path, name, status).
 func TestPluginInfo_Fields(t *testing.T) {
 	dir := t.TempDir()
-	fakePath := filepath.Join(dir, "myplugin.exe")
+	fakePath := filepath.Join(dir, "myplugin.ghdp")
 	require.NoError(t, os.WriteFile(fakePath, []byte("fake"), 0755))
 
 	l := loader.NewGRPCLoader()
@@ -209,58 +208,26 @@ func TestPluginInfo_Fields(t *testing.T) {
 	assert.Equal(t, "failed", info.Status)
 }
 
-// TestGRPCLoader_ScanLinuxExecutable verifies that the loader discovers
-// extensionless files with the executable bit set (Linux/macOS plugin
-// convention) and attempts to load them as go-plugin binaries.
-//
-// The file is not a valid plugin, so the result must be a "failed" entry --
-// but the important thing is that the loader found and attempted to load it,
-// proving the extensionless scan path is active.
-func TestGRPCLoader_ScanLinuxExecutable(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Linux executable scan not applicable on Windows")
-	}
-
+// TestGRPCLoader_ScanIgnoresNonGhdp verifies that non-.ghdp files (extensionless
+// executables, .exe, .txt, etc.) in the plugin directory are not loaded.
+// Only *.ghdp files are scanned on all platforms.
+func TestGRPCLoader_ScanIgnoresNonGhdp(t *testing.T) {
 	dir := t.TempDir()
 
-	// Extensionless executable -- should be picked up by the Linux scan.
-	execFile := filepath.Join(dir, "myplugin")
-	require.NoError(t, os.WriteFile(execFile, []byte("not a real plugin"), 0755))
+	// Extensionless executable -- must NOT be picked up by the *.ghdp scan.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "myplugin"), []byte("not a plugin"), 0755))
 
-	// Non-executable extensionless file -- must be skipped.
-	noExec := filepath.Join(dir, "readme")
-	require.NoError(t, os.WriteFile(noExec, []byte("not executable"), 0644))
+	// .exe file -- must NOT be picked up.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "myplugin.exe"), []byte("not a plugin"), 0755))
 
-	// Extensionless empty file -- must be skipped (size == 0).
-	emptyFile := filepath.Join(dir, "empty")
-	require.NoError(t, os.WriteFile(emptyFile, []byte{}, 0755))
+	// A subdirectory -- must be ignored.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "asubdir"), 0755))
 
 	l := loader.NewGRPCLoader()
 	require.NoError(t, l.Scan(dir))
 	defer l.Shutdown()
 
-	infos := l.GetLoadedPlugins()
-	// Only the executable non-empty file should appear; the others are skipped.
-	require.Len(t, infos, 1, "only the executable extensionless file must be scanned")
-	assert.Equal(t, "myplugin", infos[0].Name)
-	assert.Equal(t, execFile, infos[0].Path)
-	assert.Equal(t, "failed", infos[0].Status, "non-plugin binary must result in failed status")
-}
-
-// TestGRPCLoader_ScanLinuxDir verifies that extensionless directories inside
-// the plugins directory are not treated as plugin binaries.
-func TestGRPCLoader_ScanLinuxDir(t *testing.T) {
-	dir := t.TempDir()
-
-	// A subdirectory with a name that has no extension -- must be ignored.
-	subDir := filepath.Join(dir, "asubdir")
-	require.NoError(t, os.MkdirAll(subDir, 0755))
-
-	l := loader.NewGRPCLoader()
-	require.NoError(t, l.Scan(dir))
-	defer l.Shutdown()
-
-	assert.Empty(t, l.GetLoadedPlugins(), "subdirectories must not be loaded as plugins")
+	assert.Empty(t, l.GetLoadedPlugins(), "non-.ghdp files and directories must not be loaded as plugins")
 }
 
 // ── Integration tests (require compiled mock plugin) ─────────────────────────
@@ -271,7 +238,7 @@ func TestGRPCLoader_ValidPlugin(t *testing.T) {
 	requireMockPlugin(t)
 
 	dir := t.TempDir()
-	copyMockPlugin(t, dir, "mock.exe")
+	copyMockPlugin(t, dir, "mock.ghdp")
 
 	l := loader.NewGRPCLoaderWithOptions(loader.LoaderOptions{
 		WatchdogDelays: fastDelays(),
@@ -291,7 +258,7 @@ func TestGRPCLoader_ValidPlugin(t *testing.T) {
 // "failed" entry rather than panicking the loader.
 func TestGRPCLoader_HandshakeFailed(t *testing.T) {
 	dir := t.TempDir()
-	badPath := filepath.Join(dir, "wrongcookie.exe")
+	badPath := filepath.Join(dir, "wrongcookie.ghdp")
 	// A binary that is not a valid go-plugin -- the handshake will fail.
 	require.NoError(t, os.WriteFile(badPath, []byte("#!/bin/sh\nexit 0"), 0755))
 
@@ -319,7 +286,7 @@ func TestGRPCLoader_Watchdog_RestartOnCrash(t *testing.T) {
 	requireMockPlugin(t)
 
 	dir := t.TempDir()
-	copyMockPlugin(t, dir, "mock.exe")
+	copyMockPlugin(t, dir, "mock.ghdp")
 
 	l := loader.NewGRPCLoaderWithOptions(loader.LoaderOptions{
 		WatchdogDelays: fastDelays(),
@@ -370,7 +337,7 @@ func TestGRPCLoader_Shutdown_KillsPlugin(t *testing.T) {
 	requireMockPlugin(t)
 
 	dir := t.TempDir()
-	copyMockPlugin(t, dir, "mock.exe")
+	copyMockPlugin(t, dir, "mock.ghdp")
 
 	l := loader.NewGRPCLoaderWithOptions(loader.LoaderOptions{
 		WatchdogDelays: fastDelays(),
@@ -399,7 +366,7 @@ func TestGRPCLoader_Factory_UniqueInstances(t *testing.T) {
 	requireMockPlugin(t)
 
 	dir := t.TempDir()
-	copyMockPlugin(t, dir, "mock.exe")
+	copyMockPlugin(t, dir, "mock.ghdp")
 
 	l := loader.NewGRPCLoaderWithOptions(loader.LoaderOptions{
 		WatchdogDelays: fastDelays(),
@@ -435,7 +402,7 @@ func TestGRPCLoader_Shutdown_KillsFactoryClients(t *testing.T) {
 	requireMockPlugin(t)
 
 	dir := t.TempDir()
-	copyMockPlugin(t, dir, "mock.exe")
+	copyMockPlugin(t, dir, "mock.ghdp")
 
 	l := loader.NewGRPCLoaderWithOptions(loader.LoaderOptions{
 		WatchdogDelays: fastDelays(),

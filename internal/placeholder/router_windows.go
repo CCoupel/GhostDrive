@@ -3,8 +3,6 @@
 package placeholder
 
 import (
-	"strings"
-
 	"github.com/CCoupel/GhostDrive/plugins"
 )
 
@@ -17,37 +15,20 @@ type routeResult struct {
 	relPath string
 }
 
-// route parses a FUSE path of the form "/<BackendName>[/...]" and resolves it
-// to the matching backend.  Returns nil for the root ("/") or when no backend
-// matches the first path segment.
+// route resolves a FUSE path to the single backend mounted on this drive
+// (per-backend drives, v1.1.x+).  The path is forwarded as-is: "/" routes to
+// the backend root, "/foo/bar" routes to that path within the backend.
+// Returns nil when no backend is registered.
+// Callers (Getattr, Readdir) handle the virtual root "/" and virtual files
+// before invoking route, so this function never needs to return nil for "/".
 func (fs *GhostFileSystem) route(path string) *routeResult {
-	if path == "/" {
+	if len(fs.backends) == 0 {
 		return nil
 	}
-
-	// Strip the leading "/" and split into (backendName, rest).
-	trimmed := strings.TrimPrefix(path, "/")
-	idx := strings.IndexByte(trimmed, '/')
-	var backendName, rest string
-	if idx < 0 {
-		backendName = trimmed
-		rest = "/"
-	} else {
-		backendName = trimmed[:idx]
-		rest = trimmed[idx:] // already has leading "/"
+	mb := fs.backends[0]
+	return &routeResult{
+		backend: mb.Backend,
+		config:  mb.Config,
+		relPath: path,
 	}
-	if rest == "" {
-		rest = "/"
-	}
-
-	for _, mb := range fs.backends {
-		if strings.EqualFold(mb.Name, backendName) {
-			return &routeResult{
-				backend: mb.Backend,
-				config:  mb.Config,
-				relPath: rest,
-			}
-		}
-	}
-	return nil
 }

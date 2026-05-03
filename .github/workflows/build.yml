@@ -144,7 +144,8 @@ jobs:
         run: |
           VERSION="${{ needs.version.outputs.version }}"
           SUFFIX="${{ matrix.suffix }}"
-          mkdir -p build/plugins
+          PLUGIN_SUFFIX="${SUFFIX%.exe}.ghdp"
+          mkdir -p build
           built=0
           # Discover plugins: any plugins/*/cmd/ directory with buildable Go files.
           # go list returns nothing for //go:build ignore or empty packages → safely skipped.
@@ -153,9 +154,9 @@ jobs:
             plugin_name=$(basename "$(dirname "$cmd_dir")")
             pkg=$(go list "./$cmd_dir/" 2>/dev/null) || continue
             [ -z "$pkg" ] && continue
-            out="build/plugins/ghostdrive-${plugin_name}-v${VERSION}-${SUFFIX}"
+            out="build/ghostdrive-${plugin_name}-v${VERSION}-${PLUGIN_SUFFIX}"
             go build -ldflags="-s -w" -o "$out" "./$cmd_dir/"
-            echo "✅ ${plugin_name} → $out (place in plugins/ subfolder)"
+            echo "✅ ${plugin_name} → $out (place next to the ghostdrive binary)"
             built=$((built + 1))
           done
           echo "Total plugins built: $built"
@@ -180,7 +181,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: plugins-${{ matrix.target }}
-          path: build/plugins/
+          path: build/*.ghdp
           retention-days: 1
 
   # ============================================

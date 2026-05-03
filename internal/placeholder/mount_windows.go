@@ -68,7 +68,7 @@ func validateMountPoint(mp string) error {
 }
 
 // Mount mounts the virtual drive at mountPoint (e.g. "G:" or `C:\GhostDrive\GhD\`)
-// exposing all provided backends as sub-folders.  No-op if already mounted.
+// exposing the backend directly at the drive root.  No-op if already mounted.
 // If mountPoint contains a path separator it is treated as a directory mount
 // point and created via os.MkdirAll before mounting.
 func (d *WinFspDrive) Mount(mountPoint string, backends []MountedBackend) error {
@@ -209,14 +209,12 @@ func (d *WinFspDrive) Status() DriveStatus {
 	paths := make(map[string]string, len(d.backends))
 	if d.mounted {
 		for _, mb := range d.backends {
-			// filepath.Join cleans up redundant separators; for bare drive
-			// letters (e.g. "G:") we normalise to "G:\" first so Join
-			// produces "G:\Name" rather than the ambiguous "G:Name".
+			// Normalise bare drive letters ("G:") to "G:\" so the path is unambiguous.
 			base := d.mountPoint
 			if len(base) == 2 && base[1] == ':' {
 				base = base + `\`
 			}
-			paths[mb.ID] = filepath.Join(base, mb.Name) + string(os.PathSeparator)
+			paths[mb.ID] = base
 		}
 	}
 	return DriveStatus{

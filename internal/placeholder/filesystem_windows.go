@@ -154,14 +154,6 @@ func (fs *GhostFileSystem) Getattr(path string, stat *fuse.Stat_t, _ uint64) int
 		return -fuse.ENOENT
 	}
 
-	// Virtual per-backend root directory.
-	if r.relPath == "/" {
-		stat.Mode = fuse.S_IFDIR | 0755
-		stat.Nlink = 2
-		stat.Atim, stat.Mtim, stat.Ctim = now, now, now
-		return 0
-	}
-
 	info, err := r.backend.Stat(context.Background(), r.relPath)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no such") {
@@ -196,7 +188,7 @@ func (fs *GhostFileSystem) Readdir(path string,
 	fill(".", nil, 0)
 	fill("..", nil, 0)
 
-	// Root lists each backend as a sub-directory, plus the virtual files.
+	// Root lists virtual files plus the backend's own root content.
 	if path == "/" {
 		now := nowTs()
 		// Virtual desktop.ini and ghostdrive.ico for Windows Explorer drive icon.
@@ -208,10 +200,29 @@ func (fs *GhostFileSystem) Readdir(path string,
 		icoSt := &fuse.Stat_t{Mode: fuse.S_IFREG | 0444, Nlink: 1, Size: int64(len(driveIconICO))}
 		icoSt.Atim, icoSt.Mtim, icoSt.Ctim = now, now, now
 		fill("ghostdrive.ico", icoSt, 0)
-		for _, mb := range fs.backends {
-			st := &fuse.Stat_t{Mode: fuse.S_IFDIR | 0755, Nlink: 2}
-			st.Atim, st.Mtim, st.Ctim = now, now, now
-			fill(mb.Name, st, 0)
+		if len(fs.backends) == 0 {
+			return 0
+		}
+		entries, err := fs.backends[0].Backend.List(context.Background(), "/")
+		if err != nil {
+			log.Printf("placeholder: Readdir /: %v", err)
+			return -fuse.EIO
+		}
+		for _, e := range entries {
+			st := &fuse.Stat_t{}
+			mts := tsFromTime(e.ModTime)
+			if e.IsDir {
+				st.Mode = fuse.S_IFDIR | 0755
+				st.Nlink = 2
+			} else {
+				st.Mode = fuse.S_IFREG | 0644
+				st.Nlink = 1
+				st.Size = e.Size
+			}
+			st.Atim, st.Mtim, st.Ctim = mts, mts, now
+			if !fill(e.Name, st, 0) {
+				break
+			}
 		}
 		return 0
 	}

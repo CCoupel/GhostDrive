@@ -5,6 +5,30 @@ Les changements **BREAKING** doivent être validés par le CDP avant implémenta
 
 ---
 
+## [20260502] — #90/#91 plugin extension + placement
+
+- **[BREAKING]** Extension des plugins : `.exe` → `.ghdp` (GhostDrive Plugin)
+- **[BREAKING]** Emplacement des plugins : sous-dossier `plugins/` supprimé — les plugins sont désormais placés à côté du binaire GhostDrive
+
+---
+
+## [20260502] — v1.1.x drive-par-backend (#85 #88 #89)
+
+- **[BREAKING]** `AddBackend` — `enabled` forcé à `false` à la création (ignoré si `true` côté frontend)
+- **[BREAKING]** `SetBackendEnabled` — gère désormais le mount/unmount du drive virtuel associé au backend
+- **[BREAKING]** Drive GhD: global supprimé — remplacé par un drive virtuel indépendant par backend (#88)
+- **[BREAKING]** `MountDrive()` et `UnmountDrive()` — bindings Wails supprimés ; utiliser `SetBackendEnabled()` à la place
+- **[NEW]** `BackendConfig.mountPoint string` — lettre de lecteur (ex. `E:`) ou chemin absolu Windows ; auto-assigné si absent
+- **[NEW]** `DriveStatus.backendID string` — identifiant du backend propriétaire du drive
+- **[NEW]** `DriveStatus.backendName string` — nom lisible du backend (pour affichage UI)
+- **[NEW]** `GetDriveStatuses() map[string]DriveStatus` — binding Wails, retourne le statut de chaque drive par `backendID`
+- **[CHANGED]** `GetDriveStatus()` — marqué deprecated, conservé pour compatibilité v1.1.x ; retourne un DriveStatus vide
+- **[CHANGED]** Events `drive:mounted`, `drive:unmounted`, `drive:error` — payload étendu avec `backendID`/`backendName` (non-breaking, nouveaux champs)
+- **[CHANGED]** `GetQuota` erreur → `FreeSpace = -1` au lieu de `0` dans `ListStatuses()` et `TestBackendConnection()` (#89)
+- **[NEW]** Contrat `contracts/PLAN_v1.1.x.md` — spécification complète v1.1.x
+
+---
+
 ## [20260430] — v1.1.0 plugin-describe (#78 #79 #80)
 
 - **[BREAKING]** `plugins.StorageBackend` — méthode `Describe() PluginDescriptor` ajoutée :

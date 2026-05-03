@@ -3,6 +3,7 @@
 package placeholder
 
 import (
+	"context"
 	"testing"
 
 	"github.com/CCoupel/GhostDrive/plugins"
@@ -14,49 +15,47 @@ import (
 // mockBackend is a minimal StorageBackend for routing tests.
 type mockBackend struct{ plugins.StorageBackend }
 
+func (m *mockBackend) List(_ context.Context, _ string) ([]plugins.FileInfo, error) {
+	return nil, nil
+}
+
 func newRouterFS() *GhostFileSystem {
 	return newGhostFileSystem([]MountedBackend{
 		{ID: "b1", Name: "NAS", Backend: &mockBackend{}, Config: plugins.BackendConfig{ID: "b1", Name: "NAS"}},
-		{ID: "b2", Name: "WebDAV", Backend: &mockBackend{}, Config: plugins.BackendConfig{ID: "b2", Name: "WebDAV"}},
 	})
 }
 
-func TestRoute_Root_ReturnsNil(t *testing.T) {
+func TestRoute_Root_ReturnsBackend(t *testing.T) {
 	fs := newRouterFS()
-	assert.Nil(t, fs.route("/"), "root must return nil routeResult")
-}
-
-func TestRoute_BackendRoot(t *testing.T) {
-	fs := newRouterFS()
-	r := fs.route("/NAS")
+	r := fs.route("/")
 	require.NotNil(t, r)
 	assert.Equal(t, "/", r.relPath)
 }
 
-func TestRoute_BackendSubPath(t *testing.T) {
+func TestRoute_DirectPath(t *testing.T) {
+	fs := newRouterFS()
+	r := fs.route("/NAS")
+	require.NotNil(t, r)
+	assert.Equal(t, "/NAS", r.relPath)
+}
+
+func TestRoute_SubPath(t *testing.T) {
 	fs := newRouterFS()
 	r := fs.route("/NAS/docs/file.txt")
 	require.NotNil(t, r)
-	assert.Equal(t, "/docs/file.txt", r.relPath)
+	assert.Equal(t, "/NAS/docs/file.txt", r.relPath)
 }
 
-func TestRoute_CaseInsensitive(t *testing.T) {
+func TestRoute_AnyPath_ReturnsSingleBackend(t *testing.T) {
 	fs := newRouterFS()
-	r := fs.route("/nas/readme.md")
-	require.NotNil(t, r, "routing must be case-insensitive")
-	assert.Equal(t, "/readme.md", r.relPath)
+	r := fs.route("/anything/path")
+	require.NotNil(t, r, "single backend: any path must route")
+	assert.Equal(t, "/anything/path", r.relPath)
 }
 
-func TestRoute_UnknownBackend_ReturnsNil(t *testing.T) {
-	fs := newRouterFS()
-	assert.Nil(t, fs.route("/unknown/file.txt"))
-}
-
-func TestRoute_SecondBackend(t *testing.T) {
-	fs := newRouterFS()
-	r := fs.route("/WebDAV/backup/db.sql")
-	require.NotNil(t, r)
-	assert.Equal(t, "/backup/db.sql", r.relPath)
+func TestRoute_EmptyFileSystem_ReturnsNil(t *testing.T) {
+	fs := newGhostFileSystem([]MountedBackend{})
+	assert.Nil(t, fs.route("/anything"))
 }
 
 // ── Virtual desktop.ini ──────────────────────────────────────────────────────
@@ -88,8 +87,8 @@ func TestGhostFS_Readdir_Root_ContainsVirtualFiles(t *testing.T) {
 	assert.Equal(t, 0, ret)
 	assert.Contains(t, names, "desktop.ini")
 	assert.Contains(t, names, "ghostdrive.ico")
-	assert.Contains(t, names, "NAS")
-	assert.Contains(t, names, "WebDAV")
+	// Backend name must no longer appear as a subfolder at the drive root.
+	assert.NotContains(t, names, "NAS")
 }
 
 func TestGhostFS_DesktopIni_Content(t *testing.T) {

@@ -5,6 +5,28 @@ All notable changes to GhostDrive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-05-03
+
+### Fixed
+
+- **Drive root = base path remote** : la racine du drive virtuel affiche directement le contenu du backend, sans sous-dossier intermédiaire portant le nom du backend. Le routeur VFS (WinFsp) est désormais en mode single-backend passthrough (per-backend drives, v1.1.x+).
+
+---
+
+## [1.1.1] — 2026-05-02
+
+### Features
+
+- **Extension `.ghdp`** : les plugins GhostDrive utilisent désormais l'extension `.ghdp` (GhostDrive Plugin) au lieu de `.exe` — distinction claire avec le binaire principal. (#90)
+- **Plugins à côté du binaire** : les fichiers `.ghdp` sont placés dans le même dossier que `ghostdrive.exe`, plus besoin du sous-dossier `plugins/`. (#91)
+
+### Breaking Changes
+
+- Extension des plugins : `.exe` → `.ghdp` — les anciens plugins `.exe` ne seront plus détectés.
+- Emplacement : sous-dossier `plugins/` supprimé — placer les plugins directement à côté de `ghostdrive.exe`.
+
+---
+
 ## [1.1.0] — 2026-05-02
 
 ### Features
