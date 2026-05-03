@@ -5,6 +5,29 @@ All notable changes to GhostDrive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-05-03
+
+### Added
+
+- **Plugin MooseFS** : nouveau backend de stockage natif — connexion directe au master MooseFS via TCP (protocole natif MooseFS 4.x), sans mount intermédiaire. Opérations supportées : List, Stat, Upload, Download, Delete, Move, CreateDir, Watch (polling). (#26)
+- **Tests d'intégration MooseFS** : suite complète avec fake TCP server (coverage 81.9%). (#27)
+
+### Changed
+
+- **Volume label WinFsp dynamique** : le label du drive dans l'explorateur Windows correspond désormais au nom du backend configuré (ex : "MonNAS" au lieu de "GhostDrive"). Fallback "GhostDrive" si le nom est vide. (#92)
+
+### Fixed
+
+- **Badge "Manuel" supprimé** : le badge redondant affiché sur les cards backend en mode autoSync off a été retiré. L'icône RefreshCw grisée est le seul indicateur du mode manuel. (#93)
+
+### Notes
+
+- Le plugin MooseFS v1.5.x utilise des constantes de protocole provisoires non validées contre un cluster MooseFS réel. La validation contre un master de production est prévue avant release v1.5.0.
+- `GetQuota` retourne (-1, -1, nil) — MooseFS ne l'expose pas via le protocole minimal implémenté.
+- `Move` : upload-first (source préservée si l'upload échoue). FUSE_RENAME natif prévu v1.6.x.
+
+---
+
 ## [1.1.2] — 2026-05-03
 
 ### Fixed
