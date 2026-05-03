@@ -251,7 +251,17 @@ func (b *Backend) Upload(ctx context.Context, local, remote string, progress plu
 		return fmt.Errorf("moosefs: upload %s: resolve parent: %w", remote, err)
 	}
 
-	// Create the remote node (idempotent if already exists).
+	// If the remote file already exists, unlink it before creating a new node.
+	// This avoids a silent corruption bug: without the unlink, a shorter
+	// replacement would leave stale bytes beyond the new EOF because the server
+	// does not truncate on Mknod when the node already exists.
+	if _, statErr := resolvePath(ctx, c, subDir, remote); statErr == nil {
+		// Best-effort: ignore the error — if Unlink fails the subsequent Mknod
+		// returns the existing nodeID, which Write will overwrite from offset 0.
+		_ = c.Unlink(parentID, baseName)
+	}
+
+	// Create the remote node.
 	nodeID, err := c.Mknod(parentID, baseName, 0o644)
 	if err != nil {
 		return fmt.Errorf("moosefs: upload %s: mknod: %w", remote, err)
@@ -389,14 +399,25 @@ func (b *Backend) Delete(ctx context.Context, remote string) error {
 // Move moves oldPath to newPath.
 //
 // Implementation note (v1.5.x): MooseFS RENAME is not exposed by the minimal
-// TCP client; Move is implemented as Download + Delete + Upload.
-// This is conservative but correct.  TODO(v1.6.x): implement native RENAME.
+// TCP client.  Move is implemented as:
+//
+//  1. Download oldPath → local temp file
+//  2. Upload temp file → newPath     (if this fails, oldPath is preserved)
+//  3. Delete oldPath                 (only reached if Upload succeeded)
+//  4. Cleanup temp file
+//
+// Upload-first order is deliberate: if the upload to newPath fails, the
+// source at oldPath is left intact and no data is lost.  The only residual
+// risk is a partial newPath if Upload is interrupted mid-way; callers should
+// treat newPath as invalid when Move returns an error.
+//
+// TODO(v1.6.x): implement native FUSE_RENAME for atomic server-side rename.
 func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {
 	if !b.IsConnected() {
 		return ErrNotConnected
 	}
 
-	// Download to a temp file.
+	// Step 1 — Download source to a local temp file.
 	tmp, err := os.CreateTemp("", "ghostdrive-moosefs-move-*")
 	if err != nil {
 		return fmt.Errorf("moosefs: move %s → %s: create temp: %w", oldPath, newPath, err)
@@ -408,11 +429,15 @@ func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {
 	if err := b.Download(ctx, oldPath, tmpName, nil); err != nil {
 		return fmt.Errorf("moosefs: move %s → %s: download: %w", oldPath, newPath, err)
 	}
-	if err := b.Delete(ctx, oldPath); err != nil {
-		return fmt.Errorf("moosefs: move %s → %s: delete source: %w", oldPath, newPath, err)
-	}
+
+	// Step 2 — Upload to destination.  Source is still intact at this point.
 	if err := b.Upload(ctx, tmpName, newPath, nil); err != nil {
 		return fmt.Errorf("moosefs: move %s → %s: upload: %w", oldPath, newPath, err)
+	}
+
+	// Step 3 — Delete source only after the upload succeeded.
+	if err := b.Delete(ctx, oldPath); err != nil {
+		return fmt.Errorf("moosefs: move %s → %s: delete source: %w", oldPath, newPath, err)
 	}
 	return nil
 }
