@@ -139,13 +139,6 @@ export function BackendConfigCard({
                 </span>
               )}
 
-              {/* Manual badge (enabled but autoSync off and not actively syncing) */}
-              {isEnabled && !config.autoSync && syncStatus === 'idle' && (
-                <span className="text-xs px-1.5 py-0.5 rounded bg-gray-50 text-gray-400">
-                  Manuel
-                </span>
-              )}
-
               {/* Sync status badge */}
               {isEnabled && syncStatus !== 'idle' && (
                 <span className={`text-xs px-1.5 py-0.5 rounded font-medium
