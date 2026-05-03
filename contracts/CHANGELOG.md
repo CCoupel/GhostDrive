@@ -5,6 +5,13 @@ Les changements **BREAKING** doivent être validés par le CDP avant implémenta
 
 ---
 
+## [20260503] — v1.5.x MooseFS plugin (#26 #27 #92 #93)
+
+- **[NEW]** Plugin `moosefs` — backend StorageBackend natif TCP ; binaire `ghostdrive-moosefs[.exe]` (issues #26 #27)
+- **[CHANGED]** `volname` WinFsp — dynamique = `backends[0].Name` (fallback `"GhostDrive"` si vide) (issue #92)
+
+---
+
 ## [20260502] — #90/#91 plugin extension + placement
 
 - **[BREAKING]** Extension des plugins : `.exe` → `.ghdp` (GhostDrive Plugin)
