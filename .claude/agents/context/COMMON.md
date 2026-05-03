@@ -189,10 +189,11 @@ Action requise : [ce dont j'ai besoin]
 ### Workflow Standard
 
 ```
-PLAN -> [validation] -> DEV -> TEST-WRITER -> REVIEW -> QA -> [validation] -> DOC -> DEPLOY -> [validation]
+PLAN -> [validation] -> DEV -> [REVIEW ∥ TEST-WRITER] -> QA -> [validation] -> DOC -> DEPLOY -> [validation]
 ```
 
 **[validation] = Points de validation utilisateur obligatoires**
+**[REVIEW ∥ TEST-WRITER] = executes en parallele apres DEV**
 
 ### Transmission de Contexte
 
@@ -206,12 +207,20 @@ Chaque agent doit :
 | Agent | Validation produite | Destinataire |
 |-------|---------------------|--------------|
 | PLAN | Plan d'implementation | **Utilisateur** |
-| DEV | Summary + commits | TEST-WRITER, REVIEW |
-| TEST-WRITER | Fichiers de tests | REVIEW, QA |
+| DEV | Summary + commits | TEST-WRITER + REVIEW (en parallele) |
+| TEST-WRITER | Scripts de tests + procedures manuelles | QA |
 | REVIEW | Review Report (APPROVED/REJECTED) | QA ou DEV |
 | QA | QA Report (VALIDATED/NOT VALIDATED) | **Utilisateur** |
 | DOC | Documentation finalisee | DEPLOY |
 | DEPLOY | Deployment Report | **Utilisateur** |
+
+---
+
+## Adaptations Projet
+
+Chaque agent `xxx.template.md` peut avoir un fichier compagnon `xxx.md` dans le même dossier.
+**Si ce fichier existe, le lire après le fichier `.template.md`** — il contient les règles et adaptations spécifiques au projet.
+Pour toute modification du comportement de cet agent, écrire dans `xxx.md` (jamais dans `xxx.template.md`).
 
 ---
 

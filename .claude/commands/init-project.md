@@ -593,6 +593,10 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
     "lint": "<LINT_CMD>",
     "audit": "<AUDIT_CMD>",
     "typecheck": "<TYPECHECK_CMD>"
+  },
+  "agents": {
+    "idle_ttl_minutes": 30,
+    "idle_warning_minutes": 5
   }
 }
 ```
