@@ -161,6 +161,12 @@ func (b *Backend) Connect(cfg plugins.BackendConfig) error {
 		return fmt.Errorf("moosefs: connect: %w", err)
 	}
 
+	// Authenticate with the master server.
+	if err := client.Register(); err != nil {
+		_ = client.Close()
+		return fmt.Errorf("moosefs: connect: register: %w", err)
+	}
+
 	// Probe: verify that the root node is reachable.
 	if _, probeErr := client.GetAttr(mfsclient.RootNodeID); probeErr != nil {
 		_ = client.Close()
@@ -382,7 +388,7 @@ func (b *Backend) Delete(ctx context.Context, remote string) error {
 		return fmt.Errorf("moosefs: delete %s: resolve parent: %w", remote, err)
 	}
 
-	if attr.Mode&0o040000 != 0 {
+	if attr.IsDir() {
 		// It's a directory — use Rmdir.
 		if err := c.Rmdir(parentID, baseName); err != nil {
 			return fmt.Errorf("moosefs: delete %s: rmdir: %w", remote, err)
@@ -475,7 +481,7 @@ func (b *Backend) List(ctx context.Context, dirPath string) ([]plugins.FileInfo,
 			Path:    entryPath,
 			IsDir:   e.IsDir,
 			Size:    int64(attr.Size),
-			ModTime: time.Unix(attr.ModTime, 0),
+			ModTime: time.Unix(int64(attr.MTime), 0),
 		}
 		result = append(result, fi)
 	}
@@ -500,8 +506,8 @@ func (b *Backend) Stat(ctx context.Context, filePath string) (*plugins.FileInfo,
 		return nil, fmt.Errorf("moosefs: stat %s: getattr: %w", filePath, err)
 	}
 
-	// Infer IsDir from mode.
-	isDir := attr.Mode&0o040000 != 0
+	// Infer IsDir from mode (bits 15-12 == 2 means directory).
+	isDir := attr.IsDir()
 	// For the root node, always treat as dir.
 	if nodeID == mfsclient.RootNodeID {
 		isDir = true
@@ -521,7 +527,7 @@ func (b *Backend) Stat(ctx context.Context, filePath string) (*plugins.FileInfo,
 		Path:    strings.TrimLeft(filePath, "/"),
 		IsDir:   isDir,
 		Size:    int64(attr.Size),
-		ModTime: time.Unix(attr.ModTime, 0),
+		ModTime: time.Unix(int64(attr.MTime), 0),
 	}, nil
 }
 
@@ -652,12 +658,19 @@ func buildWatchSnapshot(ctx context.Context, b *Backend, watchPath string) map[s
 
 // ─── Quota ────────────────────────────────────────────────────────────────────
 
-// GetQuota returns (-1, -1, nil) because the minimal MooseFS FUSE protocol
-// does not expose cluster quota information in v1.5.x.
+// GetQuota queries the MooseFS master for real cluster filesystem statistics
+// via StatFS (CLTOMA_FUSE_STATFS, opcode 402).
+//
+// Returns (free, total, nil) on success.
 // Pre-condition: IsConnected() == true, else returns 0, 0, ErrNotConnected.
 func (b *Backend) GetQuota(_ context.Context) (free, total int64, err error) {
 	if !b.IsConnected() {
 		return 0, 0, ErrNotConnected
 	}
-	return -1, -1, nil
+	_, c, _, _ := b.state()
+	free, total, err = c.StatFS()
+	if err != nil {
+		return 0, 0, fmt.Errorf("moosefs: getquota: %w", err)
+	}
+	return free, total, nil
 }
