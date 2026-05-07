@@ -80,17 +80,33 @@ const (
 	MatoclFuseWriteChunkEnd uint32 = 437
 )
 
-// ─── Stub opcodes (test-only) ─────────────────────────────────────────────────
+// ─── Chunk server (CS) opcodes ────────────────────────────────────────────────
 //
-// These opcodes are NOT part of the real MooseFS protocol.
-// They are used ONLY by the in-memory fake servers in *_test.go files to
-// handle Read/Write until Phase 2 implements the real chunk-server I/O.
-// A real MooseFS master will reject these opcodes.
+// These opcodes are used between the GhostDrive client and MooseFS chunk
+// servers (default port 9420).  They are distinct from the master opcodes
+// above and must NOT be sent to the master server.
 
 const (
-	// CmdFUSEREAD / CmdFUSEWRITE are stub opcodes for fake-server test I/O.
-	// TODO(phase2): replace with CltomFuseReadChunk / CltomFuseWriteChunk
-	// and a real CSClient (csclient.go).
+	CltocsFuseRead        uint32 = 200
+	CstoclFuseReadStatus  uint32 = 201
+	CstoclFuseReadData    uint32 = 202
+	CltocsFuseWrite       uint32 = 210
+	CltocsFuseWriteData   uint32 = 211
+	CltocsFuseWriteEnd    uint32 = 212
+	CstoclFuseWriteStatus uint32 = 213
+)
+
+// ChunkSize is the MooseFS chunk size (64 MiB).
+// All chunk index calculations use this constant: index = fileOffset / ChunkSize.
+const ChunkSize uint64 = 64 * 1024 * 1024
+
+// ─── Stub opcodes (test-only, Phase 1) ───────────────────────────────────────
+//
+// These opcodes are NOT part of the real MooseFS protocol.
+// They are kept only for backward compatibility with existing fake-server
+// handlers in *_test.go files.  The production client no longer emits them.
+
+const (
 	CmdFUSEREAD  uint32 = 506
 	CmdFUSEWRITE uint32 = 507
 	AnsFUSEREAD  uint32 = 606
