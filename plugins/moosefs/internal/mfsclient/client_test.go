@@ -1045,6 +1045,39 @@ func TestRmdir_notfound(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// ─── ReadFrame security tests ─────────────────────────────────────────────────
+
+// TestReadFrame_tooLarge verifies that ReadFrame rejects a frame whose payload
+// length exceeds maxFramePayload (128 MiB), preventing server-induced OOM.
+func TestReadFrame_tooLarge(t *testing.T) {
+	// Fake server: sends a single frame with length = maxFramePayload + 1.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Write a frame header: cmd=1, length = 128MiB + 1 (0x08000001).
+		hdr := make([]byte, 8)
+		binary.BigEndian.PutUint32(hdr[0:4], 1)
+		binary.BigEndian.PutUint32(hdr[4:8], maxFramePayload+1)
+		_, _ = conn.Write(hdr)
+		// Do NOT send the payload — ReadFrame must reject before reading.
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, _, err = ReadFrame(conn)
+	require.Error(t, err, "ReadFrame must reject an oversized payload")
+	assert.Contains(t, err.Error(), "payload too large", "error message must mention payload too large")
+}
+
 // ─── Mkdir tests ──────────────────────────────────────────────────────────────
 
 func TestMkdir_createDir(t *testing.T) {

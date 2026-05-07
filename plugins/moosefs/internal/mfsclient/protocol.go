@@ -190,8 +190,13 @@ func WriteFrame(conn net.Conn, cmd uint32, payload []byte) error {
 	return nil
 }
 
+// maxFramePayload is the maximum accepted payload size (128 MiB).
+// Frames larger than this are rejected to prevent server-induced OOM.
+const maxFramePayload = 128 << 20
+
 // ReadFrame reads the next frame from conn and returns its command code and
-// payload.  Returns an error on I/O failure or malformed header.
+// payload.  Returns an error on I/O failure, malformed header, or oversized
+// payload (> maxFramePayload).
 func ReadFrame(conn net.Conn) (cmd uint32, payload []byte, err error) {
 	hdr := make([]byte, 8)
 	if _, err = io.ReadFull(conn, hdr); err != nil {
@@ -200,6 +205,10 @@ func ReadFrame(conn net.Conn) (cmd uint32, payload []byte, err error) {
 
 	cmd = binary.BigEndian.Uint32(hdr[0:4])
 	length := binary.BigEndian.Uint32(hdr[4:8])
+
+	if length > maxFramePayload {
+		return 0, nil, fmt.Errorf("mfsclient: read frame: payload too large (%d bytes)", length)
+	}
 
 	if length > 0 {
 		payload = make([]byte, length)
