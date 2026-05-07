@@ -558,62 +558,195 @@ func (c *Client) Rmdir(parentID uint32, name string) error {
 	return nil
 }
 
-// ─── Read / Write (Phase 1 stubs) ─────────────────────────────────────────────
-//
-// These methods use the stub opcodes CmdFUSEREAD / CmdFUSEWRITE (506/507)
-// which are NOT real MooseFS opcodes.  They communicate with the in-memory
-// fake servers used in *_test.go files.
-//
-// TODO(phase2): replace with real chunk-server I/O via CltomFuseReadChunk
-// (opcode 432) + CSClient (csclient.go).
+// ─── Read / Write (Phase 2 — real chunk server I/O) ──────────────────────────
 
-// Write writes data to node nodeID at offset.
-// The server stores the data; subsequent Read calls will return the written bytes.
+// Write writes data to file node nodeID at offset using the real MooseFS
+// chunk-server protocol.
+//
+// Steps:
+//  1. CLTOMA_FUSE_WRITE_CHUNK (434) → master returns ChunkInfo (CS location).
+//  2. DialCS + WriteChunk: data is sent to the chunk server.
+//  3. CLTOMA_FUSE_WRITE_CHUNK_END (436) → master commits the new file length.
 func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	req := PutUint32(nil, nodeID)
-	req = PutUint64(req, offset)
-	req = PutUint32(req, uint32(len(data)))
-	req = append(req, data...)
+	index := uint32(offset / ChunkSize)
+	chunkOffset := uint32(offset % ChunkSize)
 
-	ans, err := c.roundtrip(CmdFUSEWRITE, AnsFUSEWRITE, req)
+	// 1. Ask master for write permission and chunk location.
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, nodeID)
+	req = PutUint32(req, index)
+	req = PutUint32(req, 0) // lockid
+
+	ans, err := c.roundtrip(CltomFuseWriteChunk, MatoclFuseWriteChunk, req)
 	if err != nil {
-		return fmt.Errorf("mfsclient: Write(%d, off=%d, len=%d): %w", nodeID, offset, len(data), err)
+		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK: %w", nodeID, offset, err)
 	}
-	if _, err = checkStatus(ans); err != nil {
-		return fmt.Errorf("mfsclient: Write(%d, off=%d, len=%d): %w", nodeID, offset, len(data), err)
+
+	// A 5-byte response is an error: [msgid:32][status:8].
+	if len(ans) == 5 {
+		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK status 0x%02x", nodeID, offset, ans[4])
+	}
+
+	info, err := parseChunkInfo(ans)
+	if err != nil {
+		return fmt.Errorf("mfsclient: Write(%d, off=%d): parse chunk info: %w", nodeID, offset, err)
+	}
+	if len(info.Servers) == 0 {
+		return fmt.Errorf("mfsclient: Write(%d, off=%d): no chunk servers available", nodeID, offset)
+	}
+
+	// 2. Write data to the first available chunk server.
+	srv := info.Servers[0]
+	cs, err := DialCS(srv.IP, srv.Port)
+	if err != nil {
+		return fmt.Errorf("mfsclient: Write(%d, off=%d): dial CS: %w", nodeID, offset, err)
+	}
+	defer cs.Close()
+
+	if err := WriteChunk(cs, info.ChunkID, info.Version, chunkOffset, data); err != nil {
+		return fmt.Errorf("mfsclient: Write(%d, off=%d): write chunk: %w", nodeID, offset, err)
+	}
+
+	// 3. Commit write to master — report new total file length.
+	newLength := offset + uint64(len(data))
+	endReq := PutUint32(nil, 0) // msgid
+	endReq = PutUint64(endReq, info.ChunkID)
+	endReq = PutUint32(endReq, info.Version)
+	endReq = PutUint64(endReq, newLength)
+	endReq = PutUint32(endReq, 0) // lockid
+
+	endAns, err := c.roundtrip(CltomFuseWriteChunkEnd, MatoclFuseWriteChunkEnd, endReq)
+	if err != nil {
+		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END: %w", nodeID, offset, err)
+	}
+	if len(endAns) < 5 {
+		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END response too short (%d)", nodeID, offset, len(endAns))
+	}
+	if endAns[4] != StatusOK {
+		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END status 0x%02x", nodeID, offset, endAns[4])
 	}
 	return nil
 }
 
-// Read reads up to size bytes from node nodeID starting at offset.
-// Returns the bytes read.  An empty slice indicates EOF.
+// Read reads up to size bytes from file node nodeID starting at offset using
+// the real MooseFS chunk-server protocol.
+//
+// Steps:
+//  1. CLTOMA_FUSE_READ_CHUNK (432) → master returns ChunkInfo (CS location).
+//  2. DialCS + ReadChunk: data is fetched from the chunk server.
+//
+// Returns an empty (nil) slice when the requested offset is past the end of
+// the file (EOF).
 func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	req := PutUint32(nil, nodeID)
-	req = PutUint64(req, offset)
-	req = PutUint32(req, size)
+	index := uint32(offset / ChunkSize)
+	chunkOffset := uint32(offset % ChunkSize)
 
-	ans, err := c.roundtrip(CmdFUSEREAD, AnsFUSEREAD, req)
+	// 1. Locate chunk on master.
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, nodeID)
+	req = PutUint32(req, index)
+
+	ans, err := c.roundtrip(CltomFuseReadChunk, MatoclFuseReadChunk, req)
 	if err != nil {
-		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d, size=%d): %w", nodeID, offset, size, err)
-	}
-	rest, err := checkStatus(ans)
-	if err != nil {
-		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d, size=%d): %w", nodeID, offset, size, err)
+		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): READ_CHUNK: %w", nodeID, offset, err)
 	}
 
-	// Parse: [dataLen uint32][data bytes]
-	dataLen, off, err := ReadUint32(rest, 0)
+	// A 5-byte response is an error or EOF: [msgid:32][status:8].
+	if len(ans) == 5 {
+		status := ans[4]
+		switch status {
+		case StatusOK:
+			return nil, nil // empty chunk (EOF)
+		case StatusENOENT:
+			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): %w", nodeID, offset, plugins.ErrFileNotFound)
+		default:
+			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): status 0x%02x", nodeID, offset, status)
+		}
+	}
+
+	info, err := parseChunkInfo(ans)
 	if err != nil {
-		return nil, fmt.Errorf("mfsclient: Read(%d) dataLen: %w", nodeID, err)
+		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): parse chunk info: %w", nodeID, offset, err)
 	}
-	if off+int(dataLen) > len(rest) {
-		return nil, fmt.Errorf("mfsclient: Read(%d) data: buffer too short", nodeID)
+	if len(info.Servers) == 0 {
+		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): no chunk servers available", nodeID, offset)
 	}
-	return rest[off : off+int(dataLen)], nil
+
+	// 2. Fetch from first available chunk server.
+	srv := info.Servers[0]
+	cs, err := DialCS(srv.IP, srv.Port)
+	if err != nil {
+		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): dial CS: %w", nodeID, offset, err)
+	}
+	defer cs.Close()
+
+	return ReadChunk(cs, info.ChunkID, info.Version, chunkOffset, size)
+}
+
+// ─── Internal: chunk info parsing ────────────────────────────────────────────
+
+// parseChunkInfo decodes the common master response format for READ_CHUNK and
+// WRITE_CHUNK answers:
+//
+//	[msgid:32][chunkID:64][version:32][N:8][N × (ip:32 + port:16 + version:32)]
+func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
+	const minLen = 4 + 8 + 4 + 1 // msgid + chunkID + version + N
+	if len(ans) < minLen {
+		return nil, fmt.Errorf("response too short (%d bytes, need ≥%d)", len(ans), minLen)
+	}
+
+	off := 4 // skip msgid
+
+	chunkID, newOff, err := ReadUint64(ans, off)
+	if err != nil {
+		return nil, fmt.Errorf("chunkID: %w", err)
+	}
+	off = newOff
+
+	version, newOff, err := ReadUint32(ans, off)
+	if err != nil {
+		return nil, fmt.Errorf("version: %w", err)
+	}
+	off = newOff
+
+	n, newOff, err := ReadUint8(ans, off)
+	if err != nil {
+		return nil, fmt.Errorf("server count: %w", err)
+	}
+	off = newOff
+
+	info := &ChunkInfo{
+		ChunkID: chunkID,
+		Version: version,
+		Servers: make([]ChunkServer, 0, n),
+	}
+	for i := 0; i < int(n); i++ {
+		var srv ChunkServer
+		srv.IP, newOff, err = ReadUint32(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("server[%d] IP: %w", i, err)
+		}
+		off = newOff
+
+		srv.Port, newOff, err = ReadUint16(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("server[%d] port: %w", i, err)
+		}
+		off = newOff
+
+		srv.Version, newOff, err = ReadUint32(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("server[%d] version: %w", i, err)
+		}
+		off = newOff
+
+		info.Servers = append(info.Servers, srv)
+	}
+	return info, nil
 }
