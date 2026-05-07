@@ -115,15 +115,12 @@ func (s *Store) Clear() {
 
 // parseLine converts a raw log line into an Entry.
 //
-// Standard log format (LstdFlags = Ldate|Ltime):
+// Handles two source formats:
+//  1. Standard log package (LstdFlags): "2026/05/07 15:30:00 [source] message"
+//  2. internal/logger prefixed: "2026/05/07 15:30:00 [INFO]  [plugin/name] message"
+//     — level bracket is consumed first, then an optional deeper source bracket.
 //
-//	"2026/05/07 15:30:00 [source] message"
-//
-// Detected levels (keyword matching, case-insensitive):
-//   - error / failed / fatal / panic → ERROR
-//   - warn / warning                → WARN
-//   - debug / trace                 → DEBUG
-//   - (default)                     → INFO
+// Level detection priority: explicit level bracket ([INFO]/[ERROR]/...) > keyword matching.
 func parseLine(line string) Entry {
 	e := Entry{
 		Time:  time.Now().Format(time.RFC3339),
@@ -141,23 +138,48 @@ func parseLine(line string) Entry {
 		msg = line[20:]
 	}
 
-	// Extract [source] prefix.
+	// Extract first [bracket] token.
+	msg = strings.TrimLeft(msg, " ")
+	levelExplicit := false
 	if len(msg) > 0 && msg[0] == '[' {
+		if end := strings.Index(msg, "] "); end > 0 {
+			token := msg[1:end]
+			msg = strings.TrimLeft(msg[end+2:], " ")
+			switch strings.ToUpper(token) {
+			case "ERROR":
+				e.Level, levelExplicit = LevelError, true
+			case "WARN", "WARNING":
+				e.Level, levelExplicit = LevelWarn, true
+			case "DEBUG", "TRACE":
+				e.Level, levelExplicit = LevelDebug, true
+			case "INFO":
+				e.Level, levelExplicit = LevelInfo, true
+			default:
+				// Not a level tag — treat it as the source.
+				e.Source = token
+			}
+		}
+	}
+
+	// If the first bracket was a level tag, look for a follow-up [source] bracket.
+	if levelExplicit && len(msg) > 0 && msg[0] == '[' {
 		if end := strings.Index(msg, "] "); end > 0 {
 			e.Source = msg[1:end]
 			msg = msg[end+2:]
 		}
 	}
 
-	// Detect level from keywords.
-	lower := strings.ToLower(msg)
-	switch {
-	case containsAny(lower, "error", "failed", "fatal", "panic"):
-		e.Level = LevelError
-	case containsAny(lower, "warn", "warning"):
-		e.Level = LevelWarn
-	case containsAny(lower, "debug", "trace"):
-		e.Level = LevelDebug
+	// Keyword-based level detection (only when not set by an explicit bracket).
+	if !levelExplicit {
+		lower := strings.ToLower(msg)
+		switch {
+		case containsAny(lower, "error", "failed", "fatal", "panic"):
+			e.Level = LevelError
+		case containsAny(lower, "warn", "warning"):
+			e.Level = LevelWarn
+		case containsAny(lower, "debug", "trace"):
+			e.Level = LevelDebug
+		}
 	}
 
 	e.Message = msg

@@ -17,6 +17,7 @@ import (
 	"github.com/CCoupel/GhostDrive/internal/backends"
 	"github.com/CCoupel/GhostDrive/internal/config"
 	"github.com/CCoupel/GhostDrive/internal/logging"
+	"github.com/CCoupel/GhostDrive/internal/logger"
 	"github.com/CCoupel/GhostDrive/internal/placeholder"
 	"github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/internal/types"
@@ -85,6 +86,8 @@ func (a *App) Startup(ctx context.Context) {
 		}
 	})
 	log.SetOutput(io.MultiWriter(os.Stderr, a.logStore))
+	// Also route internal/logger (used by plugin stderr prefixWriter) to the store.
+	logger.SetExtraWriter(a.logStore)
 
 	// Load configuration
 	path := a.cfgPath

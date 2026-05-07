@@ -131,7 +131,7 @@ func checkStatus(payload []byte) ([]byte, error) {
 //
 //	[blob:64B][rcode:8=2][version:32]
 //	[ileng:32=0]   (empty instance name — accepted by all MooseFS 4.x masters)
-//	[pleng:32=2]["/\x00"]  (minimal mount path)
+//	[pleng:32=1]["/"]  (minimal mount path — no null terminator)
 //
 // Expected response (MATOCL_FUSE_REGISTER=401):
 //
@@ -153,10 +153,9 @@ func (c *Client) Register() error {
 	// ileng=0 (empty instance name — accepted by all MooseFS 4.x masters).
 	req = PutUint32(req, 0)
 
-	// pleng + minimal mount path "/\x00".
-	const mountPath = "/\x00"
-	req = PutUint32(req, uint32(len(mountPath)))
-	req = append(req, []byte(mountPath)...)
+	// pleng=1 + path="/" (no null terminator — MooseFS pleng counts bytes without null).
+	req = PutUint32(req, 1)
+	req = append(req, '/')
 
 	ans, err := c.roundtrip(CltomFuseRegister, MatoclFuseRegister, req)
 	if err != nil {
