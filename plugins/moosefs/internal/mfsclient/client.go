@@ -131,7 +131,7 @@ func checkStatus(payload []byte) ([]byte, error) {
 //
 //	[blob:64B][rcode:8=2][version:32]
 //	[ileng:32=0]   (empty instance name — accepted by all MooseFS 4.x masters)
-//	[pleng:32=1]["/"]  (minimal mount path — no null terminator)
+//	[pleng:32=2]["/\x00"]  (minimal mount path — null-terminated C-string)
 //
 // Expected response (MATOCL_FUSE_REGISTER=401):
 //
@@ -146,16 +146,19 @@ func (c *Client) Register() error {
 	req = append(req, []byte(FuseRegisterBlobACL)...) // 64 bytes blob
 	req = PutUint8(req, RegisterNewSession)            // rcode = 2
 
-	// Version: 4.56.0 = (4<<16)|(56<<8)|0 = 263168.
-	// Real servers accept any compatible client version.
-	req = PutUint32(req, 263168)
+	// Version: 4.56.0 = (4<<16)|(56<<8)|0 = 276480.
+	// Must be >= the server's minimum supported client version.
+	// MooseFS 4.x masters reject older clients (e.g. 4.4.0 = 263168) with EPERM.
+	req = PutUint32(req, 276480)
 
 	// ileng=0 (empty instance name — accepted by all MooseFS 4.x masters).
 	req = PutUint32(req, 0)
 
-	// pleng=1 + path="/" (no null terminator — MooseFS pleng counts bytes without null).
-	req = PutUint32(req, 1)
-	req = append(req, '/')
+	// pleng=2 + path="/\x00" — MooseFS master expects a null-terminated C-string;
+	// pleng includes the null byte.  Sending pleng=1 (no null) causes the server
+	// to close the connection immediately (EOF).
+	req = PutUint32(req, 2)
+	req = append(req, '/', 0)
 
 	ans, err := c.roundtrip(CltomFuseRegister, MatoclFuseRegister, req)
 	if err != nil {
@@ -164,7 +167,15 @@ func (c *Client) Register() error {
 
 	// Error response = 1 byte status.
 	if len(ans) == 1 {
-		return fmt.Errorf("mfsclient: Register: server returned status 0x%02x", ans[0])
+		switch ans[0] {
+		case 0x01:
+			// EPERM: client IP not in mfsexports.cfg, or client version too old.
+			return fmt.Errorf("mfsclient: Register: access denied (EPERM) — check mfsexports.cfg allows this host")
+		case 0x02:
+			return fmt.Errorf("mfsclient: Register: ENOENT — mount path not found on master")
+		default:
+			return fmt.Errorf("mfsclient: Register: server returned status 0x%02x", ans[0])
+		}
 	}
 	if len(ans) < 8 {
 		return fmt.Errorf("mfsclient: Register: response too short (%d bytes)", len(ans))
