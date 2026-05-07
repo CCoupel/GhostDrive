@@ -10,6 +10,10 @@ export function ClearCache() {
   return window['go']['app']['App']['ClearCache']();
 }
 
+export function ClearLogs() {
+  return window['go']['app']['App']['ClearLogs']();
+}
+
 export function Context() {
   return window['go']['app']['App']['Context']();
 }
@@ -60,6 +64,10 @@ export function GetGhostDriveRoot() {
 
 export function GetLoadedPlugins() {
   return window['go']['app']['App']['GetLoadedPlugins']();
+}
+
+export function GetLogs(arg1) {
+  return window['go']['app']['App']['GetLogs'](arg1);
 }
 
 export function GetMountPoint() {

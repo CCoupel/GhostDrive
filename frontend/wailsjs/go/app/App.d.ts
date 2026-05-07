@@ -6,10 +6,13 @@ import {types} from '../models';
 import {config} from '../models';
 import {placeholder} from '../models';
 import {loader} from '../models';
+import {logging} from '../models';
 
 export function AddBackend(arg1:plugins.BackendConfig):Promise<plugins.BackendConfig>;
 
 export function ClearCache():Promise<void>;
+
+export function ClearLogs():Promise<void>;
 
 export function Context():Promise<context.Context>;
 
@@ -31,11 +34,13 @@ export function GetConfig():Promise<config.AppConfig>;
 
 export function GetDriveStatus():Promise<placeholder.DriveStatus>;
 
-export function GetDriveStatuses():Promise<{[key: string]: placeholder.DriveStatus}>;
+export function GetDriveStatuses():Promise<Record<string, placeholder.DriveStatus>>;
 
 export function GetGhostDriveRoot():Promise<string>;
 
 export function GetLoadedPlugins():Promise<Array<loader.PluginInfo>>;
+
+export function GetLogs(arg1:number):Promise<Array<logging.Entry>>;
 
 export function GetMountPoint():Promise<string>;
 
