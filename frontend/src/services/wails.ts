@@ -95,6 +95,14 @@ export const ghostdriveApi = {
   /** Retourne les lettres de lecteur Windows disponibles (ex: ['E:', 'F:', 'G:']). */
   getAvailableDriveLetters: (): Promise<string[]> =>
     (App as any).GetAvailableDriveLetters() as Promise<string[]>,
+
+  /** Retourne les entrées de log avec ID > sinceID (0 = toutes). */
+  getLogs: (sinceID: number): Promise<import('../types/ghostdrive').LogEntry[]> =>
+    (App as any).GetLogs(sinceID) as Promise<import('../types/ghostdrive').LogEntry[]>,
+
+  /** Efface toutes les entrées de log stockées. */
+  clearLogs: (): Promise<void> =>
+    (App as any).ClearLogs() as Promise<void>,
 };
 
 export function onEvent<T extends WailsEventName>(

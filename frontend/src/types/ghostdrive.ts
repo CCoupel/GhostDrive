@@ -151,6 +151,16 @@ export interface AppConfig {
   driveLetter?: string;
 }
 
+export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
+
+export interface LogEntry {
+  id: number;
+  time: string;    // RFC3339
+  level: LogLevel;
+  source: string;  // extracted from [source] prefix
+  message: string;
+}
+
 export type WailsEventMap = {
   'sync:state-changed': SyncState;
   'sync:progress': ProgressEvent;
@@ -162,6 +172,7 @@ export type WailsEventMap = {
   'app:ready': { version: string; backendsCount: number };
   'tray:open-settings': undefined;
   'tray:action': { action: TrayAction };
+  'logs:new': LogEntry;
   /** drive:mounted — emitted after a per-backend drive is mounted (v1.1.x: includes backendID/backendName) */
   'drive:mounted': {
     backendID: string;
