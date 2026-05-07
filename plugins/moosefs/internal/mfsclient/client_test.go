@@ -103,24 +103,30 @@ func (s *fakeMFSServer) handleConn(conn net.Conn) {
 
 func (s *fakeMFSServer) dispatch(conn net.Conn, cmd uint32, payload []byte) {
 	switch cmd {
-	case CmdFUSEREADDIR:
+	case CltomFuseRegister:
+		s.handleRegister(conn, payload)
+	case CltomFuseStatFS:
+		s.handleStatFS(conn, payload)
+	case CltomFuseLookup:
+		s.handleLookup(conn, payload)
+	case CltomFuseReadDir:
 		s.handleReadDir(conn, payload)
-	case CmdFUSEGETATTR:
+	case CltomFuseGetAttr:
 		s.handleGetAttr(conn, payload)
-	case CmdFUSEMKNOD:
+	case CltomFuseMknod:
 		s.handleMknod(conn, payload)
-	case CmdFUSEMKDIR:
+	case CltomFuseMkdir:
 		s.handleMkdir(conn, payload)
-	case CmdFUSEWRITE:
+	case CmdFUSEWRITE: // Phase 1 stub opcode
 		s.handleWrite(conn, payload)
-	case CmdFUSEREAD:
+	case CmdFUSEREAD: // Phase 1 stub opcode
 		s.handleRead(conn, payload)
-	case CmdFUSEUNLINK:
+	case CltomFuseUnlink:
 		s.handleUnlink(conn, payload)
-	case CmdFUSERMDIR:
+	case CltomFuseRmdir:
 		s.handleRmdir(conn, payload)
 	default:
-		// Unknown command: respond with a generic error.
+		// Unknown command: respond with a generic error frame.
 		_ = WriteFrame(conn, cmd+100, []byte{StatusERROR})
 	}
 }
@@ -133,23 +139,143 @@ func (s *fakeMFSServer) allocID() uint32 {
 
 // ─── Handler helpers ──────────────────────────────────────────────────────────
 
-func writeOK(conn net.Conn, ans uint32, data []byte) {
-	payload := append([]byte{StatusOK}, data...)
-	_ = WriteFrame(conn, ans, payload)
+// buildTestAttrs encodes the 35-byte MooseFS wire attrs for a fakeNode.
+func buildTestAttrs(n *fakeNode) []byte {
+	var mode16 uint16
+	if n.isDir {
+		mode16 = (2 << 12) | uint16(n.mode&0x0FFF)
+	} else {
+		mode16 = (1 << 12) | uint16(n.mode&0x0FFF)
+	}
+	var buf []byte
+	buf = PutUint8(buf, 0)                         // flags
+	buf = PutUint16(buf, mode16)                   // mode
+	buf = PutUint32(buf, 0)                        // uid
+	buf = PutUint32(buf, 0)                        // gid
+	buf = PutUint32(buf, uint32(n.modTime))        // atime
+	buf = PutUint32(buf, uint32(n.modTime))        // mtime
+	buf = PutUint32(buf, uint32(n.modTime))        // ctime
+	buf = PutUint32(buf, 1)                        // nlink
+	buf = PutUint64(buf, uint64(len(n.content)))   // size
+	return buf // 35 bytes
 }
 
-func writeErr(conn net.Conn, ans uint32, status uint8) {
-	_ = WriteFrame(conn, ans, []byte{status})
+// writeSuccess sends a response frame with [msgid:32][data...].
+func writeSuccess(conn net.Conn, ans uint32, msgid uint32, data []byte) {
+	buf := PutUint32(nil, msgid)
+	buf = append(buf, data...)
+	_ = WriteFrame(conn, ans, buf)
+}
+
+// writeStatusReply sends [msgid:32][status:8].
+func writeStatusReply(conn net.Conn, ans uint32, msgid uint32, status uint8) {
+	buf := PutUint32(nil, msgid)
+	buf = append(buf, status)
+	_ = WriteFrame(conn, ans, buf)
 }
 
 // ─── Command handlers ─────────────────────────────────────────────────────────
 
-func (s *fakeMFSServer) handleReadDir(conn net.Conn, payload []byte) {
-	nodeID, _, err := ReadUint32(payload, 0)
-	if err != nil {
-		writeErr(conn, AnsFUSEREADDIR, StatusERROR)
+func (s *fakeMFSServer) handleRegister(conn net.Conn, payload []byte) {
+	// [blob:64B][rcode:8][...] — we only care about rcode for NEWSESSION
+	if len(payload) < 65 {
+		_ = WriteFrame(conn, MatoclFuseRegister, []byte{StatusERROR})
 		return
 	}
+	rcode := payload[64]
+	if rcode == RegisterNewSession {
+		// Build a success response:
+		// [version:32][sessionId:32][metaId:64][sesflags:8][rootuid:32][rootgid:32]
+		// [mapalluid:32][mapallgid:32][mingoal:8][maxgoal:8][mintrashtime:32][maxtrashtime:32]
+		var resp []byte
+		resp = PutUint32(resp, 263168) // version
+		resp = PutUint32(resp, 42)     // sessionId
+		resp = PutUint64(resp, 0)      // metaId
+		resp = PutUint8(resp, 0)       // sesflags
+		resp = PutUint32(resp, 0)      // rootuid
+		resp = PutUint32(resp, 0)      // rootgid
+		resp = PutUint32(resp, 0)      // mapalluid
+		resp = PutUint32(resp, 0)      // mapallgid
+		resp = PutUint8(resp, 1)       // mingoal
+		resp = PutUint8(resp, 9)       // maxgoal
+		resp = PutUint32(resp, 0)      // mintrashtime
+		resp = PutUint32(resp, 0)      // maxtrashtime
+		_ = WriteFrame(conn, MatoclFuseRegister, resp)
+		return
+	}
+	_ = WriteFrame(conn, MatoclFuseRegister, []byte{StatusERROR})
+}
+
+func (s *fakeMFSServer) handleStatFS(conn net.Conn, payload []byte) {
+	var msgid uint32
+	if len(payload) >= 4 {
+		msgid = binary.BigEndian.Uint32(payload[0:4])
+	}
+	// Return: 1TB total, 500GB avail, 0 trash, 0 sustained, 1M inodes
+	const TB = int64(1) << 40
+	const GB500 = int64(500) << 30
+	var resp []byte
+	resp = PutUint32(resp, msgid)
+	resp = PutUint64(resp, uint64(TB))
+	resp = PutUint64(resp, uint64(GB500))
+	resp = PutUint64(resp, 0) // trashspace
+	resp = PutUint64(resp, 0) // sustainedspace
+	resp = PutUint32(resp, 1_000_000) // inodes
+	_ = WriteFrame(conn, MatoclFuseStatFS, resp)
+}
+
+func (s *fakeMFSServer) handleLookup(conn net.Conn, payload []byte) {
+	// [msgid:32][parent:32][namelen:8][name][uid:32][gcnt:32][gid:32]
+	var err error
+	var msgid, parentID uint32
+	var off int
+
+	msgid, off, err = ReadUint32(payload, 0)
+	if err != nil {
+		writeStatusReply(conn, MatoclFuseLookup, 0, StatusERROR)
+		return
+	}
+	parentID, off, err = ReadUint32(payload, off)
+	if err != nil {
+		writeStatusReply(conn, MatoclFuseLookup, msgid, StatusERROR)
+		return
+	}
+	name, _, err := ReadStringU8(payload, off)
+	if err != nil {
+		writeStatusReply(conn, MatoclFuseLookup, msgid, StatusERROR)
+		return
+	}
+
+	s.mu.Lock()
+	var found *fakeNode
+	for _, n := range s.nodes {
+		if n.parent == parentID && n.name == name {
+			found = n
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if found == nil {
+		writeStatusReply(conn, MatoclFuseLookup, msgid, StatusENOENT)
+		return
+	}
+
+	// Success: [msgid:32][inode:32][attrs:35]
+	attrs := buildTestAttrs(found)
+	data := PutUint32(nil, found.nodeID)
+	data = append(data, attrs...)
+	writeSuccess(conn, MatoclFuseLookup, msgid, data)
+}
+
+func (s *fakeMFSServer) handleReadDir(conn net.Conn, payload []byte) {
+	// [msgid:32][parent:32][uid:32][gcnt:32][gid:32][flags:8][maxentries:32][skipcnt:64]
+	if len(payload) < 8 {
+		writeStatusReply(conn, MatoclFuseReadDir, 0, StatusERROR)
+		return
+	}
+	msgid := binary.BigEndian.Uint32(payload[0:4])
+	nodeID := binary.BigEndian.Uint32(payload[4:8])
 
 	s.mu.Lock()
 	parent, ok := s.nodes[nodeID]
@@ -157,118 +283,139 @@ func (s *fakeMFSServer) handleReadDir(conn net.Conn, payload []byte) {
 	if ok && parent.isDir {
 		for _, n := range s.nodes {
 			if n.parent == nodeID && n.nodeID != RootNodeID {
-				children = append(children, n)
+				cp := *n
+				children = append(children, &cp)
 			}
 		}
 	}
 	s.mu.Unlock()
 
 	if !ok {
-		writeErr(conn, AnsFUSEREADDIR, StatusENOENT)
+		writeStatusReply(conn, MatoclFuseReadDir, msgid, StatusENOENT)
 		return
 	}
 
-	// Encode: [count uint32][entries...]
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, uint32(len(children)))
+	// Encode: [msgid:32][entries...] where each = [namelen:8][name][inode:32][type:8]
+	var data []byte
 	for _, child := range children {
-		buf = PutUint32(buf, child.nodeID)
+		data = PutUint8(data, uint8(len(child.name)))
+		data = append(data, []byte(child.name)...)
+		data = PutUint32(data, child.nodeID)
+		var nodeType uint8
 		if child.isDir {
-			buf = append(buf, 1)
+			nodeType = 2
 		} else {
-			buf = append(buf, 0)
+			nodeType = 1
 		}
-		buf = PutString(buf, child.name)
+		data = PutUint8(data, nodeType)
 	}
-	writeOK(conn, AnsFUSEREADDIR, buf)
+	writeSuccess(conn, MatoclFuseReadDir, msgid, data)
 }
 
 func (s *fakeMFSServer) handleGetAttr(conn net.Conn, payload []byte) {
-	nodeID, _, err := ReadUint32(payload, 0)
-	if err != nil {
-		writeErr(conn, AnsFUSEGETATTR, StatusERROR)
+	// [msgid:32][inode:32]
+	if len(payload) < 8 {
+		writeStatusReply(conn, MatoclFuseGetAttr, 0, StatusERROR)
 		return
 	}
+	msgid := binary.BigEndian.Uint32(payload[0:4])
+	nodeID := binary.BigEndian.Uint32(payload[4:8])
 
 	s.mu.Lock()
 	n, ok := s.nodes[nodeID]
 	s.mu.Unlock()
 
 	if !ok {
-		writeErr(conn, AnsFUSEGETATTR, StatusENOENT)
+		writeStatusReply(conn, MatoclFuseGetAttr, msgid, StatusENOENT)
 		return
 	}
 
-	// Encode: [nodeID uint32][size uint64][mode uint32][modtime int64]
-	buf := PutUint32(nil, n.nodeID)
-	buf = PutUint64(buf, uint64(len(n.content)))
-	buf = PutUint32(buf, n.mode)
-	buf = PutInt64(buf, n.modTime)
-	writeOK(conn, AnsFUSEGETATTR, buf)
+	// Success: [msgid:32][attrs:35]
+	attrs := buildTestAttrs(n)
+	writeSuccess(conn, MatoclFuseGetAttr, msgid, attrs)
 }
 
 func (s *fakeMFSServer) handleMknod(conn net.Conn, payload []byte) {
-	parentID, off, err := ReadUint32(payload, 0)
+	// [msgid:32][parent:32][namelen:8][name][type:8][mode:16][umask:16][uid:32][gcnt:32][gid:32][rdev:32]
+	var err error
+	var msgid, parentID uint32
+	var off int
+
+	msgid, off, err = ReadUint32(payload, 0)
 	if err != nil {
-		writeErr(conn, AnsFUSEMKNOD, StatusERROR)
+		writeStatusReply(conn, MatoclFuseMknod, 0, StatusERROR)
 		return
 	}
-	mode, off, err := ReadUint32(payload, off)
+	parentID, off, err = ReadUint32(payload, off)
 	if err != nil {
-		writeErr(conn, AnsFUSEMKNOD, StatusERROR)
+		writeStatusReply(conn, MatoclFuseMknod, msgid, StatusERROR)
 		return
 	}
-	name, _, err := ReadString(payload, off)
+	name, off, err := ReadStringU8(payload, off)
 	if err != nil {
-		writeErr(conn, AnsFUSEMKNOD, StatusERROR)
+		writeStatusReply(conn, MatoclFuseMknod, msgid, StatusERROR)
 		return
 	}
+	// skip type(1) + mode(2) + umask(2)
+	off += 5
+	// skip uid(4) + gcnt(4) + gid(4) + rdev(4) — not needed for fake
+	_ = off
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if _, ok := s.nodes[parentID]; !ok {
-		writeErr(conn, AnsFUSEMKNOD, StatusENOENT)
+		writeStatusReply(conn, MatoclFuseMknod, msgid, StatusENOENT)
 		return
 	}
 
-	// Check for duplicate
+	// Check for duplicate — return existing node (idempotent in fake)
 	for _, n := range s.nodes {
 		if n.parent == parentID && n.name == name {
-			// Return existing nodeID (idempotent)
-			buf := PutUint32(nil, n.nodeID)
-			writeOK(conn, AnsFUSEMKNOD, buf)
+			attrs := buildTestAttrs(n)
+			data := PutUint32(nil, n.nodeID)
+			data = append(data, attrs...)
+			writeSuccess(conn, MatoclFuseMknod, msgid, data)
 			return
 		}
 	}
 
 	newID := s.allocID()
-	s.nodes[newID] = &fakeNode{
+	newNode := &fakeNode{
 		nodeID:  newID,
 		name:    name,
 		parent:  parentID,
 		isDir:   false,
-		mode:    mode,
+		mode:    0o644,
 		modTime: time.Now().Unix(),
 	}
-	buf := PutUint32(nil, newID)
-	writeOK(conn, AnsFUSEMKNOD, buf)
+	s.nodes[newID] = newNode
+
+	attrs := buildTestAttrs(newNode)
+	data := PutUint32(nil, newID)
+	data = append(data, attrs...)
+	writeSuccess(conn, MatoclFuseMknod, msgid, data)
 }
 
 func (s *fakeMFSServer) handleMkdir(conn net.Conn, payload []byte) {
-	parentID, off, err := ReadUint32(payload, 0)
+	// [msgid:32][parent:32][namelen:8][name][mode:16][umask:16][uid:32][gcnt:32][gid:32][copysgid:8]
+	var err error
+	var msgid, parentID uint32
+	var off int
+
+	msgid, off, err = ReadUint32(payload, 0)
 	if err != nil {
-		writeErr(conn, AnsFUSEMKDIR, StatusERROR)
+		writeStatusReply(conn, MatoclFuseMkdir, 0, StatusERROR)
 		return
 	}
-	mode, off, err := ReadUint32(payload, off)
+	parentID, off, err = ReadUint32(payload, off)
 	if err != nil {
-		writeErr(conn, AnsFUSEMKDIR, StatusERROR)
+		writeStatusReply(conn, MatoclFuseMkdir, msgid, StatusERROR)
 		return
 	}
-	name, _, err := ReadString(payload, off)
+	name, _, err := ReadStringU8(payload, off)
 	if err != nil {
-		writeErr(conn, AnsFUSEMKDIR, StatusERROR)
+		writeStatusReply(conn, MatoclFuseMkdir, msgid, StatusERROR)
 		return
 	}
 
@@ -276,50 +423,59 @@ func (s *fakeMFSServer) handleMkdir(conn net.Conn, payload []byte) {
 	defer s.mu.Unlock()
 
 	if _, ok := s.nodes[parentID]; !ok {
-		writeErr(conn, AnsFUSEMKDIR, StatusENOENT)
+		writeStatusReply(conn, MatoclFuseMkdir, msgid, StatusENOENT)
 		return
 	}
 
 	// Check for duplicate
 	for _, n := range s.nodes {
 		if n.parent == parentID && n.name == name && n.isDir {
-			buf := PutUint32(nil, n.nodeID)
-			writeOK(conn, AnsFUSEMKDIR, buf)
+			attrs := buildTestAttrs(n)
+			data := PutUint32(nil, n.nodeID)
+			data = append(data, attrs...)
+			writeSuccess(conn, MatoclFuseMkdir, msgid, data)
 			return
 		}
 	}
 
 	newID := s.allocID()
-	s.nodes[newID] = &fakeNode{
+	newNode := &fakeNode{
 		nodeID:  newID,
 		name:    name,
 		parent:  parentID,
 		isDir:   true,
-		mode:    mode,
+		mode:    0o755,
 		modTime: time.Now().Unix(),
 	}
-	buf := PutUint32(nil, newID)
-	writeOK(conn, AnsFUSEMKDIR, buf)
+	s.nodes[newID] = newNode
+
+	attrs := buildTestAttrs(newNode)
+	data := PutUint32(nil, newID)
+	data = append(data, attrs...)
+	writeSuccess(conn, MatoclFuseMkdir, msgid, data)
 }
 
+// handleWrite uses the Phase 1 stub protocol (opcode 507 / ans 607).
+// Format: [nodeID:32][offset:64][dataLen:32][data:dataLen]
+// Response: [status:8]
 func (s *fakeMFSServer) handleWrite(conn net.Conn, payload []byte) {
 	nodeID, off, err := ReadUint32(payload, 0)
 	if err != nil {
-		writeErr(conn, AnsFUSEWRITE, StatusERROR)
+		_ = WriteFrame(conn, AnsFUSEWRITE, []byte{StatusERROR})
 		return
 	}
 	offset, off, err := ReadUint64(payload, off)
 	if err != nil {
-		writeErr(conn, AnsFUSEWRITE, StatusERROR)
+		_ = WriteFrame(conn, AnsFUSEWRITE, []byte{StatusERROR})
 		return
 	}
 	dataLen, off, err := ReadUint32(payload, off)
 	if err != nil {
-		writeErr(conn, AnsFUSEWRITE, StatusERROR)
+		_ = WriteFrame(conn, AnsFUSEWRITE, []byte{StatusERROR})
 		return
 	}
 	if off+int(dataLen) > len(payload) {
-		writeErr(conn, AnsFUSEWRITE, StatusERROR)
+		_ = WriteFrame(conn, AnsFUSEWRITE, []byte{StatusERROR})
 		return
 	}
 	data := payload[off : off+int(dataLen)]
@@ -329,7 +485,6 @@ func (s *fakeMFSServer) handleWrite(conn net.Conn, payload []byte) {
 	if ok && !n.isDir {
 		end := offset + uint64(len(data))
 		if end > uint64(len(n.content)) {
-			// Extend content slice
 			newContent := make([]byte, end)
 			copy(newContent, n.content)
 			n.content = newContent
@@ -340,26 +495,29 @@ func (s *fakeMFSServer) handleWrite(conn net.Conn, payload []byte) {
 	s.mu.Unlock()
 
 	if !ok {
-		writeErr(conn, AnsFUSEWRITE, StatusENOENT)
+		_ = WriteFrame(conn, AnsFUSEWRITE, []byte{StatusENOENT})
 		return
 	}
-	writeOK(conn, AnsFUSEWRITE, nil)
+	_ = WriteFrame(conn, AnsFUSEWRITE, []byte{StatusOK})
 }
 
+// handleRead uses the Phase 1 stub protocol (opcode 506 / ans 606).
+// Format: [nodeID:32][offset:64][size:32]
+// Response: [status:8][dataLen:32][data:dataLen]
 func (s *fakeMFSServer) handleRead(conn net.Conn, payload []byte) {
 	nodeID, off, err := ReadUint32(payload, 0)
 	if err != nil {
-		writeErr(conn, AnsFUSEREAD, StatusERROR)
+		_ = WriteFrame(conn, AnsFUSEREAD, []byte{StatusERROR})
 		return
 	}
 	offset, off, err := ReadUint64(payload, off)
 	if err != nil {
-		writeErr(conn, AnsFUSEREAD, StatusERROR)
+		_ = WriteFrame(conn, AnsFUSEREAD, []byte{StatusERROR})
 		return
 	}
 	size, _, err := ReadUint32(payload, off)
 	if err != nil {
-		writeErr(conn, AnsFUSEREAD, StatusERROR)
+		_ = WriteFrame(conn, AnsFUSEREAD, []byte{StatusERROR})
 		return
 	}
 
@@ -379,25 +537,35 @@ func (s *fakeMFSServer) handleRead(conn net.Conn, payload []byte) {
 	s.mu.Unlock()
 
 	if !ok {
-		writeErr(conn, AnsFUSEREAD, StatusENOENT)
+		_ = WriteFrame(conn, AnsFUSEREAD, []byte{StatusENOENT})
 		return
 	}
 
-	// Encode: [dataLen uint32][data bytes]
-	buf := PutUint32(nil, uint32(len(chunk)))
+	buf := []byte{StatusOK}
+	buf = PutUint32(buf, uint32(len(chunk)))
 	buf = append(buf, chunk...)
-	writeOK(conn, AnsFUSEREAD, buf)
+	_ = WriteFrame(conn, AnsFUSEREAD, buf)
 }
 
 func (s *fakeMFSServer) handleUnlink(conn net.Conn, payload []byte) {
-	parentID, off, err := ReadUint32(payload, 0)
+	// [msgid:32][parent:32][namelen:8][name][uid:32][gcnt:32][gid:32]
+	var err error
+	var msgid, parentID uint32
+	var off int
+
+	msgid, off, err = ReadUint32(payload, 0)
 	if err != nil {
-		writeErr(conn, AnsFUSEUNLINK, StatusERROR)
+		writeStatusReply(conn, MatoclFuseUnlink, 0, StatusERROR)
 		return
 	}
-	name, _, err := ReadString(payload, off)
+	parentID, off, err = ReadUint32(payload, off)
 	if err != nil {
-		writeErr(conn, AnsFUSEUNLINK, StatusERROR)
+		writeStatusReply(conn, MatoclFuseUnlink, msgid, StatusERROR)
+		return
+	}
+	name, _, err := ReadStringU8(payload, off)
+	if err != nil {
+		writeStatusReply(conn, MatoclFuseUnlink, msgid, StatusERROR)
 		return
 	}
 
@@ -407,22 +575,32 @@ func (s *fakeMFSServer) handleUnlink(conn net.Conn, payload []byte) {
 	for id, n := range s.nodes {
 		if n.parent == parentID && n.name == name && !n.isDir {
 			delete(s.nodes, id)
-			writeOK(conn, AnsFUSEUNLINK, nil)
+			writeStatusReply(conn, MatoclFuseUnlink, msgid, StatusOK)
 			return
 		}
 	}
-	writeErr(conn, AnsFUSEUNLINK, StatusENOENT)
+	writeStatusReply(conn, MatoclFuseUnlink, msgid, StatusENOENT)
 }
 
 func (s *fakeMFSServer) handleRmdir(conn net.Conn, payload []byte) {
-	parentID, off, err := ReadUint32(payload, 0)
+	// [msgid:32][parent:32][namelen:8][name][uid:32][gcnt:32][gid:32]
+	var err error
+	var msgid, parentID uint32
+	var off int
+
+	msgid, off, err = ReadUint32(payload, 0)
 	if err != nil {
-		writeErr(conn, AnsFUSERMDIR, StatusERROR)
+		writeStatusReply(conn, MatoclFuseRmdir, 0, StatusERROR)
 		return
 	}
-	name, _, err := ReadString(payload, off)
+	parentID, off, err = ReadUint32(payload, off)
 	if err != nil {
-		writeErr(conn, AnsFUSERMDIR, StatusERROR)
+		writeStatusReply(conn, MatoclFuseRmdir, msgid, StatusERROR)
+		return
+	}
+	name, _, err := ReadStringU8(payload, off)
+	if err != nil {
+		writeStatusReply(conn, MatoclFuseRmdir, msgid, StatusERROR)
 		return
 	}
 
@@ -431,19 +609,19 @@ func (s *fakeMFSServer) handleRmdir(conn net.Conn, payload []byte) {
 
 	for id, n := range s.nodes {
 		if n.parent == parentID && n.name == name && n.isDir {
-			// Check not empty
+			// Check not empty.
 			for _, child := range s.nodes {
 				if child.parent == id {
-					writeErr(conn, AnsFUSERMDIR, StatusENOTEMPT)
+					writeStatusReply(conn, MatoclFuseRmdir, msgid, StatusENOTEMPTY)
 					return
 				}
 			}
 			delete(s.nodes, id)
-			writeOK(conn, AnsFUSERMDIR, nil)
+			writeStatusReply(conn, MatoclFuseRmdir, msgid, StatusOK)
 			return
 		}
 	}
-	writeErr(conn, AnsFUSERMDIR, StatusENOENT)
+	writeStatusReply(conn, MatoclFuseRmdir, msgid, StatusENOENT)
 }
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -463,6 +641,9 @@ func newTestClient(t *testing.T) (*Client, *fakeMFSServer) {
 	c, err := Dial(host, portNum)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
+
+	// Register with the fake server.
+	require.NoError(t, c.Register())
 	return c, srv
 }
 
@@ -502,6 +683,67 @@ func TestDial_refused(t *testing.T) {
 	assert.Error(t, dialErr)
 }
 
+// ─── Register tests ───────────────────────────────────────────────────────────
+
+func TestRegister_success(t *testing.T) {
+	srv := newFakeMFSServer()
+	addr := srv.Start()
+	t.Cleanup(srv.Stop)
+
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	var port int
+	_, err = fmt.Sscanf(portStr, "%d", &port)
+	require.NoError(t, err)
+
+	c, err := Dial(host, port)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	err = c.Register()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(42), c.SessionID(), "sessionID should be 42 from fake server")
+}
+
+// ─── StatFS tests ─────────────────────────────────────────────────────────────
+
+func TestStatFS_values(t *testing.T) {
+	c, _ := newTestClient(t)
+
+	free, total, err := c.StatFS()
+	require.NoError(t, err)
+
+	const TB = int64(1) << 40
+	const GB500 = int64(500) << 30
+
+	assert.Equal(t, GB500, free, "free should be 500GB")
+	assert.Equal(t, TB, total, "total should be 1TB")
+}
+
+// ─── Lookup tests ─────────────────────────────────────────────────────────────
+
+func TestLookup_found(t *testing.T) {
+	c, _ := newTestClient(t)
+
+	// Create a directory first.
+	nodeID, err := c.Mkdir(RootNodeID, "lookupdir", 0o755)
+	require.NoError(t, err)
+	assert.Greater(t, nodeID, uint32(1))
+
+	// Lookup by name.
+	found, err := c.Lookup(RootNodeID, "lookupdir")
+	require.NoError(t, err)
+	assert.Equal(t, nodeID, found)
+}
+
+func TestLookup_notfound(t *testing.T) {
+	c, _ := newTestClient(t)
+
+	_, err := c.Lookup(RootNodeID, "does-not-exist")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, plugins.ErrFileNotFound)
+}
+
 // ─── ReadDir tests ────────────────────────────────────────────────────────────
 
 func TestReadDir_root(t *testing.T) {
@@ -516,7 +758,7 @@ func TestReadDir_root(t *testing.T) {
 func TestReadDir_afterMkdir(t *testing.T) {
 	c, _ := newTestClient(t)
 
-	// Create a directory
+	// Create a directory.
 	nodeID, err := c.Mkdir(RootNodeID, "testdir", 0o755)
 	require.NoError(t, err)
 	assert.Greater(t, nodeID, uint32(1))
@@ -537,6 +779,7 @@ func TestGetAttr_root(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, attr)
 	assert.Equal(t, RootNodeID, attr.NodeID)
+	assert.True(t, attr.IsDir())
 }
 
 func TestGetAttr_notfound(t *testing.T) {
@@ -550,7 +793,7 @@ func TestGetAttr_notfound(t *testing.T) {
 func TestGetAttr_file(t *testing.T) {
 	c, _ := newTestClient(t)
 
-	// Create a file and write some data
+	// Create a file and write some data.
 	nodeID, err := c.Mknod(RootNodeID, "test.txt", 0o644)
 	require.NoError(t, err)
 
@@ -560,6 +803,7 @@ func TestGetAttr_file(t *testing.T) {
 	attr, err := c.GetAttr(nodeID)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(len(data)), attr.Size)
+	assert.False(t, attr.IsDir())
 }
 
 // ─── Mknod tests ──────────────────────────────────────────────────────────────
@@ -571,7 +815,7 @@ func TestMknod_createFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Greater(t, nodeID, RootNodeID)
 
-	// Verify the file is listed
+	// Verify the file is listed.
 	entries, err := c.ReadDir(RootNodeID)
 	require.NoError(t, err)
 	found := false
@@ -598,7 +842,7 @@ func TestWrite_appendChunks(t *testing.T) {
 	require.NoError(t, c.Write(nodeID, 0, chunk1))
 	require.NoError(t, c.Write(nodeID, uint64(len(chunk1)), chunk2))
 
-	// Verify size
+	// Verify size.
 	attr, err := c.GetAttr(nodeID)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(len(chunk1)+len(chunk2)), attr.Size)
@@ -627,7 +871,7 @@ func TestRead_eof(t *testing.T) {
 	content := []byte("short")
 	require.NoError(t, c.Write(nodeID, 0, content))
 
-	// Reading beyond EOF should return empty
+	// Reading beyond EOF should return empty.
 	got, err := c.Read(nodeID, uint64(len(content))*2, 1024)
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -644,7 +888,7 @@ func TestUnlink_file(t *testing.T) {
 
 	require.NoError(t, c.Unlink(RootNodeID, "to_delete.txt"))
 
-	// GetAttr on deleted node must return not-found
+	// GetAttr on deleted node must return not-found.
 	_, err = c.GetAttr(nodeID)
 	assert.ErrorIs(t, err, plugins.ErrFileNotFound)
 }
@@ -689,4 +933,5 @@ func TestMkdir_createDir(t *testing.T) {
 	attr, err := c.GetAttr(nodeID)
 	require.NoError(t, err)
 	assert.Equal(t, nodeID, attr.NodeID)
+	assert.True(t, attr.IsDir())
 }
