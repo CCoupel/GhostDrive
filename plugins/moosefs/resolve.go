@@ -6,7 +6,6 @@ import (
 	"path"
 	"strings"
 
-	"github.com/CCoupel/GhostDrive/plugins"
 	"github.com/CCoupel/GhostDrive/plugins/moosefs/internal/mfsclient"
 )
 
@@ -22,6 +21,9 @@ import (
 // Returns mfsclient.RootNodeID when the combined path is empty (i.e. "/"
 // or ".").
 // Returns plugins.ErrFileNotFound (wrapped) when any path component is missing.
+//
+// Uses Lookup (CLTOMA_FUSE_LOOKUP, opcode 406) for O(1) per-segment resolution
+// instead of the previous ReadDir+scan approach.
 func resolvePath(ctx context.Context, c *mfsclient.Client, subDir, relPath string) (uint32, error) {
 	// Combine and clean the path.
 	combined := path.Join(subDir, relPath)
@@ -43,22 +45,11 @@ func resolvePath(ctx context.Context, c *mfsclient.Client, subDir, relPath strin
 			return 0, fmt.Errorf("moosefs: resolvePath %q: %w", combined, err)
 		}
 
-		entries, err := c.ReadDir(nodeID)
+		childID, err := c.Lookup(nodeID, seg)
 		if err != nil {
 			return 0, fmt.Errorf("moosefs: resolvePath %q segment %q: %w", combined, seg, err)
 		}
-
-		found := false
-		for _, e := range entries {
-			if e.Name == seg {
-				nodeID = e.NodeID
-				found = true
-				break
-			}
-		}
-		if !found {
-			return 0, fmt.Errorf("moosefs: resolvePath %q segment %q: %w", combined, seg, plugins.ErrFileNotFound)
-		}
+		nodeID = childID
 	}
 
 	return nodeID, nil
