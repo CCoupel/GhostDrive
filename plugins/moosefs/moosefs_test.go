@@ -42,6 +42,182 @@ type integNode struct {
 	modTime int64
 }
 
+// ─── integFakeCSServer ────────────────────────────────────────────────────────
+
+// integFakeCSServer is an in-memory MooseFS chunk server for moosefs_test.go.
+// It stores chunk data in memory and speaks the real CS protocol (opcodes 200-213).
+type integFakeCSServer struct {
+	listener net.Listener
+	mu       sync.Mutex
+	chunks   map[uint64][]byte
+	done     chan struct{}
+}
+
+func newIntegFakeCSServer() *integFakeCSServer {
+	return &integFakeCSServer{
+		chunks: make(map[uint64][]byte),
+		done:   make(chan struct{}),
+	}
+}
+
+// start binds to a random localhost port, starts accepting, and registers a
+// cleanup with t.  Returns (ip uint32 BE, port uint16).
+func (s *integFakeCSServer) start(t *testing.T) (ip uint32, port uint16) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	s.listener = ln
+	go s.acceptLoop()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-s.done
+	})
+	addr := ln.Addr().(*net.TCPAddr)
+	ipBytes := addr.IP.To4()
+	return binary.BigEndian.Uint32(ipBytes), uint16(addr.Port)
+}
+
+func (s *integFakeCSServer) setChunkData(chunkID uint64, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	s.chunks[chunkID] = buf
+}
+
+func (s *integFakeCSServer) getChunkData(chunkID uint64) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src := s.chunks[chunkID]
+	if src == nil {
+		return nil
+	}
+	dst := make([]byte, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func (s *integFakeCSServer) storeBlock(chunkID uint64, offset uint32, block []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	end := offset + uint32(len(block))
+	if uint32(len(s.chunks[chunkID])) < end {
+		newBuf := make([]byte, end)
+		copy(newBuf, s.chunks[chunkID])
+		s.chunks[chunkID] = newBuf
+	}
+	copy(s.chunks[chunkID][offset:], block)
+}
+
+func (s *integFakeCSServer) readRange(chunkID uint64, offset, size uint32) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data := s.chunks[chunkID]
+	if offset >= uint32(len(data)) {
+		return nil
+	}
+	end := offset + size
+	if end > uint32(len(data)) {
+		end = uint32(len(data))
+	}
+	out := make([]byte, end-offset)
+	copy(out, data[offset:end])
+	return out
+}
+
+func (s *integFakeCSServer) acceptLoop() {
+	defer close(s.done)
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			return
+		}
+		go s.handleConn(conn)
+	}
+}
+
+func (s *integFakeCSServer) handleConn(conn net.Conn) {
+	defer conn.Close()
+	cmd, payload, err := mfsclient.ReadFrame(conn)
+	if err != nil {
+		return
+	}
+	switch cmd {
+	case mfsclient.CltocsFuseRead:
+		s.serveRead(conn, payload)
+	case mfsclient.CltocsFuseWrite:
+		s.serveWrite(conn, payload)
+	}
+}
+
+func (s *integFakeCSServer) serveRead(conn net.Conn, payload []byte) {
+	if len(payload) < 20 {
+		return
+	}
+	chunkID, off, _ := mfsclient.ReadUint64(payload, 0)
+	_, off, _ = mfsclient.ReadUint32(payload, off)
+	offset, off, _ := mfsclient.ReadUint32(payload, off)
+	size, _, _ := mfsclient.ReadUint32(payload, off)
+
+	chunk := s.readRange(chunkID, offset, size)
+	if len(chunk) > 0 {
+		blockNum := uint16(offset / 65536)
+		blockOff := uint16(offset % 65536)
+		var resp []byte
+		resp = mfsclient.PutUint64(resp, chunkID)
+		resp = mfsclient.PutUint16(resp, blockNum)
+		resp = mfsclient.PutUint16(resp, blockOff)
+		resp = mfsclient.PutUint32(resp, uint32(len(chunk)))
+		resp = mfsclient.PutUint32(resp, 0) // CRC omitted in fake (not validated)
+		resp = append(resp, chunk...)
+		_ = mfsclient.WriteFrame(conn, mfsclient.CstoclFuseReadData, resp)
+	}
+	var status []byte
+	status = mfsclient.PutUint64(status, chunkID)
+	status = mfsclient.PutUint8(status, mfsclient.StatusOK)
+	_ = mfsclient.WriteFrame(conn, mfsclient.CstoclFuseReadStatus, status)
+}
+
+func (s *integFakeCSServer) serveWrite(conn net.Conn, payload []byte) {
+	if len(payload) < 13 {
+		return
+	}
+	chunkID, _, _ := mfsclient.ReadUint64(payload, 0)
+	for {
+		cmd, data, err := mfsclient.ReadFrame(conn)
+		if err != nil {
+			return
+		}
+		switch cmd {
+		case mfsclient.CltocsFuseWriteData:
+			if len(data) < 20 {
+				return
+			}
+			blockNum, off, _ := mfsclient.ReadUint16(data, 8)
+			blockOff, off, _ := mfsclient.ReadUint16(data, off)
+			size, off, _ := mfsclient.ReadUint32(data, off)
+			off += 4 // skip CRC
+			if off+int(size) > len(data) {
+				return
+			}
+			block := data[off : off+int(size)]
+			dataOffset := uint32(blockNum)*65536 + uint32(blockOff)
+			s.storeBlock(chunkID, dataOffset, block)
+		case mfsclient.CltocsFuseWriteEnd:
+			var resp []byte
+			resp = mfsclient.PutUint64(resp, chunkID)
+			resp = mfsclient.PutUint32(resp, 0)
+			resp = mfsclient.PutUint8(resp, mfsclient.StatusOK)
+			_ = mfsclient.WriteFrame(conn, mfsclient.CstoclFuseWriteStatus, resp)
+			return
+		default:
+			return
+		}
+	}
+}
+
+// ─── integFakeServer ──────────────────────────────────────────────────────────
+
 // integFakeServer is a minimal in-memory MooseFS TCP server.
 type integFakeServer struct {
 	ln     net.Listener
@@ -49,6 +225,9 @@ type integFakeServer struct {
 	nodes  map[uint32]*integNode
 	nextID atomic.Uint32
 	done   chan struct{}
+	cs     *integFakeCSServer // embedded chunk server
+	csIP   uint32             // CS listen IP (uint32 big-endian)
+	csPort uint16             // CS listen port
 }
 
 // newIntegFakeServer creates a fake server seeded with the root node only.
@@ -56,6 +235,7 @@ func newIntegFakeServer() *integFakeServer {
 	s := &integFakeServer{
 		nodes: make(map[uint32]*integNode),
 		done:  make(chan struct{}),
+		cs:    newIntegFakeCSServer(),
 	}
 	s.nextID.Store(2)
 	s.nodes[mfsclient.RootNodeID] = &integNode{
@@ -69,9 +249,13 @@ func newIntegFakeServer() *integFakeServer {
 	return s
 }
 
-// start binds to a random port, accepts, and returns the "host:port" string.
+// start binds to a random port, starts the embedded CS, accepts master
+// connections, and returns the "host:port" address.
 func (s *integFakeServer) start(t *testing.T) string {
 	t.Helper()
+	// Start the embedded chunk server first.
+	s.csIP, s.csPort = s.cs.start(t)
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	s.ln = ln
@@ -121,10 +305,16 @@ func (s *integFakeServer) dispatch(conn net.Conn, cmd uint32, payload []byte) {
 		s.svrMknod(conn, payload)
 	case mfsclient.CltomFuseMkdir:
 		s.svrMkdir(conn, payload)
-	case mfsclient.CmdFUSEWRITE: // Phase 1 stub opcode
+	case mfsclient.CmdFUSEWRITE: // Phase 1 stub — kept for compat; no longer called
 		s.svrWrite(conn, payload)
-	case mfsclient.CmdFUSEREAD: // Phase 1 stub opcode
+	case mfsclient.CmdFUSEREAD: // Phase 1 stub — kept for compat; no longer called
 		s.svrRead(conn, payload)
+	case mfsclient.CltomFuseReadChunk:
+		s.svrReadChunk(conn, payload)
+	case mfsclient.CltomFuseWriteChunk:
+		s.svrWriteChunk(conn, payload)
+	case mfsclient.CltomFuseWriteChunkEnd:
+		s.svrWriteChunkEnd(conn, payload)
 	case mfsclient.CltomFuseUnlink:
 		s.svrUnlink(conn, payload)
 	case mfsclient.CltomFuseRmdir:
@@ -516,6 +706,100 @@ func (s *integFakeServer) svrRead(conn net.Conn, payload []byte) {
 	buf = mfsclient.PutUint32(buf, uint32(len(chunk)))
 	buf = append(buf, chunk...)
 	_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEREAD, buf)
+}
+
+// ─── Chunk server coordination handlers ───────────────────────────────────────
+
+// svrReadChunk handles CLTOMA_FUSE_READ_CHUNK (432).
+// Pre-loads node content into the CS, then replies with ChunkInfo.
+func (s *integFakeServer) svrReadChunk(conn net.Conn, payload []byte) {
+	if len(payload) < 12 {
+		return
+	}
+	msgid, off, _ := mfsclient.ReadUint32(payload, 0)
+	nodeID, _, _ := mfsclient.ReadUint32(payload, off)
+
+	s.mu.Lock()
+	n, ok := s.nodes[nodeID]
+	if ok {
+		s.cs.setChunkData(uint64(nodeID), n.content)
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		integWriteStatus(conn, mfsclient.MatoclFuseReadChunk, msgid, mfsclient.StatusENOENT)
+		return
+	}
+
+	var resp []byte
+	resp = mfsclient.PutUint32(resp, msgid)
+	resp = mfsclient.PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
+	resp = mfsclient.PutUint32(resp, 1)              // version
+	resp = mfsclient.PutUint8(resp, 1)               // N = 1 server
+	resp = mfsclient.PutUint32(resp, s.csIP)
+	resp = mfsclient.PutUint16(resp, s.csPort)
+	resp = mfsclient.PutUint32(resp, 0) // CS version
+	_ = mfsclient.WriteFrame(conn, mfsclient.MatoclFuseReadChunk, resp)
+}
+
+// svrWriteChunk handles CLTOMA_FUSE_WRITE_CHUNK (434).
+// Returns ChunkInfo pointing to the embedded CS.
+func (s *integFakeServer) svrWriteChunk(conn net.Conn, payload []byte) {
+	if len(payload) < 16 {
+		return
+	}
+	msgid, off, _ := mfsclient.ReadUint32(payload, 0)
+	nodeID, _, _ := mfsclient.ReadUint32(payload, off)
+
+	s.mu.Lock()
+	_, ok := s.nodes[nodeID]
+	s.mu.Unlock()
+
+	if !ok {
+		integWriteStatus(conn, mfsclient.MatoclFuseWriteChunk, msgid, mfsclient.StatusENOENT)
+		return
+	}
+
+	var resp []byte
+	resp = mfsclient.PutUint32(resp, msgid)
+	resp = mfsclient.PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
+	resp = mfsclient.PutUint32(resp, 1)              // version
+	resp = mfsclient.PutUint8(resp, 1)               // N = 1 server
+	resp = mfsclient.PutUint32(resp, s.csIP)
+	resp = mfsclient.PutUint16(resp, s.csPort)
+	resp = mfsclient.PutUint32(resp, 0) // CS version
+	_ = mfsclient.WriteFrame(conn, mfsclient.MatoclFuseWriteChunk, resp)
+}
+
+// svrWriteChunkEnd handles CLTOMA_FUSE_WRITE_CHUNK_END (436).
+// Copies CS data back into node.content and updates the node's size.
+func (s *integFakeServer) svrWriteChunkEnd(conn net.Conn, payload []byte) {
+	if len(payload) < 28 {
+		return
+	}
+	msgid, off, _ := mfsclient.ReadUint32(payload, 0)
+	chunkID, off, _ := mfsclient.ReadUint64(payload, off)
+	_, off, _ = mfsclient.ReadUint32(payload, off)    // version (skip)
+	length, _, _ := mfsclient.ReadUint64(payload, off) // new total file length
+
+	nodeID := uint32(chunkID) // reverse of fake mapping
+
+	s.mu.Lock()
+	n, ok := s.nodes[nodeID]
+	if ok && !n.isDir {
+		csData := s.cs.getChunkData(chunkID)
+		newContent := make([]byte, length)
+		copy(newContent, csData)
+		n.content = newContent
+		n.modTime = time.Now().Unix()
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		integWriteStatus(conn, mfsclient.MatoclFuseWriteChunkEnd, msgid, mfsclient.StatusENOENT)
+		return
+	}
+	integWriteStatus(conn, mfsclient.MatoclFuseWriteChunkEnd, msgid, mfsclient.StatusOK)
 }
 
 func (s *integFakeServer) svrUnlink(conn net.Conn, payload []byte) {

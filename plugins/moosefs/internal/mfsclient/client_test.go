@@ -33,12 +33,16 @@ type fakeNode struct {
 }
 
 // fakeMFSServer is a minimal in-memory MooseFS server for testing.
+// It embeds a fakeCSServer to handle chunk I/O via the real CS protocol.
 type fakeMFSServer struct {
 	listener net.Listener
 	mu       sync.Mutex
 	nodes    map[uint32]*fakeNode
 	nextID   atomic.Uint32
 	done     chan struct{}
+	cs       *fakeCSServer // embedded chunk server for Read/Write operations
+	csIP     uint32        // CS listen IP (uint32 big-endian)
+	csPort   uint16        // CS listen port
 }
 
 // newFakeMFSServer creates and initialises a fake server with only the root
@@ -47,6 +51,7 @@ func newFakeMFSServer() *fakeMFSServer {
 	s := &fakeMFSServer{
 		nodes: make(map[uint32]*fakeNode),
 		done:  make(chan struct{}),
+		cs:    newFakeCSServer(),
 	}
 	s.nextID.Store(2) // root = 1
 	root := &fakeNode{
@@ -61,21 +66,25 @@ func newFakeMFSServer() *fakeMFSServer {
 	return s
 }
 
-// Start binds to a random port, starts accepting, and returns the listen
-// address in "host:port" form.
+// Start binds to a random port, starts the embedded chunk server, begins
+// accepting master connections, and returns the listen address in "host:port".
 func (s *fakeMFSServer) Start() string {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		panic("fakeMFSServer: listen: " + err.Error())
 	}
 	s.listener = ln
+	// Start the fake CS so it is ready before any client connects.
+	s.csIP, s.csPort = s.cs.Start()
 	go s.acceptLoop()
 	return ln.Addr().String()
 }
 
-// Stop closes the listener and waits for the accept goroutine to exit.
+// Stop closes the listener, stops the embedded CS, and waits for the accept
+// goroutine to exit.
 func (s *fakeMFSServer) Stop() {
 	_ = s.listener.Close()
+	s.cs.Stop()
 	<-s.done
 }
 
@@ -117,10 +126,16 @@ func (s *fakeMFSServer) dispatch(conn net.Conn, cmd uint32, payload []byte) {
 		s.handleMknod(conn, payload)
 	case CltomFuseMkdir:
 		s.handleMkdir(conn, payload)
-	case CmdFUSEWRITE: // Phase 1 stub opcode
+	case CmdFUSEWRITE: // Phase 1 stub opcode — kept for backward compat; no longer called by client
 		s.handleWrite(conn, payload)
-	case CmdFUSEREAD: // Phase 1 stub opcode
+	case CmdFUSEREAD: // Phase 1 stub opcode — kept for backward compat; no longer called by client
 		s.handleRead(conn, payload)
+	case CltomFuseReadChunk:
+		s.handleReadChunk(conn, payload)
+	case CltomFuseWriteChunk:
+		s.handleWriteChunk(conn, payload)
+	case CltomFuseWriteChunkEnd:
+		s.handleWriteChunkEnd(conn, payload)
 	case CltomFuseUnlink:
 		s.handleUnlink(conn, payload)
 	case CltomFuseRmdir:
@@ -545,6 +560,115 @@ func (s *fakeMFSServer) handleRead(conn net.Conn, payload []byte) {
 	buf = PutUint32(buf, uint32(len(chunk)))
 	buf = append(buf, chunk...)
 	_ = WriteFrame(conn, AnsFUSEREAD, buf)
+}
+
+// ─── Chunk server coordination handlers ───────────────────────────────────────
+
+// handleReadChunk handles CLTOMA_FUSE_READ_CHUNK (432).
+//
+// Payload: [msgid:32][nodeID:32][index:32]
+// Response: [msgid:32][chunkID:64][version:32][N:8=1][ip:32][port:16][csVersion:32]
+//
+// Before responding, the handler pre-loads the node's content into the
+// embedded fakeCSServer so that the subsequent ReadChunk call against the CS
+// always sees the latest committed data.
+func (s *fakeMFSServer) handleReadChunk(conn net.Conn, payload []byte) {
+	if len(payload) < 12 {
+		return
+	}
+	msgid, off, _ := ReadUint32(payload, 0)
+	nodeID, _, _ := ReadUint32(payload, off)
+
+	s.mu.Lock()
+	n, ok := s.nodes[nodeID]
+	if ok {
+		// Sync node.content → CS so reads always see committed data.
+		s.cs.SetChunkData(uint64(nodeID), n.content)
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		writeStatusReply(conn, MatoclFuseReadChunk, msgid, StatusENOENT)
+		return
+	}
+
+	var resp []byte
+	resp = PutUint32(resp, msgid)
+	resp = PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
+	resp = PutUint32(resp, 1)              // chunk version
+	resp = PutUint8(resp, 1)              // N = 1 server
+	resp = PutUint32(resp, s.csIP)
+	resp = PutUint16(resp, s.csPort)
+	resp = PutUint32(resp, 0) // CS version (unused in fake)
+	_ = WriteFrame(conn, MatoclFuseReadChunk, resp)
+}
+
+// handleWriteChunk handles CLTOMA_FUSE_WRITE_CHUNK (434).
+//
+// Payload: [msgid:32][nodeID:32][index:32][lockid:32]
+// Response: [msgid:32][chunkID:64][version:32][N:8=1][ip:32][port:16][csVersion:32]
+func (s *fakeMFSServer) handleWriteChunk(conn net.Conn, payload []byte) {
+	if len(payload) < 16 {
+		return
+	}
+	msgid, off, _ := ReadUint32(payload, 0)
+	nodeID, _, _ := ReadUint32(payload, off)
+
+	s.mu.Lock()
+	_, ok := s.nodes[nodeID]
+	s.mu.Unlock()
+
+	if !ok {
+		writeStatusReply(conn, MatoclFuseWriteChunk, msgid, StatusENOENT)
+		return
+	}
+
+	var resp []byte
+	resp = PutUint32(resp, msgid)
+	resp = PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
+	resp = PutUint32(resp, 1)              // chunk version
+	resp = PutUint8(resp, 1)              // N = 1 server
+	resp = PutUint32(resp, s.csIP)
+	resp = PutUint16(resp, s.csPort)
+	resp = PutUint32(resp, 0) // CS version (unused in fake)
+	_ = WriteFrame(conn, MatoclFuseWriteChunk, resp)
+}
+
+// handleWriteChunkEnd handles CLTOMA_FUSE_WRITE_CHUNK_END (436).
+//
+// Payload: [msgid:32][chunkID:64][version:32][length:64][lockid:32]
+//
+// Copies the data written to the fakeCSServer back into node.content and
+// sets the node's size to `length` (total bytes written so far).
+// Response: [msgid:32][status:8]
+func (s *fakeMFSServer) handleWriteChunkEnd(conn net.Conn, payload []byte) {
+	if len(payload) < 28 {
+		return
+	}
+	msgid, off, _ := ReadUint32(payload, 0)
+	chunkID, off, _ := ReadUint64(payload, off)
+	_, off, _ = ReadUint32(payload, off)   // version (skip)
+	length, _, _ := ReadUint64(payload, off) // new total file length
+
+	nodeID := uint32(chunkID) // reverse of fake mapping: chunkID = nodeID
+
+	s.mu.Lock()
+	n, ok := s.nodes[nodeID]
+	if ok && !n.isDir {
+		// Pull data written to CS back into node.content.
+		csData := s.cs.GetChunkData(chunkID)
+		newContent := make([]byte, length)
+		copy(newContent, csData)
+		n.content = newContent
+		n.modTime = time.Now().Unix()
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		writeStatusReply(conn, MatoclFuseWriteChunkEnd, msgid, StatusENOENT)
+		return
+	}
+	writeStatusReply(conn, MatoclFuseWriteChunkEnd, msgid, StatusOK)
 }
 
 func (s *fakeMFSServer) handleUnlink(conn net.Conn, payload []byte) {
