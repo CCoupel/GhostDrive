@@ -6,6 +6,7 @@
 //	if err != nil { ... }
 //	defer c.Close()
 //
+//	if err := c.Register(); err != nil { ... }
 //	attrs, err := c.GetAttr(RootNodeID)
 //	entries, err := c.ReadDir(RootNodeID)
 package mfsclient
@@ -22,9 +23,10 @@ import (
 // All methods are safe to call from multiple goroutines; they are protected
 // by a single mutex so that request/response frames are never interleaved.
 type Client struct {
-	mu   sync.Mutex
-	conn net.Conn
-	addr string // "host:port"
+	mu        sync.Mutex
+	conn      net.Conn
+	addr      string // "host:port"
+	sessionID uint32 // assigned by master after Register
 }
 
 // Dial opens a TCP connection to host:port and returns a ready Client.
@@ -50,11 +52,23 @@ func (c *Client) Close() error {
 	return err
 }
 
+// SessionID returns the session ID assigned by the master after Register.
+func (c *Client) SessionID() uint32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sessionID
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 // roundtrip sends a request frame and reads the answer frame.
 // It verifies that the answer command matches expectedAns.
-// Returns the answer payload (including the leading status byte).
+// Returns the answer payload.
+//
+// Any NOP frames (cmd=0) received before the expected answer are silently
+// discarded — a real MooseFS master sends a NOP keepalive immediately after
+// TCP connect, which may be buffered before the first response.
+//
 // The caller must hold c.mu.
 func (c *Client) roundtrip(cmd, expectedAns uint32, payload []byte) ([]byte, error) {
 	if c.conn == nil {
@@ -65,19 +79,25 @@ func (c *Client) roundtrip(cmd, expectedAns uint32, payload []byte) ([]byte, err
 		return nil, err
 	}
 
-	ansCmd, ansPayload, err := ReadFrame(c.conn)
-	if err != nil {
-		return nil, err
+	for {
+		ansCmd, ansPayload, err := ReadFrame(c.conn)
+		if err != nil {
+			return nil, err
+		}
+		// Discard NOP keepalive frames silently.
+		if ansCmd == ANTOAN_NOP {
+			continue
+		}
+		if ansCmd != expectedAns {
+			return nil, fmt.Errorf("mfsclient: unexpected answer cmd %d (expected %d)", ansCmd, expectedAns)
+		}
+		return ansPayload, nil
 	}
-	if ansCmd != expectedAns {
-		return nil, fmt.Errorf("mfsclient: unexpected answer cmd %d (expected %d)", ansCmd, expectedAns)
-	}
-	return ansPayload, nil
 }
 
-// checkStatus reads the status byte from payload[0] and returns an error if
-// it is non-zero.  On success it returns the remaining payload starting at
-// offset 1.
+// checkStatus reads the status byte from payload[0] (caller passes payload[4:]
+// i.e. after stripping msgid) and returns an error if it is non-zero.
+// On success it returns the remaining payload starting at offset 1.
 func checkStatus(payload []byte) ([]byte, error) {
 	if len(payload) == 0 {
 		return nil, fmt.Errorf("mfsclient: empty answer payload")
@@ -89,147 +109,463 @@ func checkStatus(payload []byte) ([]byte, error) {
 		return rest, nil
 	case StatusENOENT:
 		return nil, fmt.Errorf("mfsclient: %w", plugins.ErrFileNotFound)
+	case StatusEEXIST:
+		return nil, fmt.Errorf("mfsclient: file already exists")
+	case StatusENOTEMPTY:
+		return nil, fmt.Errorf("mfsclient: directory not empty")
 	default:
 		return nil, fmt.Errorf("mfsclient: server returned status 0x%02x", status)
 	}
 }
 
-// ─── Operations ───────────────────────────────────────────────────────────────
+// ─── Registration ─────────────────────────────────────────────────────────────
+
+// Register authenticates with the MooseFS master using CLTOMA_FUSE_REGISTER
+// (opcode 400).
+//
+// Note: a real MooseFS master may send a NOP keepalive frame (cmd=0) after
+// TCP connect.  This does NOT need to be consumed before sending REGISTER —
+// the server processes REGISTER independently of any queued NOP frame.
+//
+// Payload sent (REGISTER_NEWSESSION = rcode 2):
+//
+//	[blob:64B][rcode:8=2][version:32]
+//	[ileng:32=0]   (empty instance name — accepted by all MooseFS 4.x masters)
+//	[pleng:32=2]["/\x00"]  (minimal mount path)
+//
+// Expected response (MATOCL_FUSE_REGISTER=401):
+//
+//	Success (len >= 8): [version:32][sessionId:32][...]
+//	Error   (len == 1): [status:8]
+func (c *Client) Register() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Build payload.
+	var req []byte
+	req = append(req, []byte(FuseRegisterBlobACL)...) // 64 bytes blob
+	req = PutUint8(req, RegisterNewSession)            // rcode = 2
+
+	// Version: 4.56.0 = (4<<16)|(56<<8)|0 = 263168.
+	// Real servers accept any compatible client version.
+	req = PutUint32(req, 263168)
+
+	// ileng=0 (empty instance name — accepted by all MooseFS 4.x masters).
+	req = PutUint32(req, 0)
+
+	// pleng + minimal mount path "/\x00".
+	const mountPath = "/\x00"
+	req = PutUint32(req, uint32(len(mountPath)))
+	req = append(req, []byte(mountPath)...)
+
+	ans, err := c.roundtrip(CltomFuseRegister, MatoclFuseRegister, req)
+	if err != nil {
+		return fmt.Errorf("mfsclient: Register: %w", err)
+	}
+
+	// Error response = 1 byte status.
+	if len(ans) == 1 {
+		return fmt.Errorf("mfsclient: Register: server returned status 0x%02x", ans[0])
+	}
+	if len(ans) < 8 {
+		return fmt.Errorf("mfsclient: Register: response too short (%d bytes)", len(ans))
+	}
+
+	// [version:32][sessionId:32][metaId:64][sesflags:8]...
+	sessionID, _, err := ReadUint32(ans, 4)
+	if err != nil {
+		return fmt.Errorf("mfsclient: Register: read sessionId: %w", err)
+	}
+	c.sessionID = sessionID
+	return nil
+}
+
+
+// ─── StatFS ───────────────────────────────────────────────────────────────────
+
+// StatFS queries the MooseFS master for cluster filesystem statistics.
+//
+// Request (CLTOMA_FUSE_STATFS = 402):
+//
+//	[msgid:32=0][sessionId:32]
+//
+// Response (MATOCL_FUSE_STATFS = 403):
+//
+//	[msgid:32][totalspace:64][availspace:64][trashspace:64][sustainedspace:64][inodes:32]
+//
+// Returns free = availspace, total = totalspace.
+func (c *Client) StatFS() (free, total int64, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, c.sessionID)
+
+	ans, err := c.roundtrip(CltomFuseStatFS, MatoclFuseStatFS, req)
+	if err != nil {
+		return 0, 0, fmt.Errorf("mfsclient: StatFS: %w", err)
+	}
+
+	// [msgid:32][totalspace:64][availspace:64][trash:64][sustained:64][inodes:32]
+	if len(ans) < 4+8+8 {
+		return 0, 0, fmt.Errorf("mfsclient: StatFS: response too short (%d bytes)", len(ans))
+	}
+
+	totalSpace, off, err := ReadUint64(ans, 4)
+	if err != nil {
+		return 0, 0, fmt.Errorf("mfsclient: StatFS: read total: %w", err)
+	}
+	availSpace, _, err := ReadUint64(ans, off)
+	if err != nil {
+		return 0, 0, fmt.Errorf("mfsclient: StatFS: read avail: %w", err)
+	}
+
+	return int64(availSpace), int64(totalSpace), nil
+}
+
+// ─── Lookup ───────────────────────────────────────────────────────────────────
+
+// Lookup finds the nodeID of name inside directory parentID.
+//
+// Request (CLTOMA_FUSE_LOOKUP = 406):
+//
+//	[msgid:32=0][parent:32][namelen:8][name:bytes][uid:32=0][gcnt:32=1][gid:32=0]
+//
+// Response (MATOCL_FUSE_LOOKUP = 407):
+//
+//	Success (len==39): [msgid:32][inode:32][attrs:35]
+//	Error   (len==5):  [msgid:32][status:8]
+func (c *Client) Lookup(parentID uint32, name string) (uint32, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, parentID)
+	req = PutStringU8(req, name)
+	req = PutUint32(req, 0) // uid
+	req = PutUint32(req, 1) // gcnt
+	req = PutUint32(req, 0) // gid
+
+	ans, err := c.roundtrip(CltomFuseLookup, MatoclFuseLookup, req)
+	if err != nil {
+		return 0, fmt.Errorf("mfsclient: Lookup(%d, %q): %w", parentID, name, err)
+	}
+
+	if isErrorResponse(ans) {
+		// [msgid:32][status:8]
+		status := ans[4]
+		if status == StatusENOENT {
+			return 0, fmt.Errorf("mfsclient: Lookup(%d, %q): %w", parentID, name, plugins.ErrFileNotFound)
+		}
+		return 0, fmt.Errorf("mfsclient: Lookup(%d, %q): status 0x%02x", parentID, name, status)
+	}
+
+	// Success: [msgid:32][inode:32][attrs:35]
+	if len(ans) < minSuccessLen {
+		return 0, fmt.Errorf("mfsclient: Lookup(%d, %q): response too short (%d)", parentID, name, len(ans))
+	}
+	inode, _, err := ReadUint32(ans, 4)
+	if err != nil {
+		return 0, fmt.Errorf("mfsclient: Lookup(%d, %q) inode: %w", parentID, name, err)
+	}
+	return inode, nil
+}
+
+// ─── GetAttr ──────────────────────────────────────────────────────────────────
+
+// GetAttr returns the attributes of node nodeID.
+// Returns ErrFileNotFound (wrapped) if the node does not exist.
+//
+// Request (CLTOMA_FUSE_GETATTR = 408):
+//
+//	[msgid:32=0][inode:32]
+//
+// Response (MATOCL_FUSE_GETATTR = 409):
+//
+//	Success (len==39): [msgid:32][attrs:35]
+//	Error   (len==5):  [msgid:32][status:8]
+func (c *Client) GetAttr(nodeID uint32) (*Attr, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, nodeID)
+
+	ans, err := c.roundtrip(CltomFuseGetAttr, MatoclFuseGetAttr, req)
+	if err != nil {
+		return nil, fmt.Errorf("mfsclient: GetAttr(%d): %w", nodeID, err)
+	}
+
+	if isErrorResponse(ans) {
+		status := ans[4]
+		if status == StatusENOENT {
+			return nil, fmt.Errorf("mfsclient: GetAttr(%d): %w", nodeID, plugins.ErrFileNotFound)
+		}
+		return nil, fmt.Errorf("mfsclient: GetAttr(%d): status 0x%02x", nodeID, status)
+	}
+
+	if len(ans) < minSuccessLen {
+		return nil, fmt.Errorf("mfsclient: GetAttr(%d): response too short (%d)", nodeID, len(ans))
+	}
+
+	attr, _, err := ParseAttrs(ans, 4)
+	if err != nil {
+		return nil, fmt.Errorf("mfsclient: GetAttr(%d): %w", nodeID, err)
+	}
+	attr.NodeID = nodeID
+	return attr, nil
+}
+
+// ─── ReadDir ──────────────────────────────────────────────────────────────────
 
 // ReadDir lists the direct children of directory nodeID.
 // Returns an empty (non-nil) slice when the directory is empty.
+//
+// Request (CLTOMA_FUSE_READDIR = 428):
+//
+//	[msgid:32=0][parent:32][uid:32=0][gcnt:32=1][gid:32=0][flags:8=0][maxentries:32=0xffff][skipcnt:64=0]
+//
+// Response (MATOCL_FUSE_READDIR = 429):
+//
+//	[msgid:32][entries...] where each entry is [namelen:8][name][inode:32][type:8]
+//	type: 1=file, 2=dir
 func (c *Client) ReadDir(nodeID uint32) ([]DirEntry, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	req := PutUint32(nil, nodeID)
-	ans, err := c.roundtrip(CmdFUSEREADDIR, AnsFUSEREADDIR, req)
-	if err != nil {
-		return nil, fmt.Errorf("mfsclient: ReadDir(%d): %w", nodeID, err)
-	}
-	rest, err := checkStatus(ans)
+	req := PutUint32(nil, 0)        // msgid
+	req = PutUint32(req, nodeID)    // parent inode
+	req = PutUint32(req, 0)         // uid
+	req = PutUint32(req, 1)         // gcnt
+	req = PutUint32(req, 0)         // gid
+	req = PutUint8(req, 0)          // flags
+	req = PutUint32(req, 0xffff)    // maxentries
+	req = PutUint64(req, 0)         // skipcnt
+
+	ans, err := c.roundtrip(CltomFuseReadDir, MatoclFuseReadDir, req)
 	if err != nil {
 		return nil, fmt.Errorf("mfsclient: ReadDir(%d): %w", nodeID, err)
 	}
 
-	// Parse: [count uint32][entries...]
-	count, off, err := ReadUint32(rest, 0)
-	if err != nil {
-		return nil, fmt.Errorf("mfsclient: ReadDir(%d): %w", nodeID, err)
+	// Skip msgid (4 bytes).
+	if len(ans) < 4 {
+		return nil, fmt.Errorf("mfsclient: ReadDir(%d): response too short", nodeID)
 	}
 
-	entries := make([]DirEntry, 0, count)
-	for i := uint32(0); i < count; i++ {
+	entries := make([]DirEntry, 0, 16)
+	off := 4 // skip msgid
+
+	for off < len(ans) {
 		var e DirEntry
-		e.NodeID, off, err = ReadUint32(rest, off)
+		var nameLen uint8
+		nameLen, off, err = ReadUint8(ans, off)
 		if err != nil {
-			return nil, fmt.Errorf("mfsclient: ReadDir(%d) entry %d nodeID: %w", nodeID, i, err)
+			break
 		}
-		if off >= len(rest) {
-			return nil, fmt.Errorf("mfsclient: ReadDir(%d) entry %d isDir: buffer too short", nodeID, i)
+		if off+int(nameLen) > len(ans) {
+			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry name truncated", nodeID)
 		}
-		e.IsDir = rest[off] != 0
-		off++
-		e.Name, off, err = ReadString(rest, off)
+		e.Name = string(ans[off : off+int(nameLen)])
+		off += int(nameLen)
+
+		e.NodeID, off, err = ReadUint32(ans, off)
 		if err != nil {
-			return nil, fmt.Errorf("mfsclient: ReadDir(%d) entry %d name: %w", nodeID, i, err)
+			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry inode: %w", nodeID, err)
 		}
+
+		var nodeType uint8
+		nodeType, off, err = ReadUint8(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry type: %w", nodeID, err)
+		}
+		e.IsDir = nodeType == 2
+
 		entries = append(entries, e)
 	}
 	return entries, nil
 }
 
-// GetAttr returns the attributes of node nodeID.
-// Returns ErrFileNotFound (wrapped) if the node does not exist.
-func (c *Client) GetAttr(nodeID uint32) (*Attr, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	req := PutUint32(nil, nodeID)
-	ans, err := c.roundtrip(CmdFUSEGETATTR, AnsFUSEGETATTR, req)
-	if err != nil {
-		return nil, fmt.Errorf("mfsclient: GetAttr(%d): %w", nodeID, err)
-	}
-	rest, err := checkStatus(ans)
-	if err != nil {
-		return nil, fmt.Errorf("mfsclient: GetAttr(%d): %w", nodeID, err)
-	}
-
-	// Parse: [nodeID uint32][size uint64][mode uint32][modtime int64]
-	var attr Attr
-	off := 0
-	attr.NodeID, off, err = ReadUint32(rest, off)
-	if err != nil {
-		return nil, fmt.Errorf("mfsclient: GetAttr(%d) nodeID: %w", nodeID, err)
-	}
-	attr.Size, off, err = ReadUint64(rest, off)
-	if err != nil {
-		return nil, fmt.Errorf("mfsclient: GetAttr(%d) size: %w", nodeID, err)
-	}
-	attr.Mode, off, err = ReadUint32(rest, off)
-	if err != nil {
-		return nil, fmt.Errorf("mfsclient: GetAttr(%d) mode: %w", nodeID, err)
-	}
-	attr.ModTime, _, err = ReadInt64(rest, off)
-	if err != nil {
-		return nil, fmt.Errorf("mfsclient: GetAttr(%d) modtime: %w", nodeID, err)
-	}
-	return &attr, nil
-}
+// ─── Mknod ────────────────────────────────────────────────────────────────────
 
 // Mknod creates a regular file named name inside directory parentID with the
 // given mode.  Returns the new file's nodeID.
+//
+// Request (CLTOMA_FUSE_MKNOD = 416):
+//
+//	[msgid:32=0][parent:32][namelen:8][name][type:8=1][mode:16][umask:16=0][uid:32=0][gcnt:32=1][gid:32=0][rdev:32=0]
+//
+// Response:
+//
+//	Success (len==39): [msgid:32][inode:32][attrs:35]
+//	Error   (len==5):  [msgid:32][status:8]
 func (c *Client) Mknod(parentID uint32, name string, mode uint32) (uint32, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	req := PutUint32(nil, parentID)
-	req = PutUint32(req, mode)
-	req = PutString(req, name)
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, parentID)
+	req = PutStringU8(req, name)
+	req = PutUint8(req, 1)              // type = regular file
+	req = PutUint16(req, uint16(mode))  // mode (permissions)
+	req = PutUint16(req, 0)             // umask
+	req = PutUint32(req, 0)             // uid
+	req = PutUint32(req, 1)             // gcnt
+	req = PutUint32(req, 0)             // gid
+	req = PutUint32(req, 0)             // rdev
 
-	ans, err := c.roundtrip(CmdFUSEMKNOD, AnsFUSEMKNOD, req)
+	ans, err := c.roundtrip(CltomFuseMknod, MatoclFuseMknod, req)
 	if err != nil {
 		return 0, fmt.Errorf("mfsclient: Mknod(%d, %q): %w", parentID, name, err)
 	}
-	rest, err := checkStatus(ans)
-	if err != nil {
-		return 0, fmt.Errorf("mfsclient: Mknod(%d, %q): %w", parentID, name, err)
+
+	if isErrorResponse(ans) {
+		status := ans[4]
+		if status == StatusENOENT {
+			return 0, fmt.Errorf("mfsclient: Mknod(%d, %q): %w", parentID, name, plugins.ErrFileNotFound)
+		}
+		return 0, fmt.Errorf("mfsclient: Mknod(%d, %q): status 0x%02x", parentID, name, status)
 	}
 
-	nodeID, _, err := ReadUint32(rest, 0)
-	if err != nil {
-		return 0, fmt.Errorf("mfsclient: Mknod(%d, %q) nodeID: %w", parentID, name, err)
+	if len(ans) < minSuccessLen {
+		return 0, fmt.Errorf("mfsclient: Mknod(%d, %q): response too short (%d)", parentID, name, len(ans))
 	}
-	return nodeID, nil
+	inode, _, err := ReadUint32(ans, 4)
+	if err != nil {
+		return 0, fmt.Errorf("mfsclient: Mknod(%d, %q) inode: %w", parentID, name, err)
+	}
+	return inode, nil
 }
+
+// ─── Mkdir ────────────────────────────────────────────────────────────────────
 
 // Mkdir creates a directory named name inside directory parentID with the
 // given mode.  Returns the new directory's nodeID.
-// If the directory already exists, the server may return an error — the caller
-// (Backend.CreateDir) should handle EEXIST as a no-op.
+//
+// Request (CLTOMA_FUSE_MKDIR = 418):
+//
+//	[msgid:32=0][parent:32][namelen:8][name][mode:16][umask:16=0][uid:32=0][gcnt:32=1][gid:32=0][copysgid:8=0]
+//
+// Response: idem Mknod.
 func (c *Client) Mkdir(parentID uint32, name string, mode uint32) (uint32, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	req := PutUint32(nil, parentID)
-	req = PutUint32(req, mode)
-	req = PutString(req, name)
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, parentID)
+	req = PutStringU8(req, name)
+	req = PutUint16(req, uint16(mode)) // mode
+	req = PutUint16(req, 0)            // umask
+	req = PutUint32(req, 0)            // uid
+	req = PutUint32(req, 1)            // gcnt
+	req = PutUint32(req, 0)            // gid
+	req = PutUint8(req, 0)             // copysgid
 
-	ans, err := c.roundtrip(CmdFUSEMKDIR, AnsFUSEMKDIR, req)
+	ans, err := c.roundtrip(CltomFuseMkdir, MatoclFuseMkdir, req)
 	if err != nil {
 		return 0, fmt.Errorf("mfsclient: Mkdir(%d, %q): %w", parentID, name, err)
 	}
-	rest, err := checkStatus(ans)
-	if err != nil {
-		return 0, fmt.Errorf("mfsclient: Mkdir(%d, %q): %w", parentID, name, err)
+
+	if isErrorResponse(ans) {
+		status := ans[4]
+		if status == StatusENOENT {
+			return 0, fmt.Errorf("mfsclient: Mkdir(%d, %q): %w", parentID, name, plugins.ErrFileNotFound)
+		}
+		if status == StatusEEXIST {
+			// Return 0 as a signal that the dir already exists — callers handle this.
+			return 0, fmt.Errorf("mfsclient: Mkdir(%d, %q): file already exists", parentID, name)
+		}
+		return 0, fmt.Errorf("mfsclient: Mkdir(%d, %q): status 0x%02x", parentID, name, status)
 	}
 
-	nodeID, _, err := ReadUint32(rest, 0)
-	if err != nil {
-		return 0, fmt.Errorf("mfsclient: Mkdir(%d, %q) nodeID: %w", parentID, name, err)
+	if len(ans) < minSuccessLen {
+		return 0, fmt.Errorf("mfsclient: Mkdir(%d, %q): response too short (%d)", parentID, name, len(ans))
 	}
-	return nodeID, nil
+	inode, _, err := ReadUint32(ans, 4)
+	if err != nil {
+		return 0, fmt.Errorf("mfsclient: Mkdir(%d, %q) inode: %w", parentID, name, err)
+	}
+	return inode, nil
 }
+
+// ─── Unlink ───────────────────────────────────────────────────────────────────
+
+// Unlink removes the file named name from directory parentID.
+// Returns ErrFileNotFound (wrapped) if the file does not exist.
+//
+// Request (CLTOMA_FUSE_UNLINK = 420):
+//
+//	[msgid:32=0][parent:32][namelen:8][name][uid:32=0][gcnt:32=1][gid:32=0]
+//
+// Response: [msgid:32][status:8]
+func (c *Client) Unlink(parentID uint32, name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, parentID)
+	req = PutStringU8(req, name)
+	req = PutUint32(req, 0) // uid
+	req = PutUint32(req, 1) // gcnt
+	req = PutUint32(req, 0) // gid
+
+	ans, err := c.roundtrip(CltomFuseUnlink, MatoclFuseUnlink, req)
+	if err != nil {
+		return fmt.Errorf("mfsclient: Unlink(%d, %q): %w", parentID, name, err)
+	}
+
+	if len(ans) < 5 {
+		return fmt.Errorf("mfsclient: Unlink(%d, %q): response too short", parentID, name)
+	}
+	// payload is [msgid:32][status:8]; pass status byte to checkStatus.
+	if _, err = checkStatus(ans[4:]); err != nil {
+		return fmt.Errorf("mfsclient: Unlink(%d, %q): %w", parentID, name, err)
+	}
+	return nil
+}
+
+// ─── Rmdir ────────────────────────────────────────────────────────────────────
+
+// Rmdir removes the empty directory named name from directory parentID.
+// Returns ErrFileNotFound (wrapped) if the directory does not exist.
+//
+// Request (CLTOMA_FUSE_RMDIR = 422):
+//
+//	[msgid:32=0][parent:32][namelen:8][name][uid:32=0][gcnt:32=1][gid:32=0]
+//
+// Response: [msgid:32][status:8]  (identical to Unlink)
+func (c *Client) Rmdir(parentID uint32, name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, parentID)
+	req = PutStringU8(req, name)
+	req = PutUint32(req, 0) // uid
+	req = PutUint32(req, 1) // gcnt
+	req = PutUint32(req, 0) // gid
+
+	ans, err := c.roundtrip(CltomFuseRmdir, MatoclFuseRmdir, req)
+	if err != nil {
+		return fmt.Errorf("mfsclient: Rmdir(%d, %q): %w", parentID, name, err)
+	}
+
+	if len(ans) < 5 {
+		return fmt.Errorf("mfsclient: Rmdir(%d, %q): response too short", parentID, name)
+	}
+	if _, err = checkStatus(ans[4:]); err != nil {
+		return fmt.Errorf("mfsclient: Rmdir(%d, %q): %w", parentID, name, err)
+	}
+	return nil
+}
+
+// ─── Read / Write (Phase 1 stubs) ─────────────────────────────────────────────
+//
+// These methods use the stub opcodes CmdFUSEREAD / CmdFUSEWRITE (506/507)
+// which are NOT real MooseFS opcodes.  They communicate with the in-memory
+// fake servers used in *_test.go files.
+//
+// TODO(phase2): replace with real chunk-server I/O via CltomFuseReadChunk
+// (opcode 432) + CSClient (csclient.go).
 
 // Write writes data to node nodeID at offset.
 // The server stores the data; subsequent Read calls will return the written bytes.
@@ -280,42 +616,4 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 		return nil, fmt.Errorf("mfsclient: Read(%d) data: buffer too short", nodeID)
 	}
 	return rest[off : off+int(dataLen)], nil
-}
-
-// Unlink removes the file named name from directory parentID.
-// Returns ErrFileNotFound (wrapped) if the file does not exist.
-func (c *Client) Unlink(parentID uint32, name string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	req := PutUint32(nil, parentID)
-	req = PutString(req, name)
-
-	ans, err := c.roundtrip(CmdFUSEUNLINK, AnsFUSEUNLINK, req)
-	if err != nil {
-		return fmt.Errorf("mfsclient: Unlink(%d, %q): %w", parentID, name, err)
-	}
-	if _, err = checkStatus(ans); err != nil {
-		return fmt.Errorf("mfsclient: Unlink(%d, %q): %w", parentID, name, err)
-	}
-	return nil
-}
-
-// Rmdir removes the empty directory named name from directory parentID.
-// Returns ErrFileNotFound (wrapped) if the directory does not exist.
-func (c *Client) Rmdir(parentID uint32, name string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	req := PutUint32(nil, parentID)
-	req = PutString(req, name)
-
-	ans, err := c.roundtrip(CmdFUSERMDIR, AnsFUSERMDIR, req)
-	if err != nil {
-		return fmt.Errorf("mfsclient: Rmdir(%d, %q): %w", parentID, name, err)
-	}
-	if _, err = checkStatus(ans); err != nil {
-		return fmt.Errorf("mfsclient: Rmdir(%d, %q): %w", parentID, name, err)
-	}
-	return nil
 }
