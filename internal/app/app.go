@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/CCoupel/GhostDrive/internal/backends"
 	"github.com/CCoupel/GhostDrive/internal/config"
+	"github.com/CCoupel/GhostDrive/internal/logging"
 	"github.com/CCoupel/GhostDrive/internal/placeholder"
 	"github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/internal/types"
@@ -39,6 +41,7 @@ type App struct {
 	dynRegistry  *pluginsregistry.DynamicRegistry   // v0.6.x dynamic plugin loader
 	descriptors  map[string]plugins.PluginDescriptor // cached plugin descriptors by type
 	localCleanup func()                              // cleanup for ServeInProcess local backend
+	logStore     *logging.Store                      // in-process log capture for the Logs UI tab
 }
 
 // NewApp creates a new App. Configuration is loaded in Startup once the
@@ -56,6 +59,7 @@ func NewApp(cfgPath string) *App {
 		engines:      make(map[string]*sync.Engine),
 		driveManager: placeholder.NewDriveManager(),
 		descriptors:  make(map[string]plugins.PluginDescriptor),
+		logStore:     logging.NewStore(),
 	}
 }
 
@@ -68,7 +72,19 @@ func (a *App) Startup(ctx context.Context) {
 	if a.descriptors == nil {
 		a.descriptors = make(map[string]plugins.PluginDescriptor)
 	}
+	if a.logStore == nil {
+		a.logStore = logging.NewStore()
+	}
 	a.mu.Unlock()
+
+	// Redirect standard log output through the in-process log store so the
+	// Logs UI tab receives all log lines in real time.
+	a.logStore.SetOnNew(func(e logging.Entry) {
+		if a.ctx != nil {
+			wailsruntime.EventsEmit(a.ctx, "logs:new", e)
+		}
+	})
+	log.SetOutput(io.MultiWriter(os.Stderr, a.logStore))
 
 	// Load configuration
 	path := a.cfgPath
@@ -793,6 +809,19 @@ func (a *App) TestBackendConnection(bc plugins.BackendConfig) (types.BackendStat
 	}
 	status.Connected = true
 	return status, nil
+}
+
+// ─── Logs ─────────────────────────────────────────────────────────────────────
+
+// GetLogs returns all captured log entries with ID > sinceID.
+// Pass sinceID=0 to retrieve all stored entries (up to 2000).
+func (a *App) GetLogs(sinceID int64) []logging.Entry {
+	return a.logStore.GetEntries(sinceID)
+}
+
+// ClearLogs removes all stored log entries.
+func (a *App) ClearLogs() {
+	a.logStore.Clear()
 }
 
 // GetBackendStatuses returns connection status for all configured backends.

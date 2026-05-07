@@ -29,6 +29,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -156,22 +157,28 @@ func (b *Backend) Connect(cfg plugins.BackendConfig) error {
 		}
 	}
 
+	log.Printf("connect: dialing %s:%d subDir=%q", masterHost, masterPort, subDir)
 	client, err := mfsclient.Dial(masterHost, masterPort)
 	if err != nil {
+		log.Printf("connect: dial failed: %v", err)
 		return fmt.Errorf("moosefs: connect: %w", err)
 	}
 
 	// Authenticate with the master server.
 	if err := client.Register(); err != nil {
 		_ = client.Close()
+		log.Printf("connect: register failed: %v", err)
 		return fmt.Errorf("moosefs: connect: register: %w", err)
 	}
+	log.Printf("connect: registered sessionID=%d", client.SessionID())
 
 	// Probe: verify that the root node is reachable.
 	if _, probeErr := client.GetAttr(mfsclient.RootNodeID); probeErr != nil {
 		_ = client.Close()
+		log.Printf("connect: probe failed: %v", probeErr)
 		return fmt.Errorf("moosefs: connect: probe failed: %w", probeErr)
 	}
+	log.Printf("connect: ready")
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -286,6 +293,7 @@ func (b *Backend) Upload(ctx context.Context, local, remote string, progress plu
 		n, readErr := f.Read(buf)
 		if n > 0 {
 			if writeErr := c.Write(nodeID, offset, buf[:n]); writeErr != nil {
+				log.Printf("upload %s: write at offset %d: %v", remote, offset, writeErr)
 				return fmt.Errorf("moosefs: upload %s: write at offset %d: %w", remote, offset, writeErr)
 			}
 			offset += uint64(n)
@@ -346,6 +354,7 @@ func (b *Backend) Download(ctx context.Context, remote, local string, progress p
 
 		chunk, readErr := c.Read(nodeID, offset, chunkSize)
 		if readErr != nil {
+			log.Printf("download %s: read at offset %d: %v", remote, offset, readErr)
 			return fmt.Errorf("moosefs: download %s: read at offset %d: %w", remote, offset, readErr)
 		}
 		if len(chunk) == 0 {
