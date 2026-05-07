@@ -8,6 +8,7 @@ package moosefs
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -29,12 +30,6 @@ import (
 const testPollInterval = "20"
 
 // ─── Integration fake server ─────────────────────────────────────────────────
-
-// modeDir is the POSIX directory mode bit.
-const modeDir = 0o040000
-
-// modeFile is the POSIX regular file mode bit.
-const modeFile = 0o100000
 
 // integNode is a file or directory in the in-memory tree.
 type integNode struct {
@@ -68,7 +63,7 @@ func newIntegFakeServer() *integFakeServer {
 		name:    "/",
 		parent:  0,
 		isDir:   true,
-		mode:    modeDir | 0o755,
+		mode:    0o755,
 		modTime: time.Now().Unix(),
 	}
 	return s
@@ -112,21 +107,27 @@ func (s *integFakeServer) handleConn(conn net.Conn) {
 
 func (s *integFakeServer) dispatch(conn net.Conn, cmd uint32, payload []byte) {
 	switch cmd {
-	case mfsclient.CmdFUSEREADDIR:
+	case mfsclient.CltomFuseRegister:
+		s.svrRegister(conn, payload)
+	case mfsclient.CltomFuseStatFS:
+		s.svrStatFS(conn, payload)
+	case mfsclient.CltomFuseLookup:
+		s.svrLookup(conn, payload)
+	case mfsclient.CltomFuseReadDir:
 		s.svrReadDir(conn, payload)
-	case mfsclient.CmdFUSEGETATTR:
+	case mfsclient.CltomFuseGetAttr:
 		s.svrGetAttr(conn, payload)
-	case mfsclient.CmdFUSEMKNOD:
+	case mfsclient.CltomFuseMknod:
 		s.svrMknod(conn, payload)
-	case mfsclient.CmdFUSEMKDIR:
+	case mfsclient.CltomFuseMkdir:
 		s.svrMkdir(conn, payload)
-	case mfsclient.CmdFUSEWRITE:
+	case mfsclient.CmdFUSEWRITE: // Phase 1 stub opcode
 		s.svrWrite(conn, payload)
-	case mfsclient.CmdFUSEREAD:
+	case mfsclient.CmdFUSEREAD: // Phase 1 stub opcode
 		s.svrRead(conn, payload)
-	case mfsclient.CmdFUSEUNLINK:
+	case mfsclient.CltomFuseUnlink:
 		s.svrUnlink(conn, payload)
-	case mfsclient.CmdFUSERMDIR:
+	case mfsclient.CltomFuseRmdir:
 		s.svrRmdir(conn, payload)
 	default:
 		_ = mfsclient.WriteFrame(conn, cmd+100, []byte{mfsclient.StatusERROR})
@@ -135,20 +136,142 @@ func (s *integFakeServer) dispatch(conn net.Conn, cmd uint32, payload []byte) {
 
 func (s *integFakeServer) alloc() uint32 { return s.nextID.Add(1) - 1 }
 
-func sOK(conn net.Conn, ans uint32, data []byte) {
-	_ = mfsclient.WriteFrame(conn, ans, append([]byte{mfsclient.StatusOK}, data...))
+// ─── Attr helpers ─────────────────────────────────────────────────────────────
+
+// buildIntegAttrs encodes the 35-byte MooseFS wire attrs for an integNode.
+func buildIntegAttrs(n *integNode) []byte {
+	var mode16 uint16
+	if n.isDir {
+		mode16 = (2 << 12) | uint16(n.mode&0x0FFF)
+	} else {
+		mode16 = (1 << 12) | uint16(n.mode&0x0FFF)
+	}
+	var buf []byte
+	buf = mfsclient.PutUint8(buf, 0)                       // flags
+	buf = mfsclient.PutUint16(buf, mode16)                 // mode
+	buf = mfsclient.PutUint32(buf, 0)                      // uid
+	buf = mfsclient.PutUint32(buf, 0)                      // gid
+	buf = mfsclient.PutUint32(buf, uint32(n.modTime))      // atime
+	buf = mfsclient.PutUint32(buf, uint32(n.modTime))      // mtime
+	buf = mfsclient.PutUint32(buf, uint32(n.modTime))      // ctime
+	buf = mfsclient.PutUint32(buf, 1)                      // nlink
+	buf = mfsclient.PutUint64(buf, uint64(len(n.content))) // size
+	return buf // 35 bytes
 }
 
-func sErr(conn net.Conn, ans uint32, status uint8) {
-	_ = mfsclient.WriteFrame(conn, ans, []byte{status})
+// integWriteSuccess sends [msgid:32][data...] response.
+func integWriteSuccess(conn net.Conn, ans uint32, msgid uint32, data []byte) {
+	buf := mfsclient.PutUint32(nil, msgid)
+	buf = append(buf, data...)
+	_ = mfsclient.WriteFrame(conn, ans, buf)
 }
 
-func (s *integFakeServer) svrReadDir(conn net.Conn, payload []byte) {
-	nodeID, _, err := mfsclient.ReadUint32(payload, 0)
-	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEREADDIR, mfsclient.StatusERROR)
+// integWriteStatus sends [msgid:32][status:8] response.
+func integWriteStatus(conn net.Conn, ans uint32, msgid uint32, status uint8) {
+	buf := mfsclient.PutUint32(nil, msgid)
+	buf = append(buf, status)
+	_ = mfsclient.WriteFrame(conn, ans, buf)
+}
+
+// ─── Register / StatFS / Lookup handlers ─────────────────────────────────────
+
+func (s *integFakeServer) svrRegister(conn net.Conn, payload []byte) {
+	if len(payload) < 65 {
+		_ = mfsclient.WriteFrame(conn, mfsclient.MatoclFuseRegister, []byte{mfsclient.StatusERROR})
 		return
 	}
+	rcode := payload[64]
+	if rcode == mfsclient.RegisterNewSession {
+		var resp []byte
+		resp = mfsclient.PutUint32(resp, 263168) // version
+		resp = mfsclient.PutUint32(resp, 42)     // sessionId
+		resp = mfsclient.PutUint64(resp, 0)      // metaId
+		resp = mfsclient.PutUint8(resp, 0)       // sesflags
+		resp = mfsclient.PutUint32(resp, 0)      // rootuid
+		resp = mfsclient.PutUint32(resp, 0)      // rootgid
+		resp = mfsclient.PutUint32(resp, 0)      // mapalluid
+		resp = mfsclient.PutUint32(resp, 0)      // mapallgid
+		resp = mfsclient.PutUint8(resp, 1)       // mingoal
+		resp = mfsclient.PutUint8(resp, 9)       // maxgoal
+		resp = mfsclient.PutUint32(resp, 0)      // mintrashtime
+		resp = mfsclient.PutUint32(resp, 0)      // maxtrashtime
+		_ = mfsclient.WriteFrame(conn, mfsclient.MatoclFuseRegister, resp)
+		return
+	}
+	_ = mfsclient.WriteFrame(conn, mfsclient.MatoclFuseRegister, []byte{mfsclient.StatusERROR})
+}
+
+func (s *integFakeServer) svrStatFS(conn net.Conn, payload []byte) {
+	var msgid uint32
+	if len(payload) >= 4 {
+		msgid = binary.BigEndian.Uint32(payload[0:4])
+	}
+	const TB = int64(1) << 40
+	const GB500 = int64(500) << 30
+	var resp []byte
+	resp = mfsclient.PutUint32(resp, msgid)
+	resp = mfsclient.PutUint64(resp, uint64(TB))
+	resp = mfsclient.PutUint64(resp, uint64(GB500))
+	resp = mfsclient.PutUint64(resp, 0)         // trashspace
+	resp = mfsclient.PutUint64(resp, 0)         // sustainedspace
+	resp = mfsclient.PutUint32(resp, 1_000_000) // inodes
+	_ = mfsclient.WriteFrame(conn, mfsclient.MatoclFuseStatFS, resp)
+}
+
+func (s *integFakeServer) svrLookup(conn net.Conn, payload []byte) {
+	// [msgid:32][parent:32][namelen:8][name][uid:32][gcnt:32][gid:32]
+	var err error
+	var msgid, parentID uint32
+	var off int
+
+	msgid, off, err = mfsclient.ReadUint32(payload, 0)
+	if err != nil {
+		integWriteStatus(conn, mfsclient.MatoclFuseLookup, 0, mfsclient.StatusERROR)
+		return
+	}
+	parentID, off, err = mfsclient.ReadUint32(payload, off)
+	if err != nil {
+		integWriteStatus(conn, mfsclient.MatoclFuseLookup, msgid, mfsclient.StatusERROR)
+		return
+	}
+	name, _, err := mfsclient.ReadStringU8(payload, off)
+	if err != nil {
+		integWriteStatus(conn, mfsclient.MatoclFuseLookup, msgid, mfsclient.StatusERROR)
+		return
+	}
+
+	s.mu.Lock()
+	var found *integNode
+	for _, n := range s.nodes {
+		if n.parent == parentID && n.name == name {
+			found = n
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if found == nil {
+		integWriteStatus(conn, mfsclient.MatoclFuseLookup, msgid, mfsclient.StatusENOENT)
+		return
+	}
+
+	attrs := buildIntegAttrs(found)
+	data := mfsclient.PutUint32(nil, found.nodeID)
+	data = append(data, attrs...)
+	integWriteSuccess(conn, mfsclient.MatoclFuseLookup, msgid, data)
+}
+
+// ─── Directory / file handlers ────────────────────────────────────────────────
+
+func (s *integFakeServer) svrReadDir(conn net.Conn, payload []byte) {
+	// [msgid:32][parent:32][uid:32][gcnt:32][gid:32][flags:8][maxentries:32][skipcnt:64]
+	if len(payload) < 8 {
+		integWriteStatus(conn, mfsclient.MatoclFuseReadDir, 0, mfsclient.StatusERROR)
+		return
+	}
+	msgid := binary.BigEndian.Uint32(payload[0:4])
+	nodeID := binary.BigEndian.Uint32(payload[4:8])
+
 	s.mu.Lock()
 	_, ok := s.nodes[nodeID]
 	var children []*integNode
@@ -163,132 +286,170 @@ func (s *integFakeServer) svrReadDir(conn net.Conn, payload []byte) {
 	s.mu.Unlock()
 
 	if !ok {
-		sErr(conn, mfsclient.AnsFUSEREADDIR, mfsclient.StatusENOENT)
+		integWriteStatus(conn, mfsclient.MatoclFuseReadDir, msgid, mfsclient.StatusENOENT)
 		return
 	}
-	buf := mfsclient.PutUint32(nil, uint32(len(children)))
+
+	// Encode: [namelen:8][name][inode:32][type:8]
+	var data []byte
 	for _, c := range children {
-		buf = mfsclient.PutUint32(buf, c.nodeID)
-		var isDir byte
+		data = mfsclient.PutUint8(data, uint8(len(c.name)))
+		data = append(data, []byte(c.name)...)
+		data = mfsclient.PutUint32(data, c.nodeID)
+		var nodeType uint8
 		if c.isDir {
-			isDir = 1
+			nodeType = 2
+		} else {
+			nodeType = 1
 		}
-		buf = append(buf, isDir)
-		buf = mfsclient.PutString(buf, c.name)
+		data = mfsclient.PutUint8(data, nodeType)
 	}
-	sOK(conn, mfsclient.AnsFUSEREADDIR, buf)
+	integWriteSuccess(conn, mfsclient.MatoclFuseReadDir, msgid, data)
 }
 
 func (s *integFakeServer) svrGetAttr(conn net.Conn, payload []byte) {
-	nodeID, _, err := mfsclient.ReadUint32(payload, 0)
-	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEGETATTR, mfsclient.StatusERROR)
+	// [msgid:32][inode:32]
+	if len(payload) < 8 {
+		integWriteStatus(conn, mfsclient.MatoclFuseGetAttr, 0, mfsclient.StatusERROR)
 		return
 	}
+	msgid := binary.BigEndian.Uint32(payload[0:4])
+	nodeID := binary.BigEndian.Uint32(payload[4:8])
+
 	s.mu.Lock()
 	n, ok := s.nodes[nodeID]
 	s.mu.Unlock()
+
 	if !ok {
-		sErr(conn, mfsclient.AnsFUSEGETATTR, mfsclient.StatusENOENT)
+		integWriteStatus(conn, mfsclient.MatoclFuseGetAttr, msgid, mfsclient.StatusENOENT)
 		return
 	}
-	buf := mfsclient.PutUint32(nil, n.nodeID)
-	buf = mfsclient.PutUint64(buf, uint64(len(n.content)))
-	buf = mfsclient.PutUint32(buf, n.mode)
-	buf = mfsclient.PutInt64(buf, n.modTime)
-	sOK(conn, mfsclient.AnsFUSEGETATTR, buf)
+
+	attrs := buildIntegAttrs(n)
+	integWriteSuccess(conn, mfsclient.MatoclFuseGetAttr, msgid, attrs)
 }
 
 func (s *integFakeServer) svrMknod(conn net.Conn, payload []byte) {
-	parentID, off, err := mfsclient.ReadUint32(payload, 0)
+	// [msgid:32][parent:32][namelen:8][name][type:8][mode:16][umask:16][uid:32][gcnt:32][gid:32][rdev:32]
+	var err error
+	var msgid, parentID uint32
+	var off int
+
+	msgid, off, err = mfsclient.ReadUint32(payload, 0)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEMKNOD, mfsclient.StatusERROR)
+		integWriteStatus(conn, mfsclient.MatoclFuseMknod, 0, mfsclient.StatusERROR)
 		return
 	}
-	mode, off, err := mfsclient.ReadUint32(payload, off)
+	parentID, off, err = mfsclient.ReadUint32(payload, off)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEMKNOD, mfsclient.StatusERROR)
+		integWriteStatus(conn, mfsclient.MatoclFuseMknod, msgid, mfsclient.StatusERROR)
 		return
 	}
-	name, _, err := mfsclient.ReadString(payload, off)
+	name, _, err := mfsclient.ReadStringU8(payload, off)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEMKNOD, mfsclient.StatusERROR)
+		integWriteStatus(conn, mfsclient.MatoclFuseMknod, msgid, mfsclient.StatusERROR)
 		return
 	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if _, ok := s.nodes[parentID]; !ok {
-		sErr(conn, mfsclient.AnsFUSEMKNOD, mfsclient.StatusENOENT)
+		integWriteStatus(conn, mfsclient.MatoclFuseMknod, msgid, mfsclient.StatusENOENT)
 		return
 	}
 	for _, n := range s.nodes {
 		if n.parent == parentID && n.name == name {
-			sOK(conn, mfsclient.AnsFUSEMKNOD, mfsclient.PutUint32(nil, n.nodeID))
+			// Idempotent — return existing node.
+			attrs := buildIntegAttrs(n)
+			data := mfsclient.PutUint32(nil, n.nodeID)
+			data = append(data, attrs...)
+			integWriteSuccess(conn, mfsclient.MatoclFuseMknod, msgid, data)
 			return
 		}
 	}
 	id := s.alloc()
-	s.nodes[id] = &integNode{
+	nn := &integNode{
 		nodeID: id, name: name, parent: parentID, isDir: false,
-		mode: modeFile | mode, modTime: time.Now().Unix(),
+		mode: 0o644, modTime: time.Now().Unix(),
 	}
-	sOK(conn, mfsclient.AnsFUSEMKNOD, mfsclient.PutUint32(nil, id))
+	s.nodes[id] = nn
+	attrs := buildIntegAttrs(nn)
+	data := mfsclient.PutUint32(nil, id)
+	data = append(data, attrs...)
+	integWriteSuccess(conn, mfsclient.MatoclFuseMknod, msgid, data)
 }
 
 func (s *integFakeServer) svrMkdir(conn net.Conn, payload []byte) {
-	parentID, off, err := mfsclient.ReadUint32(payload, 0)
+	// [msgid:32][parent:32][namelen:8][name][mode:16][umask:16][uid:32][gcnt:32][gid:32][copysgid:8]
+	var err error
+	var msgid, parentID uint32
+	var off int
+
+	msgid, off, err = mfsclient.ReadUint32(payload, 0)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEMKDIR, mfsclient.StatusERROR)
+		integWriteStatus(conn, mfsclient.MatoclFuseMkdir, 0, mfsclient.StatusERROR)
 		return
 	}
-	mode, off, err := mfsclient.ReadUint32(payload, off)
+	parentID, off, err = mfsclient.ReadUint32(payload, off)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEMKDIR, mfsclient.StatusERROR)
+		integWriteStatus(conn, mfsclient.MatoclFuseMkdir, msgid, mfsclient.StatusERROR)
 		return
 	}
-	name, _, err := mfsclient.ReadString(payload, off)
+	name, _, err := mfsclient.ReadStringU8(payload, off)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEMKDIR, mfsclient.StatusERROR)
+		integWriteStatus(conn, mfsclient.MatoclFuseMkdir, msgid, mfsclient.StatusERROR)
 		return
 	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if _, ok := s.nodes[parentID]; !ok {
-		sErr(conn, mfsclient.AnsFUSEMKDIR, mfsclient.StatusENOENT)
+		integWriteStatus(conn, mfsclient.MatoclFuseMkdir, msgid, mfsclient.StatusENOENT)
 		return
 	}
 	for _, n := range s.nodes {
 		if n.parent == parentID && n.name == name && n.isDir {
-			sOK(conn, mfsclient.AnsFUSEMKDIR, mfsclient.PutUint32(nil, n.nodeID))
+			// Idempotent — return existing node.
+			attrs := buildIntegAttrs(n)
+			data := mfsclient.PutUint32(nil, n.nodeID)
+			data = append(data, attrs...)
+			integWriteSuccess(conn, mfsclient.MatoclFuseMkdir, msgid, data)
 			return
 		}
 	}
 	id := s.alloc()
-	s.nodes[id] = &integNode{
+	nn := &integNode{
 		nodeID: id, name: name, parent: parentID, isDir: true,
-		mode: modeDir | mode, modTime: time.Now().Unix(),
+		mode: 0o755, modTime: time.Now().Unix(),
 	}
-	sOK(conn, mfsclient.AnsFUSEMKDIR, mfsclient.PutUint32(nil, id))
+	s.nodes[id] = nn
+	attrs := buildIntegAttrs(nn)
+	data := mfsclient.PutUint32(nil, id)
+	data = append(data, attrs...)
+	integWriteSuccess(conn, mfsclient.MatoclFuseMkdir, msgid, data)
 }
 
+// svrWrite uses the Phase 1 stub protocol (opcode 507 / ans 607).
 func (s *integFakeServer) svrWrite(conn net.Conn, payload []byte) {
 	nodeID, off, err := mfsclient.ReadUint32(payload, 0)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEWRITE, mfsclient.StatusERROR)
+		_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEWRITE, []byte{mfsclient.StatusERROR})
 		return
 	}
 	offset, off, err := mfsclient.ReadUint64(payload, off)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEWRITE, mfsclient.StatusERROR)
+		_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEWRITE, []byte{mfsclient.StatusERROR})
 		return
 	}
 	dataLen, off, err := mfsclient.ReadUint32(payload, off)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEWRITE, mfsclient.StatusERROR)
+		_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEWRITE, []byte{mfsclient.StatusERROR})
 		return
 	}
 	if off+int(dataLen) > len(payload) {
-		sErr(conn, mfsclient.AnsFUSEWRITE, mfsclient.StatusERROR)
+		_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEWRITE, []byte{mfsclient.StatusERROR})
 		return
 	}
 	data := payload[off : off+int(dataLen)]
@@ -308,26 +469,27 @@ func (s *integFakeServer) svrWrite(conn net.Conn, payload []byte) {
 	s.mu.Unlock()
 
 	if !ok {
-		sErr(conn, mfsclient.AnsFUSEWRITE, mfsclient.StatusENOENT)
+		_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEWRITE, []byte{mfsclient.StatusENOENT})
 		return
 	}
-	sOK(conn, mfsclient.AnsFUSEWRITE, nil)
+	_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEWRITE, []byte{mfsclient.StatusOK})
 }
 
+// svrRead uses the Phase 1 stub protocol (opcode 506 / ans 606).
 func (s *integFakeServer) svrRead(conn net.Conn, payload []byte) {
 	nodeID, off, err := mfsclient.ReadUint32(payload, 0)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEREAD, mfsclient.StatusERROR)
+		_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEREAD, []byte{mfsclient.StatusERROR})
 		return
 	}
 	offset, off, err := mfsclient.ReadUint64(payload, off)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEREAD, mfsclient.StatusERROR)
+		_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEREAD, []byte{mfsclient.StatusERROR})
 		return
 	}
 	size, _, err := mfsclient.ReadUint32(payload, off)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEREAD, mfsclient.StatusERROR)
+		_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEREAD, []byte{mfsclient.StatusERROR})
 		return
 	}
 
@@ -347,64 +509,87 @@ func (s *integFakeServer) svrRead(conn net.Conn, payload []byte) {
 	s.mu.Unlock()
 
 	if !ok {
-		sErr(conn, mfsclient.AnsFUSEREAD, mfsclient.StatusENOENT)
+		_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEREAD, []byte{mfsclient.StatusENOENT})
 		return
 	}
-	buf := mfsclient.PutUint32(nil, uint32(len(chunk)))
+	buf := []byte{mfsclient.StatusOK}
+	buf = mfsclient.PutUint32(buf, uint32(len(chunk)))
 	buf = append(buf, chunk...)
-	sOK(conn, mfsclient.AnsFUSEREAD, buf)
+	_ = mfsclient.WriteFrame(conn, mfsclient.AnsFUSEREAD, buf)
 }
 
 func (s *integFakeServer) svrUnlink(conn net.Conn, payload []byte) {
-	parentID, off, err := mfsclient.ReadUint32(payload, 0)
+	// [msgid:32][parent:32][namelen:8][name][uid:32][gcnt:32][gid:32]
+	var err error
+	var msgid, parentID uint32
+	var off int
+
+	msgid, off, err = mfsclient.ReadUint32(payload, 0)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEUNLINK, mfsclient.StatusERROR)
+		integWriteStatus(conn, mfsclient.MatoclFuseUnlink, 0, mfsclient.StatusERROR)
 		return
 	}
-	name, _, err := mfsclient.ReadString(payload, off)
+	parentID, off, err = mfsclient.ReadUint32(payload, off)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSEUNLINK, mfsclient.StatusERROR)
+		integWriteStatus(conn, mfsclient.MatoclFuseUnlink, msgid, mfsclient.StatusERROR)
 		return
 	}
+	name, _, err := mfsclient.ReadStringU8(payload, off)
+	if err != nil {
+		integWriteStatus(conn, mfsclient.MatoclFuseUnlink, msgid, mfsclient.StatusERROR)
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, n := range s.nodes {
 		if n.parent == parentID && n.name == name && !n.isDir {
 			delete(s.nodes, id)
-			sOK(conn, mfsclient.AnsFUSEUNLINK, nil)
+			integWriteStatus(conn, mfsclient.MatoclFuseUnlink, msgid, mfsclient.StatusOK)
 			return
 		}
 	}
-	sErr(conn, mfsclient.AnsFUSEUNLINK, mfsclient.StatusENOENT)
+	integWriteStatus(conn, mfsclient.MatoclFuseUnlink, msgid, mfsclient.StatusENOENT)
 }
 
 func (s *integFakeServer) svrRmdir(conn net.Conn, payload []byte) {
-	parentID, off, err := mfsclient.ReadUint32(payload, 0)
+	// [msgid:32][parent:32][namelen:8][name][uid:32][gcnt:32][gid:32]
+	var err error
+	var msgid, parentID uint32
+	var off int
+
+	msgid, off, err = mfsclient.ReadUint32(payload, 0)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSERMDIR, mfsclient.StatusERROR)
+		integWriteStatus(conn, mfsclient.MatoclFuseRmdir, 0, mfsclient.StatusERROR)
 		return
 	}
-	name, _, err := mfsclient.ReadString(payload, off)
+	parentID, off, err = mfsclient.ReadUint32(payload, off)
 	if err != nil {
-		sErr(conn, mfsclient.AnsFUSERMDIR, mfsclient.StatusERROR)
+		integWriteStatus(conn, mfsclient.MatoclFuseRmdir, msgid, mfsclient.StatusERROR)
 		return
 	}
+	name, _, err := mfsclient.ReadStringU8(payload, off)
+	if err != nil {
+		integWriteStatus(conn, mfsclient.MatoclFuseRmdir, msgid, mfsclient.StatusERROR)
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, n := range s.nodes {
 		if n.parent == parentID && n.name == name && n.isDir {
 			for _, child := range s.nodes {
 				if child.parent == id {
-					sErr(conn, mfsclient.AnsFUSERMDIR, mfsclient.StatusENOTEMPT)
+					integWriteStatus(conn, mfsclient.MatoclFuseRmdir, msgid, mfsclient.StatusENOTEMPTY)
 					return
 				}
 			}
 			delete(s.nodes, id)
-			sOK(conn, mfsclient.AnsFUSERMDIR, nil)
+			integWriteStatus(conn, mfsclient.MatoclFuseRmdir, msgid, mfsclient.StatusOK)
 			return
 		}
 	}
-	sErr(conn, mfsclient.AnsFUSERMDIR, mfsclient.StatusENOENT)
+	integWriteStatus(conn, mfsclient.MatoclFuseRmdir, msgid, mfsclient.StatusENOENT)
 }
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -554,7 +739,8 @@ func TestCreateDir_idempotent(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, b.CreateDir(ctx, "/idemdir"))
-	require.NoError(t, b.CreateDir(ctx, "/idemdir")) // must not error
+	// Second call: fake server returns the existing node (idempotent success).
+	require.NoError(t, b.CreateDir(ctx, "/idemdir"))
 }
 
 // ─── Upload / Download roundtrip ─────────────────────────────────────────────
@@ -717,12 +903,14 @@ func TestWatch_stopsOnContextCancel(t *testing.T) {
 
 // ─── GetQuota tests ───────────────────────────────────────────────────────────
 
-func TestGetQuota_returnsMinusOne(t *testing.T) {
+func TestGetQuota_realValues(t *testing.T) {
 	b := newTestBackend(t, startFakeServer(t))
 	free, total, err := b.GetQuota(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, int64(-1), free)
-	assert.Equal(t, int64(-1), total)
+	// Fake server returns 500GB free, 1TB total.
+	assert.Greater(t, free, int64(0), "free must be positive")
+	assert.Greater(t, total, int64(0), "total must be positive")
+	assert.LessOrEqual(t, free, total, "free <= total")
 }
 
 // ─── Not-connected guard tests ────────────────────────────────────────────────
