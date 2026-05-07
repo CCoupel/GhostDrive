@@ -565,40 +565,47 @@ func (c *Client) Rmdir(parentID uint32, name string) error {
 //
 // Steps:
 //  1. CLTOMA_FUSE_WRITE_CHUNK (434) → master returns ChunkInfo (CS location).
-//  2. DialCS + WriteChunk: data is sent to the chunk server.
+//     c.mu is held only during this master roundtrip.
+//  2. DialCS + WriteChunk: data is sent to the chunk server (no lock held —
+//     CS I/O does not touch c.conn).
 //  3. CLTOMA_FUSE_WRITE_CHUNK_END (436) → master commits the new file length.
+//     c.mu is re-acquired for this second master roundtrip.
 func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	index := uint32(offset / ChunkSize)
 	chunkOffset := uint32(offset % ChunkSize)
 
-	// 1. Ask master for write permission and chunk location.
-	req := PutUint32(nil, 0) // msgid
-	req = PutUint32(req, nodeID)
-	req = PutUint32(req, index)
-	req = PutUint32(req, 0) // lockid
+	// Phase 1: roundtrip master sous mutex — obtenir la localisation du chunk.
+	info, err := func() (*ChunkInfo, error) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
 
-	ans, err := c.roundtrip(CltomFuseWriteChunk, MatoclFuseWriteChunk, req)
+		req := PutUint32(nil, 0) // msgid
+		req = PutUint32(req, nodeID)
+		req = PutUint32(req, index)
+		req = PutUint32(req, 0) // lockid
+
+		ans, err := c.roundtrip(CltomFuseWriteChunk, MatoclFuseWriteChunk, req)
+		if err != nil {
+			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK: %w", nodeID, offset, err)
+		}
+		// A 5-byte response is an error: [msgid:32][status:8].
+		if len(ans) == 5 {
+			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK status 0x%02x", nodeID, offset, ans[4])
+		}
+		info, err := parseChunkInfo(ans)
+		if err != nil {
+			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): parse chunk info: %w", nodeID, offset, err)
+		}
+		if len(info.Servers) == 0 {
+			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): no chunk servers available", nodeID, offset)
+		}
+		return info, nil
+	}()
 	if err != nil {
-		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK: %w", nodeID, offset, err)
+		return err
 	}
 
-	// A 5-byte response is an error: [msgid:32][status:8].
-	if len(ans) == 5 {
-		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK status 0x%02x", nodeID, offset, ans[4])
-	}
-
-	info, err := parseChunkInfo(ans)
-	if err != nil {
-		return fmt.Errorf("mfsclient: Write(%d, off=%d): parse chunk info: %w", nodeID, offset, err)
-	}
-	if len(info.Servers) == 0 {
-		return fmt.Errorf("mfsclient: Write(%d, off=%d): no chunk servers available", nodeID, offset)
-	}
-
-	// 2. Write data to the first available chunk server.
+	// Phase 2: I/O chunk server hors mutex — c.conn n'est pas utilisé ici.
 	srv := info.Servers[0]
 	cs, err := DialCS(srv.IP, srv.Port)
 	if err != nil {
@@ -610,8 +617,11 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): write chunk: %w", nodeID, offset, err)
 	}
 
-	// 3. Commit write to master — report new total file length.
+	// Phase 3: roundtrip master sous mutex — commiter la nouvelle longueur.
 	newLength := offset + uint64(len(data))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	endReq := PutUint32(nil, 0) // msgid
 	endReq = PutUint64(endReq, info.ChunkID)
 	endReq = PutUint32(endReq, info.Version)
@@ -636,49 +646,60 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 //
 // Steps:
 //  1. CLTOMA_FUSE_READ_CHUNK (432) → master returns ChunkInfo (CS location).
-//  2. DialCS + ReadChunk: data is fetched from the chunk server.
+//     c.mu is held only during this master roundtrip.
+//  2. DialCS + ReadChunk: data is fetched from the chunk server (no lock held —
+//     CS I/O does not touch c.conn).
 //
 // Returns an empty (nil) slice when the requested offset is past the end of
 // the file (EOF).
 func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	index := uint32(offset / ChunkSize)
 	chunkOffset := uint32(offset % ChunkSize)
 
-	// 1. Locate chunk on master.
-	req := PutUint32(nil, 0) // msgid
-	req = PutUint32(req, nodeID)
-	req = PutUint32(req, index)
+	// Phase 1: roundtrip master sous mutex — localiser le chunk.
+	info, err := func() (*ChunkInfo, error) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
 
-	ans, err := c.roundtrip(CltomFuseReadChunk, MatoclFuseReadChunk, req)
-	if err != nil {
-		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): READ_CHUNK: %w", nodeID, offset, err)
-	}
+		req := PutUint32(nil, 0) // msgid
+		req = PutUint32(req, nodeID)
+		req = PutUint32(req, index)
 
-	// A 5-byte response is an error or EOF: [msgid:32][status:8].
-	if len(ans) == 5 {
-		status := ans[4]
-		switch status {
-		case StatusOK:
-			return nil, nil // empty chunk (EOF)
-		case StatusENOENT:
-			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): %w", nodeID, offset, plugins.ErrFileNotFound)
-		default:
-			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): status 0x%02x", nodeID, offset, status)
+		ans, err := c.roundtrip(CltomFuseReadChunk, MatoclFuseReadChunk, req)
+		if err != nil {
+			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): READ_CHUNK: %w", nodeID, offset, err)
 		}
-	}
 
-	info, err := parseChunkInfo(ans)
+		// A 5-byte response is an error or EOF: [msgid:32][status:8].
+		if len(ans) == 5 {
+			status := ans[4]
+			switch status {
+			case StatusOK:
+				return nil, nil // empty chunk (EOF) — info==nil, err==nil
+			case StatusENOENT:
+				return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): %w", nodeID, offset, plugins.ErrFileNotFound)
+			default:
+				return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): status 0x%02x", nodeID, offset, status)
+			}
+		}
+
+		info, err := parseChunkInfo(ans)
+		if err != nil {
+			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): parse chunk info: %w", nodeID, offset, err)
+		}
+		if len(info.Servers) == 0 {
+			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): no chunk servers available", nodeID, offset)
+		}
+		return info, nil
+	}()
 	if err != nil {
-		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): parse chunk info: %w", nodeID, offset, err)
+		return nil, err
 	}
-	if len(info.Servers) == 0 {
-		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): no chunk servers available", nodeID, offset)
+	if info == nil {
+		return nil, nil // EOF
 	}
 
-	// 2. Fetch from first available chunk server.
+	// Phase 2: I/O chunk server hors mutex — c.conn n'est pas utilisé ici.
 	srv := info.Servers[0]
 	cs, err := DialCS(srv.IP, srv.Port)
 	if err != nil {
