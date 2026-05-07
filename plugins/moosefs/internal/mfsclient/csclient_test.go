@@ -230,6 +230,73 @@ func (s *fakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 	}
 }
 
+// ─── Bad-CRC fake server ──────────────────────────────────────────────────────
+
+// badCRCServer listens on a random port and serves a single ReadChunk response
+// where the CRC field is intentionally wrong (correct CRC XOR 0xDEADBEEF).
+type badCRCServer struct {
+	listener net.Listener
+	done     chan struct{}
+}
+
+func newBadCRCServer() *badCRCServer {
+	return &badCRCServer{done: make(chan struct{})}
+}
+
+func (s *badCRCServer) Start() (ip uint32, port uint16) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		panic("badCRCServer: listen: " + err.Error())
+	}
+	s.listener = ln
+	go func() {
+		defer close(s.done)
+		conn, err := s.listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		s.handle(conn)
+	}()
+	addr := ln.Addr().(*net.TCPAddr)
+	ip32 := binary.BigEndian.Uint32(addr.IP.To4())
+	return ip32, uint16(addr.Port)
+}
+
+func (s *badCRCServer) Stop() {
+	_ = s.listener.Close()
+	<-s.done
+}
+
+func (s *badCRCServer) handle(conn net.Conn) {
+	// Consume the CLTOCS_READ request.
+	cmd, payload, err := ReadFrame(conn)
+	if err != nil || cmd != CltocsFuseRead || len(payload) < 20 {
+		return
+	}
+	chunkID, _, _ := ReadUint64(payload, 0)
+
+	block := []byte("some chunk data")
+	correctCRC := crc32.ChecksumIEEE(block)
+	badCRC := correctCRC ^ 0xDEADBEEF // deliberately wrong
+
+	// Send CSTOCL_READ_DATA with bad CRC.
+	var resp []byte
+	resp = PutUint64(resp, chunkID)
+	resp = PutUint16(resp, 0)               // blocknum
+	resp = PutUint16(resp, 0)               // blockOffset
+	resp = PutUint32(resp, uint32(len(block)))
+	resp = PutUint32(resp, badCRC)
+	resp = append(resp, block...)
+	_ = WriteFrame(conn, CstoclFuseReadData, resp)
+
+	// Send CSTOCL_READ_STATUS OK.
+	var status []byte
+	status = PutUint64(status, chunkID)
+	status = PutUint8(status, StatusOK)
+	_ = WriteFrame(conn, CstoclFuseReadStatus, status)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 // TestDialCS_connect verifies that DialCS reaches the fake CS TCP listener.
@@ -262,6 +329,22 @@ func TestReadChunk_success(t *testing.T) {
 	got, err := ReadChunk(conn, chunkID, 1, 0, uint32(len(content)))
 	require.NoError(t, err)
 	assert.Equal(t, content, got, "ReadChunk must return the stored chunk data")
+}
+
+// TestReadChunk_CRCMismatch verifies that ReadChunk returns an error when the
+// chunk server sends a READ_DATA frame with an incorrect CRC-32 checksum.
+func TestReadChunk_CRCMismatch(t *testing.T) {
+	srv := newBadCRCServer()
+	ip, port := srv.Start()
+	defer srv.Stop()
+
+	conn, err := DialCS(ip, port)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = ReadChunk(conn, 9999, 1, 0, 64)
+	require.Error(t, err, "ReadChunk must return an error on CRC mismatch")
+	assert.Contains(t, err.Error(), "CRC mismatch", "error message must mention CRC mismatch")
 }
 
 // TestWriteChunk_success verifies the full WRITE protocol round-trip: the

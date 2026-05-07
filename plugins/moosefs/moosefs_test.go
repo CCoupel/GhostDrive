@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"net"
 	"os"
 	"path/filepath"
@@ -168,7 +169,7 @@ func (s *integFakeCSServer) serveRead(conn net.Conn, payload []byte) {
 		resp = mfsclient.PutUint16(resp, blockNum)
 		resp = mfsclient.PutUint16(resp, blockOff)
 		resp = mfsclient.PutUint32(resp, uint32(len(chunk)))
-		resp = mfsclient.PutUint32(resp, 0) // CRC omitted in fake (not validated)
+		resp = mfsclient.PutUint32(resp, crc32.ChecksumIEEE(chunk)) // CRC-32 IEEE
 		resp = append(resp, chunk...)
 		_ = mfsclient.WriteFrame(conn, mfsclient.CstoclFuseReadData, resp)
 	}

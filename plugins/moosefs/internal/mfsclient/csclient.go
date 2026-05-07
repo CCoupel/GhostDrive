@@ -78,15 +78,26 @@ func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size 
 			if len(data) < hdrLen {
 				return nil, fmt.Errorf("csclient: ReadChunk %d: READ_DATA too short (%d bytes)", chunkID, len(data))
 			}
+			blocknum, _, _ := ReadUint16(data, 8) // after chunkId(8) — for error reporting
 			dataSize, _, err := ReadUint32(data, 12) // after chunkId(8)+blocknum(2)+blockOffset(2)
 			if err != nil {
 				return nil, fmt.Errorf("csclient: ReadChunk %d: READ_DATA size field: %w", chunkID, err)
+			}
+			frameCRC, _, err := ReadUint32(data, 16) // CRC field after size
+			if err != nil {
+				return nil, fmt.Errorf("csclient: ReadChunk %d: READ_DATA crc field: %w", chunkID, err)
 			}
 			if hdrLen+int(dataSize) > len(data) {
 				return nil, fmt.Errorf("csclient: ReadChunk %d: READ_DATA payload truncated (hdr=%d size=%d have=%d)",
 					chunkID, hdrLen, dataSize, len(data))
 			}
-			result = append(result, data[hdrLen:hdrLen+int(dataSize)]...)
+			block := data[hdrLen : hdrLen+int(dataSize)]
+			gotCRC := crc32.ChecksumIEEE(block)
+			if gotCRC != frameCRC {
+				return nil, fmt.Errorf("mfsclient: csclient: CRC mismatch chunk %d block %d: got %08x want %08x",
+					chunkID, blocknum, gotCRC, frameCRC)
+			}
+			result = append(result, block...)
 
 		case CstoclFuseReadStatus:
 			// [chunkId:64][status:8]
