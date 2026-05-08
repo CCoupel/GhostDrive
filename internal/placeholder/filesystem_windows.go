@@ -5,6 +5,7 @@ package placeholder
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -156,13 +157,25 @@ func (fs *GhostFileSystem) Getattr(path string, stat *fuse.Stat_t, _ uint64) int
 
 	info, err := r.backend.Stat(context.Background(), r.relPath)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no such") {
+		// Use errors.Is as primary check — reliably traverses the %w chain to
+		// plugins.ErrFileNotFound regardless of intermediate wrapping text.
+		// The string fallback covers backends that return ad-hoc "not found" /
+		// "no such" messages without wrapping the sentinel.
+		if errors.Is(err, plugins.ErrFileNotFound) ||
+			strings.Contains(err.Error(), "not found") ||
+			strings.Contains(err.Error(), "no such") {
+			log.Printf("[INFO] placeholder: Getattr %q → ENOENT", path)
 			return -fuse.ENOENT
 		}
-		log.Printf("placeholder: Getattr %s: %v", path, err)
+		// Any other error (TCP drop, unexpected server status, etc.) maps to EIO.
+		// On Windows WinFsp maps EIO → STATUS_IO_DEVICE_ERROR, which aborts
+		// rename without calling our Rename callback. Log the full error so we
+		// can diagnose which error code triggered EIO.
+		log.Printf("[ERROR] placeholder: Getattr %q → EIO: %v", path, err)
 		return -fuse.EIO
 	}
 	if info == nil {
+		log.Printf("[INFO] placeholder: Getattr %q → ENOENT (nil info)", path)
 		return -fuse.ENOENT
 	}
 
