@@ -12,6 +12,7 @@
 package mfsclient
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"sync"
@@ -335,31 +336,35 @@ func (c *Client) GetAttr(nodeID uint32) (*Attr, error) {
 //
 //	[msgid:32=0][parent:32][uid:32=0][gcnt:32=1][gid:32=0][flags:8=0][maxentries:32=0xffff][skipcnt:64=0]
 //
-// Response (MATOCL_FUSE_READDIR = 429):
+// Response (MATOCL_FUSE_READDIR = 429) — MooseFS 4.x always embeds full attrs:
 //
-//	[msgid:32][entries...] where each entry is [namelen:8][name][inode:32][type:8]
-//	type: 1=file, 2=dir
+//	[msgid:32][entries...]
+//	each entry: [namelen:8][name:namelen][inode:32][attrs:35]
+//	attrs layout: [flags:8][mode:16][uid:32][gid:32][atime:32][mtime:32][ctime:32][nlink:32][size:64]
+//	mode bits 15-12 encode the node type: 1=file, 2=dir
+const readDirAttrsLen = 35
+
 func (c *Client) ReadDir(nodeID uint32) ([]DirEntry, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	req := PutUint32(nil, 0)        // msgid
-	req = PutUint32(req, nodeID)    // parent inode
-	req = PutUint32(req, 0)         // uid
-	req = PutUint32(req, 1)         // gcnt
-	req = PutUint32(req, 0)         // gid
-	req = PutUint8(req, 0)          // flags
-	req = PutUint32(req, 0xffff)    // maxentries
-	req = PutUint64(req, 0)         // skipcnt
+	req := PutUint32(nil, 0)     // msgid
+	req = PutUint32(req, nodeID) // parent inode
+	req = PutUint32(req, 0)      // uid
+	req = PutUint32(req, 1)      // gcnt
+	req = PutUint32(req, 0)      // gid
+	req = PutUint8(req, 0)       // flags
+	req = PutUint32(req, 0xffff) // maxentries
+	req = PutUint64(req, 0)      // skipcnt
 
 	ans, err := c.roundtrip(CltomFuseReadDir, MatoclFuseReadDir, req)
 	if err != nil {
 		return nil, fmt.Errorf("mfsclient: ReadDir(%d): %w", nodeID, err)
 	}
 
-	// Skip msgid (4 bytes).
 	if len(ans) < 4 {
-		return nil, fmt.Errorf("mfsclient: ReadDir(%d): response too short", nodeID)
+		return nil, fmt.Errorf("mfsclient: ReadDir(%d): response too short (%d bytes) hex=%s",
+			nodeID, len(ans), hex.EncodeToString(ans))
 	}
 
 	entries := make([]DirEntry, 0, 16)
@@ -373,7 +378,10 @@ func (c *Client) ReadDir(nodeID uint32) ([]DirEntry, error) {
 			break
 		}
 		if off+int(nameLen) > len(ans) {
-			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry name truncated", nodeID)
+			// Dump raw bytes to diagnose the actual server response format.
+			dump := hex.EncodeToString(ans)
+			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry name truncated at off=%d (namelen=%d, buf=%d) hex=%s",
+				nodeID, off, nameLen, len(ans), dump)
 		}
 		e.Name = string(ans[off : off+int(nameLen)])
 		off += int(nameLen)
@@ -383,13 +391,30 @@ func (c *Client) ReadDir(nodeID uint32) ([]DirEntry, error) {
 			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry inode: %w", nodeID, err)
 		}
 
-		var nodeType uint8
-		nodeType, off, err = ReadUint8(ans, off)
-		if err != nil {
-			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry type: %w", nodeID, err)
+		// MooseFS 4.x embeds 35-byte attrs per entry (not a bare 1-byte type).
+		// attrs[0]=flags, attrs[1:3]=mode (bits15-12=type, 2=dir), attrs[15:19]=mtime, attrs[27:35]=size.
+		if off+readDirAttrsLen > len(ans) {
+			dump := hex.EncodeToString(ans)
+			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry %q attrs truncated at off=%d (need %d, buf=%d) hex=%s",
+				nodeID, e.Name, off, readDirAttrsLen, len(ans), dump)
 		}
-		e.IsDir = nodeType == 2
+		var mode uint16
+		mode, _, err = ReadUint16(ans, off+1) // skip flags byte at off+0
+		if err != nil {
+			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry mode: %w", nodeID, err)
+		}
+		e.IsDir = (mode >> 12) == 2
 
+		e.MTime, _, err = ReadUint32(ans, off+15) // mtime at attrs offset 15
+		if err != nil {
+			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry mtime: %w", nodeID, err)
+		}
+		e.Size, _, err = ReadUint64(ans, off+27) // size at attrs offset 27
+		if err != nil {
+			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry size: %w", nodeID, err)
+		}
+
+		off += readDirAttrsLen
 		entries = append(entries, e)
 	}
 	return entries, nil
