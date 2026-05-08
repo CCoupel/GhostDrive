@@ -444,7 +444,8 @@ func (fs *GhostFileSystem) Rename(oldpath, newpath string) int {
 		return -fuse.EXDEV
 	}
 	if err := ro.backend.Move(context.Background(), ro.relPath, rn.relPath); err != nil {
-		log.Printf("placeholder: Rename %s → %s: %v", oldpath, newpath, err)
+		log.Printf("[ERROR] placeholder: Rename %q → %q relPaths=%q→%q: %v",
+			oldpath, newpath, ro.relPath, rn.relPath, err)
 		return -fuse.EIO
 	}
 	return 0
@@ -469,6 +470,7 @@ func (fs *GhostFileSystem) Statfs(path string, stat *fuse.Statfs_t) int {
 	free, total, err := fs.backends[0].Backend.GetQuota(context.Background())
 	if err != nil || total == 0 {
 		stat.Bsize = 4096
+		stat.Frsize = 4096
 		stat.Blocks = 1 << 40 / 4096
 		stat.Bfree = 1 << 39 / 4096
 		stat.Bavail = stat.Bfree
@@ -476,6 +478,7 @@ func (fs *GhostFileSystem) Statfs(path string, stat *fuse.Statfs_t) int {
 	}
 	bsize := uint64(4096)
 	stat.Bsize = bsize
+	stat.Frsize = bsize
 	stat.Blocks = uint64(total) / bsize
 	stat.Bfree = uint64(free) / bsize
 	stat.Bavail = stat.Bfree
