@@ -440,7 +440,7 @@ func (fs *GhostFileSystem) Rename(oldpath, newpath string) (errc int) {
 			errc = -fuse.EIO
 		}
 	}()
-	log.Printf("[DEBUG] placeholder: Rename entry %q → %q", oldpath, newpath)
+	log.Printf("[INFO] placeholder: Rename entry %q → %q", oldpath, newpath)
 	ro := fs.route(oldpath)
 	rn := fs.route(newpath)
 	if ro == nil || rn == nil {
@@ -455,7 +455,7 @@ func (fs *GhostFileSystem) Rename(oldpath, newpath string) (errc int) {
 			oldpath, newpath, ro.relPath, rn.relPath, err)
 		return -fuse.EIO
 	}
-	log.Printf("[DEBUG] placeholder: Rename success %q → %q", oldpath, newpath)
+	log.Printf("[INFO] placeholder: Rename success %q → %q", oldpath, newpath)
 	return 0
 }
 
