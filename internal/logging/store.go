@@ -169,15 +169,20 @@ func parseLine(line string) Entry {
 		}
 	}
 
-	// Keyword-based level detection (only when not set by an explicit bracket).
-	if !levelExplicit {
+	// Keyword-based level detection.
+	// Always applied when no explicit bracket was found.
+	// Also applied when levelExplicit=true but level is INFO, to allow plugin
+	// proxy logs (wrapped as [INFO] by prefixWriter→logger.Info) to surface
+	// ERROR/WARN content correctly. DEBUG is only applied without explicit level
+	// to avoid downgrading real INFO messages.
+	if !levelExplicit || e.Level == LevelInfo {
 		lower := strings.ToLower(msg)
 		switch {
 		case containsAny(lower, "error", "failed", "fatal", "panic"):
 			e.Level = LevelError
 		case containsAny(lower, "warn", "warning"):
 			e.Level = LevelWarn
-		case containsAny(lower, "debug", "trace"):
+		case !levelExplicit && containsAny(lower, "debug", "trace"):
 			e.Level = LevelDebug
 		}
 	}
