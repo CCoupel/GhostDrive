@@ -433,7 +433,14 @@ func (fs *GhostFileSystem) Unlink(path string) int {
 	return 0
 }
 
-func (fs *GhostFileSystem) Rename(oldpath, newpath string) int {
+func (fs *GhostFileSystem) Rename(oldpath, newpath string) (errc int) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[ERROR] placeholder: Rename panic %q → %q: %v", oldpath, newpath, r)
+			errc = -fuse.EIO
+		}
+	}()
+	log.Printf("[DEBUG] placeholder: Rename entry %q → %q", oldpath, newpath)
 	ro := fs.route(oldpath)
 	rn := fs.route(newpath)
 	if ro == nil || rn == nil {
@@ -448,6 +455,7 @@ func (fs *GhostFileSystem) Rename(oldpath, newpath string) int {
 			oldpath, newpath, ro.relPath, rn.relPath, err)
 		return -fuse.EIO
 	}
+	log.Printf("[DEBUG] placeholder: Rename success %q → %q", oldpath, newpath)
 	return 0
 }
 
