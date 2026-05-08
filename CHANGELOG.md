@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Plugin MooseFS** : nouveau backend de stockage natif — connexion directe au master MooseFS via TCP (protocole natif MooseFS 4.x), sans mount intermédiaire. Opérations supportées : List, Stat, Upload, Download, Delete, Move, CreateDir, Watch (polling). (#26)
 - **Tests d'intégration MooseFS** : suite complète avec fake TCP server (coverage 81.9%). (#27)
+- **Protocole TCP MooseFS 4.x complet** : implémentation des vrais opcodes (CLTOMA_*/MATOCL_* 400-437) remplaçant les opcodes fictifs (501-508). Phase 1 : FUSE_REGISTER (blob ACL + sessionID), Lookup O(1), StatFS, GetAttr, ReadDir, Mknod, Mkdir, Unlink, Rmdir avec vrais formats payload. Phase 2 : CSClient pour I/O chunk server (opcodes 200-213, CRC-32 IEEE en lecture). (#94)
 
 ### Changed
 
@@ -18,11 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Renommage WinFsp** : `Getattr` utilisait uniquement un test textuel pour détecter les erreurs "file not found", ce qui pouvait retourner `-EIO` au lieu de `-ENOENT` pour la destination d'un rename. WinFsp mappe EIO → `STATUS_IO_DEVICE_ERROR` et abandonne le rename sans jamais invoquer notre callback FUSE — résultat visible : `ERROR_IO_DEVICE` (0x8007045D) dans l'explorateur. Fix : `errors.Is(err, plugins.ErrFileNotFound)` comme check primaire, le test textuel conservé en fallback. (#97)
 - **Badge "Manuel" supprimé** : le badge redondant affiché sur les cards backend en mode autoSync off a été retiré. L'icône RefreshCw grisée est le seul indicateur du mode manuel. (#93)
+- **I/O chunk server optimisée** : mutex libéré avant les appels chunk server (ReadChunk/WriteChunk) — élimine deadlock potentiel et améliore concurrence. (#94)
+- **Borne maximale ReadFrame** : limite de sécurité à 128 MiB pour la taille des frames lus du master MooseFS. (#94)
+- **Vérification CRC-32 IEEE** : les lectures depuis chunk server vérifient désormais l'intégrité des données via CRC-32 IEEE. (#94)
 
 ### Notes
 
-- Le plugin MooseFS v1.5.x utilise des constantes de protocole provisoires non validées contre un cluster MooseFS réel. La validation contre un master de production est prévue avant release v1.5.0.
+- Le protocole TCP MooseFS 4.x est entièrement implémenté avec vrais opcodes (CLTOMA_*/MATOCL_*) — validation en cours sur cluster production (v1.5.1).
 - `GetQuota` retourne (-1, -1, nil) — MooseFS ne l'expose pas via le protocole minimal implémenté.
 - `Move` : upload-first (source préservée si l'upload échoue). FUSE_RENAME natif prévu v1.6.x.
 
