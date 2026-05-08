@@ -198,7 +198,7 @@ func (c *Client) Register() error {
 //
 // Request (CLTOMA_FUSE_STATFS = 402):
 //
-//	[msgid:32=0][sessionId:32]
+//	[msgid:32=0]
 //
 // Response (MATOCL_FUSE_STATFS = 403):
 //
@@ -209,8 +209,7 @@ func (c *Client) StatFS() (free, total int64, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	req := PutUint32(nil, 0) // msgid
-	req = PutUint32(req, c.sessionID)
+	req := PutUint32(nil, 0) // msgid only — MooseFS 4.x StatFS takes no sessionId
 
 	ans, err := c.roundtrip(CltomFuseStatFS, MatoclFuseStatFS, req)
 	if err != nil {

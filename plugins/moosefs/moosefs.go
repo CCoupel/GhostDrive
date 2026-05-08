@@ -761,13 +761,17 @@ func (b *Backend) GetQuota(_ context.Context) (free, total int64, err error) {
 			if attempt == 0 && isConnError(err) {
 				log.Printf("getquota: connection error, reconnecting: %v", err)
 				if reconnErr := b.reconnect(); reconnErr != nil {
+					log.Printf("getquota: free=%d total=%d err=%v", free, total, err)
 					return 0, 0, fmt.Errorf("moosefs: getquota: %w", err)
 				}
 				continue
 			}
+			log.Printf("getquota: free=%d total=%d err=%v", free, total, err)
 			return 0, 0, fmt.Errorf("moosefs: getquota: %w", err)
 		}
+		log.Printf("getquota: free=%d total=%d err=%v", free, total, err)
 		return free, total, nil
 	}
+	log.Printf("getquota: free=%d total=%d err=%v", free, total, ErrNotConnected)
 	return 0, 0, ErrNotConnected
 }
