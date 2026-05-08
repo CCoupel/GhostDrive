@@ -336,13 +336,11 @@ func (c *Client) GetAttr(nodeID uint32) (*Attr, error) {
 //
 //	[msgid:32=0][parent:32][uid:32=0][gcnt:32=1][gid:32=0][flags:8=0][maxentries:32=0xffff][skipcnt:64=0]
 //
-// Response (MATOCL_FUSE_READDIR = 429) — MooseFS 4.x always embeds full attrs:
+// Response (MATOCL_FUSE_READDIR = 429):
 //
-//	[msgid:32][entries...]
-//	each entry: [namelen:8][name:namelen][inode:32][attrs:35]
-//	attrs layout: [flags:8][mode:16][uid:32][gid:32][atime:32][mtime:32][ctime:32][nlink:32][size:64]
-//	mode bits 15-12 encode the node type: 1=file, 2=dir
-const readDirAttrsLen = 35
+//	[msgid:32][next_skipcnt:64][entries...]
+//	each entry: [namelen:8][name:namelen][inode:32][dtype:8]
+//	dtype: 1=file, 2=dir
 
 func (c *Client) ReadDir(nodeID uint32) ([]DirEntry, error) {
 	c.mu.Lock()
@@ -367,8 +365,15 @@ func (c *Client) ReadDir(nodeID uint32) ([]DirEntry, error) {
 			nodeID, len(ans), hex.EncodeToString(ans))
 	}
 
-	entries := make([]DirEntry, 0, 16)
 	off := 4 // skip msgid
+
+	// Skip next_skipcnt:64 (pagination — 0x7FFFFFFFFFFFFFFF = no more pages)
+	if off+8 > len(ans) {
+		return nil, fmt.Errorf("mfsclient: ReadDir(%d): response too short for skipcnt (%d bytes)", nodeID, len(ans))
+	}
+	off += 8
+
+	entries := make([]DirEntry, 0, 16)
 
 	for off < len(ans) {
 		var e DirEntry
@@ -391,30 +396,14 @@ func (c *Client) ReadDir(nodeID uint32) ([]DirEntry, error) {
 			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry inode: %w", nodeID, err)
 		}
 
-		// MooseFS 4.x embeds 35-byte attrs per entry (not a bare 1-byte type).
-		// attrs[0]=flags, attrs[1:3]=mode (bits15-12=type, 2=dir), attrs[15:19]=mtime, attrs[27:35]=size.
-		if off+readDirAttrsLen > len(ans) {
-			dump := hex.EncodeToString(ans)
-			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry %q attrs truncated at off=%d (need %d, buf=%d) hex=%s",
-				nodeID, e.Name, off, readDirAttrsLen, len(ans), dump)
-		}
-		var mode uint16
-		mode, _, err = ReadUint16(ans, off+1) // skip flags byte at off+0
+		var dtype uint8
+		dtype, off, err = ReadUint8(ans, off)
 		if err != nil {
-			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry mode: %w", nodeID, err)
+			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry dtype: %w", nodeID, err)
 		}
-		e.IsDir = (mode >> 12) == 2
+		e.IsDir = (dtype == 2)
+		// Size and MTime not provided by ReadDir — will remain zero
 
-		e.MTime, _, err = ReadUint32(ans, off+15) // mtime at attrs offset 15
-		if err != nil {
-			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry mtime: %w", nodeID, err)
-		}
-		e.Size, _, err = ReadUint64(ans, off+27) // size at attrs offset 27
-		if err != nil {
-			return nil, fmt.Errorf("mfsclient: ReadDir(%d): entry size: %w", nodeID, err)
-		}
-
-		off += readDirAttrsLen
 		entries = append(entries, e)
 	}
 	return entries, nil

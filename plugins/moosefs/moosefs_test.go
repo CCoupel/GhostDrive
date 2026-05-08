@@ -481,18 +481,18 @@ func (s *integFakeServer) svrReadDir(conn net.Conn, payload []byte) {
 		return
 	}
 
-	// Encode: [namelen:8][name][inode:32][type:8]
+	// Encode: [next_skipcnt:64=0][entries...] where each = [namelen:8][name][inode:32][dtype:8]
+	// Real MooseFS wire format: 8-byte pagination field before entries, then 1-byte dtype.
 	var data []byte
+	data = mfsclient.PutUint64(data, 0) // next_skipcnt = 0 (no more pages)
 	for _, c := range children {
+		var nodeType uint8 = 1 // file
+		if c.isDir {
+			nodeType = 2
+		}
 		data = mfsclient.PutUint8(data, uint8(len(c.name)))
 		data = append(data, []byte(c.name)...)
 		data = mfsclient.PutUint32(data, c.nodeID)
-		var nodeType uint8
-		if c.isDir {
-			nodeType = 2
-		} else {
-			nodeType = 1
-		}
 		data = mfsclient.PutUint8(data, nodeType)
 	}
 	integWriteSuccess(conn, mfsclient.MatoclFuseReadDir, msgid, data)
