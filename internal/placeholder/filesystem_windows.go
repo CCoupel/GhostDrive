@@ -459,6 +459,16 @@ func (fs *GhostFileSystem) Rename(oldpath, newpath string) (errc int) {
 	return 0
 }
 
+// Rename3 implements fuse.FileSystemRename3 for FUSE3 / WinFsp compatibility.
+// WinFsp uses the 3-param FUSE3 rename variant (with flags) on the CGO build.
+// Without this, cgofuse returns -EINVAL for any non-zero flags without calling Rename.
+func (fs *GhostFileSystem) Rename3(oldpath, newpath string, flags uint32) int {
+	if flags&fuse.RENAME_EXCHANGE != 0 {
+		return -fuse.EINVAL
+	}
+	return fs.Rename(oldpath, newpath)
+}
+
 func (fs *GhostFileSystem) Mkdir(path string, _ uint32) int {
 	r := fs.route(path)
 	if r == nil {
