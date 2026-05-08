@@ -140,6 +140,8 @@ func (s *fakeMFSServer) dispatch(conn net.Conn, cmd uint32, payload []byte) {
 		s.handleUnlink(conn, payload)
 	case CltomFuseRmdir:
 		s.handleRmdir(conn, payload)
+	case CltomFuseRename:
+		s.handleRename(conn, payload)
 	default:
 		// Unknown command: respond with a generic error frame.
 		_ = WriteFrame(conn, cmd+100, []byte{StatusERROR})
@@ -746,6 +748,52 @@ func (s *fakeMFSServer) handleRmdir(conn net.Conn, payload []byte) {
 		}
 	}
 	writeStatusReply(conn, MatoclFuseRmdir, msgid, StatusENOENT)
+}
+
+func (s *fakeMFSServer) handleRename(conn net.Conn, payload []byte) {
+	// [msgid:32][srcParent:32][srcNameLen:8][srcName][dstParent:32][dstNameLen:8][dstName][uid:32][gcnt:32][gid:32]
+	var err error
+	var msgid, srcParentID, dstParentID uint32
+	var off int
+
+	msgid, off, err = ReadUint32(payload, 0)
+	if err != nil {
+		writeStatusReply(conn, MatoclFuseRename, 0, StatusERROR)
+		return
+	}
+	srcParentID, off, err = ReadUint32(payload, off)
+	if err != nil {
+		writeStatusReply(conn, MatoclFuseRename, msgid, StatusERROR)
+		return
+	}
+	srcName, off, err := ReadStringU8(payload, off)
+	if err != nil {
+		writeStatusReply(conn, MatoclFuseRename, msgid, StatusERROR)
+		return
+	}
+	dstParentID, off, err = ReadUint32(payload, off)
+	if err != nil {
+		writeStatusReply(conn, MatoclFuseRename, msgid, StatusERROR)
+		return
+	}
+	dstName, _, err := ReadStringU8(payload, off)
+	if err != nil {
+		writeStatusReply(conn, MatoclFuseRename, msgid, StatusERROR)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, n := range s.nodes {
+		if n.parent == srcParentID && n.name == srcName {
+			n.parent = dstParentID
+			n.name = dstName
+			writeStatusReply(conn, MatoclFuseRename, msgid, StatusOK)
+			return
+		}
+	}
+	writeStatusReply(conn, MatoclFuseRename, msgid, StatusENOENT)
 }
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────

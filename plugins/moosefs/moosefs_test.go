@@ -320,6 +320,8 @@ func (s *integFakeServer) dispatch(conn net.Conn, cmd uint32, payload []byte) {
 		s.svrUnlink(conn, payload)
 	case mfsclient.CltomFuseRmdir:
 		s.svrRmdir(conn, payload)
+	case mfsclient.CltomFuseRename:
+		s.svrRename(conn, payload)
 	default:
 		_ = mfsclient.WriteFrame(conn, cmd+100, []byte{mfsclient.StatusERROR})
 	}
@@ -875,6 +877,52 @@ func (s *integFakeServer) svrRmdir(conn net.Conn, payload []byte) {
 		}
 	}
 	integWriteStatus(conn, mfsclient.MatoclFuseRmdir, msgid, mfsclient.StatusENOENT)
+}
+
+func (s *integFakeServer) svrRename(conn net.Conn, payload []byte) {
+	// [msgid:32][srcParent:32][srcNameLen:8][srcName][dstParent:32][dstNameLen:8][dstName][uid:32][gcnt:32][gid:32]
+	var err error
+	var msgid, srcParentID, dstParentID uint32
+	var off int
+
+	msgid, off, err = mfsclient.ReadUint32(payload, 0)
+	if err != nil {
+		integWriteStatus(conn, mfsclient.MatoclFuseRename, 0, mfsclient.StatusERROR)
+		return
+	}
+	srcParentID, off, err = mfsclient.ReadUint32(payload, off)
+	if err != nil {
+		integWriteStatus(conn, mfsclient.MatoclFuseRename, msgid, mfsclient.StatusERROR)
+		return
+	}
+	srcName, off, err := mfsclient.ReadStringU8(payload, off)
+	if err != nil {
+		integWriteStatus(conn, mfsclient.MatoclFuseRename, msgid, mfsclient.StatusERROR)
+		return
+	}
+	dstParentID, off, err = mfsclient.ReadUint32(payload, off)
+	if err != nil {
+		integWriteStatus(conn, mfsclient.MatoclFuseRename, msgid, mfsclient.StatusERROR)
+		return
+	}
+	dstName, _, err := mfsclient.ReadStringU8(payload, off)
+	if err != nil {
+		integWriteStatus(conn, mfsclient.MatoclFuseRename, msgid, mfsclient.StatusERROR)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, n := range s.nodes {
+		if n.parent == srcParentID && n.name == srcName {
+			n.parent = dstParentID
+			n.name = dstName
+			integWriteStatus(conn, mfsclient.MatoclFuseRename, msgid, mfsclient.StatusOK)
+			return
+		}
+	}
+	integWriteStatus(conn, mfsclient.MatoclFuseRename, msgid, mfsclient.StatusENOENT)
 }
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────

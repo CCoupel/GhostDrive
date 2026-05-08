@@ -581,6 +581,44 @@ func (c *Client) Rmdir(parentID uint32, name string) error {
 	return nil
 }
 
+// ─── Rename ───────────────────────────────────────────────────────────────────
+
+// Rename atomically renames srcName in srcParentID to dstName in dstParentID.
+// Works for both files and directories (including non-empty ones).
+//
+// Request (CLTOMA_FUSE_RENAME = 424):
+//
+//	[msgid:32=0][srcParent:32][srcNameLen:8][srcName][dstParent:32][dstNameLen:8][dstName][uid:32=0][gcnt:32=1][gid:32=0]
+//
+// Response (MATOCL_FUSE_RENAME = 425):
+//
+//	[msgid:32][status:8]
+func (c *Client) Rename(srcParentID uint32, srcName string, dstParentID uint32, dstName string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, srcParentID)
+	req = PutStringU8(req, srcName)
+	req = PutUint32(req, dstParentID)
+	req = PutStringU8(req, dstName)
+	req = PutUint32(req, 0) // uid
+	req = PutUint32(req, 1) // gcnt
+	req = PutUint32(req, 0) // gid
+
+	ans, err := c.roundtrip(CltomFuseRename, MatoclFuseRename, req)
+	if err != nil {
+		return fmt.Errorf("mfsclient: Rename(%d/%q → %d/%q): %w", srcParentID, srcName, dstParentID, dstName, err)
+	}
+	if len(ans) < 5 {
+		return fmt.Errorf("mfsclient: Rename: response too short (%d bytes)", len(ans))
+	}
+	if _, err = checkStatus(ans[4:]); err != nil {
+		return fmt.Errorf("mfsclient: Rename(%d/%q → %d/%q): %w", srcParentID, srcName, dstParentID, dstName, err)
+	}
+	return nil
+}
+
 // ─── Read / Write (Phase 2 — real chunk server I/O) ──────────────────────────
 
 // Write writes data to file node nodeID at offset using the real MooseFS

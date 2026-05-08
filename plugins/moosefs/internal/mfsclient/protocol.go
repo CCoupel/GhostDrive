@@ -70,6 +70,8 @@ const (
 	MatoclFuseUnlink       uint32 = 421
 	CltomFuseRmdir         uint32 = 422
 	MatoclFuseRmdir        uint32 = 423
+	CltomFuseRename        uint32 = 424
+	MatoclFuseRename       uint32 = 425
 	CltomFuseReadDir       uint32 = 428
 	MatoclFuseReadDir      uint32 = 429
 	CltomFuseReadChunk     uint32 = 432
@@ -127,10 +129,14 @@ const (
 // ─── Shared data types ────────────────────────────────────────────────────────
 
 // DirEntry is a single directory listing entry.
+// Size and MTime are populated from the 35-byte attrs block embedded in
+// each MATOCL_FUSE_READDIR entry by MooseFS 4.x — no extra GetAttr call needed.
 type DirEntry struct {
 	NodeID uint32
 	Name   string
 	IsDir  bool
+	Size   uint64
+	MTime  uint32
 }
 
 // Attr holds the metadata of a file or directory node.

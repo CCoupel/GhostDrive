@@ -466,75 +466,54 @@ func (b *Backend) Delete(ctx context.Context, remote string) error {
 	return nil
 }
 
-// Move moves oldPath to newPath.
-//
-// Implementation note (v1.5.x): MooseFS RENAME is not exposed by the minimal
-// TCP client.  Move is implemented as:
-//
-// For directories (empty only — v1.5.x limitation):
-//  1. CreateDir newPath
-//  2. Delete oldPath (Rmdir — fails if non-empty)
-//
-// For files:
-//  1. Download oldPath → local temp file
-//  2. Upload temp file → newPath     (if this fails, oldPath is preserved)
-//  3. Delete oldPath                 (only reached if Upload succeeded)
-//  4. Cleanup temp file
-//
-// Upload-first order is deliberate: if the upload to newPath fails, the
-// source at oldPath is left intact and no data is lost.  The only residual
-// risk is a partial newPath if Upload is interrupted mid-way; callers should
-// treat newPath as invalid when Move returns an error.
-//
-// TODO(v1.6.x): implement native FUSE_RENAME for atomic server-side rename.
-// TODO(v1.6.x): implement recursive directory rename (move contents before rmdir).
+// Move renames oldPath to newPath using the native MooseFS RENAME opcode (424).
+// Works atomically for both files and non-empty directories.
+// On a TCP connection error, reconnects once and retries.
 func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {
-	if !b.IsConnected() {
-		return ErrNotConnected
-	}
+	for attempt := 0; attempt < 2; attempt++ {
+		connected, c, subDir, _ := b.state()
+		if !connected {
+			return ErrNotConnected
+		}
 
-	// Check if source is a directory — directories can't be downloaded via chunk server.
-	// For directories, use CreateDir + Delete instead of Download+Upload+Delete.
-	srcInfo, err := b.Stat(ctx, oldPath)
-	if err != nil {
-		return fmt.Errorf("moosefs: move %s → %s: stat source: %w", oldPath, newPath, err)
-	}
-	if srcInfo.IsDir {
-		if err := b.CreateDir(ctx, newPath); err != nil {
-			return fmt.Errorf("moosefs: move dir %s → %s: mkdir: %w", oldPath, newPath, err)
+		srcParentID, srcName, err := resolveParent(ctx, c, subDir, oldPath)
+		if err != nil {
+			if attempt == 0 && isConnError(err) {
+				log.Printf("move %s → %s: connection error, reconnecting: %v", oldPath, newPath, err)
+				if reconnErr := b.reconnect(); reconnErr != nil {
+					return fmt.Errorf("moosefs: move %s → %s: %w", oldPath, newPath, err)
+				}
+				continue
+			}
+			return fmt.Errorf("moosefs: move %s → %s: resolve src: %w", oldPath, newPath, err)
 		}
-		if err := b.Delete(ctx, oldPath); err != nil {
-			_ = b.Delete(ctx, newPath) // best-effort rollback
-			return fmt.Errorf("moosefs: move dir %s → %s: rmdir: %w", oldPath, newPath, err)
+
+		dstParentID, dstName, err := resolveParent(ctx, c, subDir, newPath)
+		if err != nil {
+			if attempt == 0 && isConnError(err) {
+				log.Printf("move %s → %s: connection error, reconnecting: %v", oldPath, newPath, err)
+				if reconnErr := b.reconnect(); reconnErr != nil {
+					return fmt.Errorf("moosefs: move %s → %s: %w", oldPath, newPath, err)
+				}
+				continue
+			}
+			return fmt.Errorf("moosefs: move %s → %s: resolve dst: %w", oldPath, newPath, err)
 		}
+
+		if err := c.Rename(srcParentID, srcName, dstParentID, dstName); err != nil {
+			if attempt == 0 && isConnError(err) {
+				log.Printf("move %s → %s: connection error, reconnecting: %v", oldPath, newPath, err)
+				if reconnErr := b.reconnect(); reconnErr != nil {
+					return fmt.Errorf("moosefs: move %s → %s: %w", oldPath, newPath, err)
+				}
+				continue
+			}
+			return fmt.Errorf("moosefs: move %s → %s: %w", oldPath, newPath, err)
+		}
+		log.Printf("move %s → %s: OK", oldPath, newPath)
 		return nil
 	}
-
-	// Source is a file — use Download + Upload + Delete.
-
-	// Step 1 — Download source to a local temp file.
-	tmp, err := os.CreateTemp("", "ghostdrive-moosefs-move-*")
-	if err != nil {
-		return fmt.Errorf("moosefs: move %s → %s: create temp: %w", oldPath, newPath, err)
-	}
-	tmpName := tmp.Name()
-	tmp.Close()
-	defer os.Remove(tmpName)
-
-	if err := b.Download(ctx, oldPath, tmpName, nil); err != nil {
-		return fmt.Errorf("moosefs: move %s → %s: download: %w", oldPath, newPath, err)
-	}
-
-	// Step 2 — Upload to destination.  Source is still intact at this point.
-	if err := b.Upload(ctx, tmpName, newPath, nil); err != nil {
-		return fmt.Errorf("moosefs: move %s → %s: upload: %w", oldPath, newPath, err)
-	}
-
-	// Step 3 — Delete source only after the upload succeeded.
-	if err := b.Delete(ctx, oldPath); err != nil {
-		return fmt.Errorf("moosefs: move %s → %s: delete source: %w", oldPath, newPath, err)
-	}
-	return nil
+	return ErrNotConnected
 }
 
 // ─── Navigation ───────────────────────────────────────────────────────────────
