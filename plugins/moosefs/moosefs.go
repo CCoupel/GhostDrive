@@ -471,6 +471,11 @@ func (b *Backend) Delete(ctx context.Context, remote string) error {
 // Implementation note (v1.5.x): MooseFS RENAME is not exposed by the minimal
 // TCP client.  Move is implemented as:
 //
+// For directories (empty only — v1.5.x limitation):
+//  1. CreateDir newPath
+//  2. Delete oldPath (Rmdir — fails if non-empty)
+//
+// For files:
 //  1. Download oldPath → local temp file
 //  2. Upload temp file → newPath     (if this fails, oldPath is preserved)
 //  3. Delete oldPath                 (only reached if Upload succeeded)
@@ -482,10 +487,30 @@ func (b *Backend) Delete(ctx context.Context, remote string) error {
 // treat newPath as invalid when Move returns an error.
 //
 // TODO(v1.6.x): implement native FUSE_RENAME for atomic server-side rename.
+// TODO(v1.6.x): implement recursive directory rename (move contents before rmdir).
 func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {
 	if !b.IsConnected() {
 		return ErrNotConnected
 	}
+
+	// Check if source is a directory — directories can't be downloaded via chunk server.
+	// For directories, use CreateDir + Delete instead of Download+Upload+Delete.
+	srcInfo, err := b.Stat(ctx, oldPath)
+	if err != nil {
+		return fmt.Errorf("moosefs: move %s → %s: stat source: %w", oldPath, newPath, err)
+	}
+	if srcInfo.IsDir {
+		if err := b.CreateDir(ctx, newPath); err != nil {
+			return fmt.Errorf("moosefs: move dir %s → %s: mkdir: %w", oldPath, newPath, err)
+		}
+		if err := b.Delete(ctx, oldPath); err != nil {
+			_ = b.Delete(ctx, newPath) // best-effort rollback
+			return fmt.Errorf("moosefs: move dir %s → %s: rmdir: %w", oldPath, newPath, err)
+		}
+		return nil
+	}
+
+	// Source is a file — use Download + Upload + Delete.
 
 	// Step 1 — Download source to a local temp file.
 	tmp, err := os.CreateTemp("", "ghostdrive-moosefs-move-*")
