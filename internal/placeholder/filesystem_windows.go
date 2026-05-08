@@ -461,3 +461,23 @@ func (fs *GhostFileSystem) Mkdir(path string, _ uint32) int {
 	}
 	return 0
 }
+
+func (fs *GhostFileSystem) Statfs(path string, stat *fuse.Statfs_t) int {
+	if len(fs.backends) == 0 {
+		return -fuse.EIO
+	}
+	free, total, err := fs.backends[0].Backend.GetQuota(context.Background())
+	if err != nil || total == 0 {
+		stat.Bsize = 4096
+		stat.Blocks = 1 << 40 / 4096
+		stat.Bfree = 1 << 39 / 4096
+		stat.Bavail = stat.Bfree
+		return 0
+	}
+	bsize := uint64(4096)
+	stat.Bsize = bsize
+	stat.Blocks = uint64(total) / bsize
+	stat.Bfree = uint64(free) / bsize
+	stat.Bavail = stat.Bfree
+	return 0
+}
