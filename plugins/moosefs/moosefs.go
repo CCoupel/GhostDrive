@@ -158,27 +158,12 @@ func (b *Backend) Connect(cfg plugins.BackendConfig) error {
 	}
 
 	log.Printf("connect: dialing %s:%d subDir=%q", masterHost, masterPort, subDir)
-	client, err := mfsclient.Dial(masterHost, masterPort)
+	client, err := dialAndRegister(cfg)
 	if err != nil {
-		log.Printf("connect: dial failed: %v", err)
+		log.Printf("connect: failed: %v", err)
 		return fmt.Errorf("moosefs: connect: %w", err)
 	}
-
-	// Authenticate with the master server.
-	if err := client.Register(); err != nil {
-		_ = client.Close()
-		log.Printf("connect: register failed: %v", err)
-		return fmt.Errorf("moosefs: connect: register: %w", err)
-	}
-	log.Printf("connect: registered sessionID=%d", client.SessionID())
-
-	// Probe: verify that the root node is reachable.
-	if _, probeErr := client.GetAttr(mfsclient.RootNodeID); probeErr != nil {
-		_ = client.Close()
-		log.Printf("connect: probe failed: %v", probeErr)
-		return fmt.Errorf("moosefs: connect: probe failed: %w", probeErr)
-	}
-	log.Printf("connect: ready")
+	log.Printf("connect: registered sessionID=%d ready", client.SessionID())
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -229,6 +214,76 @@ func (b *Backend) state() (connected bool, c *mfsclient.Client, subDir string, p
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.connected, b.client, b.subDir, b.pollMs
+}
+
+// isConnError returns true when err is a TCP write/read failure (broken
+// connection) that warrants a transparent reconnect attempt.
+func isConnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "write frame header") ||
+		strings.Contains(s, "read frame header") ||
+		strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "connection aborted") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "EOF")
+}
+
+// reconnect re-establishes the TCP connection using the last successful config.
+// Replaces b.client in place and resets b.connected on failure.
+// Must NOT be called with b.mu held.
+func (b *Backend) reconnect() error {
+	b.mu.RLock()
+	cfg := b.lastCfg
+	b.mu.RUnlock()
+
+	log.Printf("reconnect: reconnecting to master")
+
+	newClient, err := dialAndRegister(cfg)
+	if err != nil {
+		b.mu.Lock()
+		b.connected = false
+		b.mu.Unlock()
+		log.Printf("reconnect: failed: %v", err)
+		return fmt.Errorf("moosefs: reconnect: %w", err)
+	}
+
+	b.mu.Lock()
+	if b.client != nil {
+		_ = b.client.Close()
+	}
+	b.client = newClient
+	b.connected = true
+	b.mu.Unlock()
+	log.Printf("reconnect: success sessionID=%d", newClient.SessionID())
+	return nil
+}
+
+// dialAndRegister opens a TCP connection to the master, registers, and probes.
+func dialAndRegister(cfg plugins.BackendConfig) (*mfsclient.Client, error) {
+	masterHost := strings.TrimSpace(cfg.Params["masterHost"])
+	masterPort := 9421
+	if s := cfg.Params["masterPort"]; s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			masterPort = n
+		}
+	}
+	c, err := mfsclient.Dial(masterHost, masterPort)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.Register(); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	if _, err := c.GetAttr(mfsclient.RootNodeID); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	return c, nil
 }
 
 // ─── File operations ──────────────────────────────────────────────────────────
@@ -461,83 +516,106 @@ func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {
 
 // List returns the direct children of the directory at dirPath.
 // Returns an empty (non-nil) slice when the directory is empty.
+// On a TCP connection error (e.g. WSAECONNABORTED), reconnects once and retries.
 func (b *Backend) List(ctx context.Context, dirPath string) ([]plugins.FileInfo, error) {
-	connected, c, subDir, _ := b.state()
-	if !connected {
-		return nil, ErrNotConnected
-	}
-
-	nodeID, err := resolvePath(ctx, c, subDir, dirPath)
-	if err != nil {
-		return nil, fmt.Errorf("moosefs: list %s: %w", dirPath, err)
-	}
-
-	entries, err := c.ReadDir(nodeID)
-	if err != nil {
-		return nil, fmt.Errorf("moosefs: list %s: readdir: %w", dirPath, err)
-	}
-
-	result := make([]plugins.FileInfo, 0, len(entries))
-	for _, e := range entries {
-		attr, attrErr := c.GetAttr(e.NodeID)
-		if attrErr != nil {
-			continue // skip unavailable nodes
+	for attempt := 0; attempt < 2; attempt++ {
+		connected, c, subDir, _ := b.state()
+		if !connected {
+			return nil, ErrNotConnected
 		}
 
-		entryPath := strings.TrimLeft(dirPath+"/"+e.Name, "/")
-		fi := plugins.FileInfo{
-			Name:    e.Name,
-			Path:    entryPath,
-			IsDir:   e.IsDir,
-			Size:    int64(attr.Size),
-			ModTime: time.Unix(int64(attr.MTime), 0),
+		nodeID, err := resolvePath(ctx, c, subDir, dirPath)
+		if err != nil {
+			if attempt == 0 && isConnError(err) {
+				log.Printf("list %s: connection error, reconnecting: %v", dirPath, err)
+				if reconnErr := b.reconnect(); reconnErr != nil {
+					return nil, fmt.Errorf("moosefs: list %s: %w", dirPath, err)
+				}
+				continue
+			}
+			return nil, fmt.Errorf("moosefs: list %s: %w", dirPath, err)
 		}
-		result = append(result, fi)
+
+		entries, err := c.ReadDir(nodeID)
+		if err != nil {
+			if attempt == 0 && isConnError(err) {
+				log.Printf("list %s: readdir connection error, reconnecting: %v", dirPath, err)
+				if reconnErr := b.reconnect(); reconnErr != nil {
+					return nil, fmt.Errorf("moosefs: list %s: readdir: %w", dirPath, err)
+				}
+				continue
+			}
+			log.Printf("list %s: readdir(%d) error: %v", dirPath, nodeID, err)
+			return nil, fmt.Errorf("moosefs: list %s: readdir: %w", dirPath, err)
+		}
+		log.Printf("list %s: readdir(%d) returned %d entries", dirPath, nodeID, len(entries))
+
+		// ReadDir returns [namelen:8][name][inode:32][dtype:8] per entry.
+		// Filter out "." and ".." pseudo-entries that some servers include.
+		result := make([]plugins.FileInfo, 0, len(entries))
+		for _, e := range entries {
+			if e.Name == "." || e.Name == ".." {
+				continue
+			}
+			entryPath := strings.TrimLeft(dirPath+"/"+e.Name, "/")
+			fi := plugins.FileInfo{
+				Name:    e.Name,
+				Path:    entryPath,
+				IsDir:   e.IsDir,
+				Size:    int64(e.Size),
+				ModTime: time.Unix(int64(e.MTime), 0),
+			}
+			result = append(result, fi)
+		}
+		return result, nil
 	}
-	return result, nil
+	// Unreachable: the loop always returns on attempt 1.
+	return nil, ErrNotConnected
 }
 
 // Stat returns the metadata of the file or directory at filePath.
 // Returns ErrFileNotFound (wrapped) when filePath does not exist.
 func (b *Backend) Stat(ctx context.Context, filePath string) (*plugins.FileInfo, error) {
-	connected, c, subDir, _ := b.state()
-	if !connected {
-		return nil, ErrNotConnected
+	for attempt := 0; attempt < 2; attempt++ {
+		connected, c, subDir, _ := b.state()
+		if !connected {
+			return nil, ErrNotConnected
+		}
+		nodeID, err := resolvePath(ctx, c, subDir, filePath)
+		if err != nil {
+			if attempt == 0 && isConnError(err) {
+				log.Printf("stat %s: connection error, reconnecting: %v", filePath, err)
+				if reconnErr := b.reconnect(); reconnErr != nil {
+					return nil, fmt.Errorf("moosefs: stat %s: %w", filePath, err)
+				}
+				continue
+			}
+			return nil, fmt.Errorf("moosefs: stat %s: %w", filePath, err)
+		}
+		attr, err := c.GetAttr(nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("moosefs: stat %s: getattr: %w", filePath, err)
+		}
+		isDir := attr.IsDir()
+		if nodeID == mfsclient.RootNodeID {
+			isDir = true
+		}
+		name := filePath
+		if idx := strings.LastIndex(filePath, "/"); idx >= 0 {
+			name = filePath[idx+1:]
+		}
+		if name == "" {
+			name = "/"
+		}
+		return &plugins.FileInfo{
+			Name:    name,
+			Path:    strings.TrimLeft(filePath, "/"),
+			IsDir:   isDir,
+			Size:    int64(attr.Size),
+			ModTime: time.Unix(int64(attr.MTime), 0),
+		}, nil
 	}
-
-	nodeID, err := resolvePath(ctx, c, subDir, filePath)
-	if err != nil {
-		return nil, fmt.Errorf("moosefs: stat %s: %w", filePath, err)
-	}
-
-	attr, err := c.GetAttr(nodeID)
-	if err != nil {
-		return nil, fmt.Errorf("moosefs: stat %s: getattr: %w", filePath, err)
-	}
-
-	// Infer IsDir from mode (bits 15-12 == 2 means directory).
-	isDir := attr.IsDir()
-	// For the root node, always treat as dir.
-	if nodeID == mfsclient.RootNodeID {
-		isDir = true
-	}
-
-	// Determine name from the last segment of filePath.
-	name := filePath
-	if idx := strings.LastIndex(filePath, "/"); idx >= 0 {
-		name = filePath[idx+1:]
-	}
-	if name == "" {
-		name = "/"
-	}
-
-	return &plugins.FileInfo{
-		Name:    name,
-		Path:    strings.TrimLeft(filePath, "/"),
-		IsDir:   isDir,
-		Size:    int64(attr.Size),
-		ModTime: time.Unix(int64(attr.MTime), 0),
-	}, nil
+	return nil, ErrNotConnected
 }
 
 // CreateDir creates the directory at dirPath.
@@ -673,13 +751,23 @@ func buildWatchSnapshot(ctx context.Context, b *Backend, watchPath string) map[s
 // Returns (free, total, nil) on success.
 // Pre-condition: IsConnected() == true, else returns 0, 0, ErrNotConnected.
 func (b *Backend) GetQuota(_ context.Context) (free, total int64, err error) {
-	if !b.IsConnected() {
-		return 0, 0, ErrNotConnected
+	for attempt := 0; attempt < 2; attempt++ {
+		if !b.IsConnected() {
+			return 0, 0, ErrNotConnected
+		}
+		_, c, _, _ := b.state()
+		free, total, err = c.StatFS()
+		if err != nil {
+			if attempt == 0 && isConnError(err) {
+				log.Printf("getquota: connection error, reconnecting: %v", err)
+				if reconnErr := b.reconnect(); reconnErr != nil {
+					return 0, 0, fmt.Errorf("moosefs: getquota: %w", err)
+				}
+				continue
+			}
+			return 0, 0, fmt.Errorf("moosefs: getquota: %w", err)
+		}
+		return free, total, nil
 	}
-	_, c, _, _ := b.state()
-	free, total, err = c.StatFS()
-	if err != nil {
-		return 0, 0, fmt.Errorf("moosefs: getquota: %w", err)
-	}
-	return free, total, nil
+	return 0, 0, ErrNotConnected
 }
