@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Renommage WinFsp** : `Getattr` utilisait uniquement un test textuel pour détecter les erreurs "file not found", ce qui pouvait retourner `-EIO` au lieu de `-ENOENT` pour la destination d'un rename. WinFsp mappe EIO → `STATUS_IO_DEVICE_ERROR` et abandonne le rename sans jamais invoquer notre callback FUSE — résultat visible : `ERROR_IO_DEVICE` (0x8007045D) dans l'explorateur. Fix : `errors.Is(err, plugins.ErrFileNotFound)` comme check primaire, le test textuel conservé en fallback. (#97)
+- **#96** — Plugin proxy logs now surface at correct severity: error/warn messages routed through `prefixWriter→logger.Info` are upgraded from INFO to ERROR/WARN in the Logs UI
+- **#97** — MooseFS folder rename no longer fails with `ERROR_IO_DEVICE` (0x8007045D): `Getattr` now returns `ENOENT` instead of `EIO` for missing destination paths, preventing WinFsp pre-flight abort
 - **Badge "Manuel" supprimé** : le badge redondant affiché sur les cards backend en mode autoSync off a été retiré. L'icône RefreshCw grisée est le seul indicateur du mode manuel. (#93)
 - **I/O chunk server optimisée** : mutex libéré avant les appels chunk server (ReadChunk/WriteChunk) — élimine deadlock potentiel et améliore concurrence. (#94)
 - **Borne maximale ReadFrame** : limite de sécurité à 128 MiB pour la taille des frames lus du master MooseFS. (#94)
