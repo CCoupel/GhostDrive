@@ -4,6 +4,7 @@ package placeholder
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/CCoupel/GhostDrive/plugins"
@@ -137,4 +138,39 @@ func TestGhostFS_DriveIcon_Open_And_Read(t *testing.T) {
 	assert.Equal(t, []byte{0x00, 0x00, 0x01, 0x00}, buf[:4], "must be a valid ICO file")
 
 	fs.Release("/ghostdrive.ico", fh)
+}
+
+// ── Getattr ErrFileNotFound → ENOENT (non-regression #97) ────────────────────
+
+// statErrBackend is a minimal StorageBackend whose Stat always returns a
+// configurable error, used to verify Getattr error mapping.
+type statErrBackend struct {
+	plugins.StorageBackend
+	statErr error
+}
+
+func (m *statErrBackend) Stat(_ context.Context, _ string) (*plugins.FileInfo, error) {
+	return nil, m.statErr
+}
+
+func TestGhostFS_Getattr_ErrFileNotFound_ReturnsENOENT(t *testing.T) {
+	// Direct ErrFileNotFound must map to -ENOENT, not -EIO.
+	b := &statErrBackend{statErr: plugins.ErrFileNotFound}
+	fs := newGhostFileSystem([]MountedBackend{
+		{ID: "b1", Name: "NAS", Backend: b, Config: plugins.BackendConfig{ID: "b1", Name: "NAS"}},
+	})
+	var stat fuse.Stat_t
+	ret := fs.Getattr("/NAS/missing.txt", &stat, 0)
+	assert.Equal(t, -fuse.ENOENT, ret, "ErrFileNotFound must return -ENOENT (fix for issue #97)")
+}
+
+func TestGhostFS_Getattr_WrappedErrFileNotFound_ReturnsENOENT(t *testing.T) {
+	// Wrapped ErrFileNotFound (errors.Is chain) must also map to -ENOENT.
+	b := &statErrBackend{statErr: fmt.Errorf("stat failed: %w", plugins.ErrFileNotFound)}
+	fs := newGhostFileSystem([]MountedBackend{
+		{ID: "b1", Name: "NAS", Backend: b, Config: plugins.BackendConfig{ID: "b1", Name: "NAS"}},
+	})
+	var stat fuse.Stat_t
+	ret := fs.Getattr("/NAS/missing.txt", &stat, 0)
+	assert.Equal(t, -fuse.ENOENT, ret, "wrapped ErrFileNotFound must return -ENOENT via errors.Is chain")
 }
