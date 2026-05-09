@@ -80,6 +80,12 @@ export function LogsPage() {
     }
   }, []);
 
+  const handleRefresh = useCallback(() => {
+    ghostdriveApi.getLogs(0)
+      .then(data => setEntries(data ?? []))
+      .catch(() => {});
+  }, []);
+
   const handleClear = useCallback(() => {
     ghostdriveApi.clearLogs().catch(() => {});
     setEntries([]);
@@ -112,6 +118,19 @@ export function LogsPage() {
         ))}
 
         <div className="flex-1" />
+
+        {/* entry count — local display until GetLogCount() binding is available */}
+        <span className="text-xs text-gray-500 font-mono tabular-nums">
+          Affichage&nbsp;: {entries.length} entrée{entries.length !== 1 ? 's' : ''}
+        </span>
+
+        <button
+          onClick={handleRefresh}
+          title="Recharger tous les logs depuis le backend"
+          className="px-3 py-1 rounded text-xs bg-gray-800 text-gray-300 hover:bg-gray-700 font-medium"
+        >
+          ↻ Refresh
+        </button>
 
         {paused ? (
           <button
