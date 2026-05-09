@@ -42,6 +42,10 @@ export function GetBackendStatuses() {
   return window['go']['app']['App']['GetBackendStatuses']();
 }
 
+export function GetBuildInfo() {
+  return window['go']['app']['App']['GetBuildInfo']();
+}
+
 export function GetCacheStats() {
   return window['go']['app']['App']['GetCacheStats']();
 }
@@ -64,6 +68,10 @@ export function GetGhostDriveRoot() {
 
 export function GetLoadedPlugins() {
   return window['go']['app']['App']['GetLoadedPlugins']();
+}
+
+export function GetLogCount() {
+  return window['go']['app']['App']['GetLogCount']();
 }
 
 export function GetLogs(arg1) {

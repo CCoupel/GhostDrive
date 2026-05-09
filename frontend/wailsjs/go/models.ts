@@ -1,3 +1,44 @@
+export namespace app {
+	
+	export class BuildInfo {
+	    version: string;
+	    commit: string;
+	    goVersion: string;
+	    buildTime: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BuildInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.version = source["version"];
+	        this.commit = source["commit"];
+	        this.goVersion = source["goVersion"];
+	        this.buildTime = source["buildTime"];
+	    }
+	}
+	export class PluginBuildInfo {
+	    name: string;
+	    version: string;
+	    commit: string;
+	    path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PluginBuildInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.version = source["version"];
+	        this.commit = source["commit"];
+	        this.path = source["path"];
+	    }
+	}
+
+}
+
 export namespace config {
 	
 	export class AppConfig {
@@ -45,31 +86,6 @@ export namespace config {
 		    }
 		    return a;
 		}
-	}
-
-}
-
-export namespace loader {
-	
-	export class PluginInfo {
-	    name: string;
-	    version: string;
-	    path: string;
-	    status: string;
-	    error?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new PluginInfo(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.version = source["version"];
-	        this.path = source["path"];
-	        this.status = source["status"];
-	        this.error = source["error"];
-	    }
 	}
 
 }
