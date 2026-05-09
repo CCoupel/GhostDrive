@@ -161,6 +161,7 @@ message DescribeResponse {
   string display_name = 21;
   string description  = 22;
   repeated ParamSpecProto params = 23;
+  string version      = 24; // semver injected at build time via ldflags, e.g. "1.5.2"
 }
 
 // ─── Service ─────────────────────────────────────────────────────────────────

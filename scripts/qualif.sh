@@ -71,8 +71,9 @@ for cmd_dir in plugins/*/cmd; do
     pkg=$(GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go list "./$cmd_dir/" 2>/dev/null) || continue
     [ -z "$pkg" ] && continue
     PLUGIN_OUT="${PLUGINS_OUT}/ghostdrive-${plugin_name}-v${VERSION}-${SUFFIX}"
+    PKG_PATH="github.com/CCoupel/GhostDrive/plugins/${plugin_name}"
     GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 \
-        go build -ldflags="-s -w" -o "$PLUGIN_OUT" "./$cmd_dir/"
+        go build -ldflags="-s -w -X '${PKG_PATH}.Version=${VERSION}'" -o "$PLUGIN_OUT" "./$cmd_dir/"
     echo "✅ ${plugin_name} → $PLUGIN_OUT"
     built=$((built + 1))
 done

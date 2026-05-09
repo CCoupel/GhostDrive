@@ -30,8 +30,7 @@ type BuildInfo struct {
 // Exposed via the GetLoadedPlugins Wails binding.
 type PluginBuildInfo struct {
 	Name    string `json:"name"`    // plugin type, e.g. "moosefs"
-	Version string `json:"version"` // plugin version or "unknown"
-	Commit  string `json:"commit"`  // VCS commit if available, or "unknown"
+	Version string `json:"version"` // semver parsed from filename, or "unknown"
 	Path    string `json:"path"`    // absolute path to the .ghdp binary
 }
 
@@ -89,12 +88,10 @@ func (a *App) GetLogCount() int {
 }
 
 // pluginInfoToPluginBuildInfo maps a loader.PluginInfo to a PluginBuildInfo.
-// Commit is always "unknown" because plugins do not expose VCS metadata via gRPC.
 func pluginInfoToPluginBuildInfo(p loader.PluginInfo) PluginBuildInfo {
 	return PluginBuildInfo{
 		Name:    p.Name,
 		Version: p.Version,
-		Commit:  "unknown",
 		Path:    p.Path,
 	}
 }

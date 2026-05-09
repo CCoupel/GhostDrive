@@ -363,6 +363,7 @@ func (b *GRPCBackend) Describe() plugins.PluginDescriptor {
 		Type:        resp.GetType(),
 		DisplayName: resp.GetDisplayName(),
 		Description: resp.GetDescription(),
+		Version:     resp.GetVersion(),
 		Params:      params,
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 
@@ -405,9 +406,14 @@ func (l *GRPCLoader) GetLoadedPlugins() []PluginInfo {
 
 	result := make([]PluginInfo, 0, len(l.entries))
 	for _, e := range l.entries {
+		version := e.descriptor.Version
+		if version == "" || version == "unknown" {
+			// Fallback: parse version from filename for pre-ldflags builds.
+			version = versionFromPath(e.path)
+		}
 		result = append(result, PluginInfo{
 			Name:    e.name,
-			Version: "unknown",
+			Version: version,
 			Path:    e.path,
 			Status:  e.status,
 			Error:   e.err,
@@ -453,6 +459,19 @@ func (l *GRPCLoader) KillPluginProcess(name string) error {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// pluginVersionRe extracts a semver string from a .ghdp filename such as
+// "ghostdrive-webdav-v1.5.1-windows-amd64.ghdp" → "1.5.1".
+var pluginVersionRe = regexp.MustCompile(`-v(\d+\.\d+\.\d+)[-.]`)
+
+// versionFromPath parses the plugin binary filename for a semver version tag.
+// Returns "unknown" when the pattern is absent.
+func versionFromPath(p string) string {
+	if m := pluginVersionRe.FindStringSubmatch(filepath.Base(p)); m != nil {
+		return m[1]
+	}
+	return "unknown"
+}
 
 // pluginNameFromPath returns a plugin name derived from the binary filename
 // (without extension). Used as a fallback before the plugin's Name() RPC.

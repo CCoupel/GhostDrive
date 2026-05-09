@@ -206,13 +206,16 @@ for cmd_dir in plugins/*/cmd; do
   plugin_name=$(basename "$(dirname "$cmd_dir")")
 
   (
+    PKG_PATH="github.com/CCoupel/GhostDrive/plugins/${plugin_name}"
+    PLUGIN_LDFLAGS="-s -w -X '${PKG_PATH}.Version=${VERSION}'"
+
     GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-      go build -ldflags="-s -w" \
+      go build -ldflags="$PLUGIN_LDFLAGS" \
       -o "$OUT_DIR/ghostdrive-${plugin_name}-v${VERSION}-linux-amd64.ghdp" \
       "./$cmd_dir/" && echo "✓ $plugin_name linux"
 
     GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-      go build -ldflags="-s -w" \
+      go build -ldflags="$PLUGIN_LDFLAGS" \
       -o "$OUT_DIR/ghostdrive-${plugin_name}-v${VERSION}-windows-amd64.ghdp" \
       "./$cmd_dir/" && echo "✓ $plugin_name windows"
   ) &

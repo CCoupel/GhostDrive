@@ -116,7 +116,6 @@ function PluginsInfo({ plugins, error }: PluginsInfoProps) {
               <div className="flex items-baseline gap-2 mb-0.5">
                 <span className="font-semibold text-gray-800">{p.name}</span>
                 <span className="font-mono text-gray-500">v{p.version}</span>
-                <span className="font-mono text-gray-400">commit: {p.commit}</span>
               </div>
               <p
                 className="font-mono text-gray-400 truncate"

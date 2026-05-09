@@ -164,8 +164,7 @@ export interface BuildInfo {
 /** Build metadata for a dynamically-loaded plugin (GetLoadedPlugins binding). */
 export interface PluginBuildInfo {
   name:    string;  // plugin type, e.g. "moosefs"
-  version: string;  // plugin version or "unknown"
-  commit:  string;  // VCS commit or "unknown" (not exposed via gRPC)
+  version: string;  // semver parsed from filename, or "unknown"
   path:    string;  // absolute path to the .ghdp binary
 }
 

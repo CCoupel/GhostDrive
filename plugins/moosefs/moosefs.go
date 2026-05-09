@@ -41,6 +41,11 @@ import (
 	"github.com/CCoupel/GhostDrive/plugins/moosefs/internal/mfsclient"
 )
 
+// Version is injected at build time via ldflags:
+//
+//	-X 'github.com/CCoupel/GhostDrive/plugins/moosefs.Version=1.5.2'
+var Version = "unknown"
+
 // ─── Sentinel errors ──────────────────────────────────────────────────────────
 
 var (
@@ -81,6 +86,7 @@ func (b *Backend) Describe() plugins.PluginDescriptor {
 		Type:        "moosefs",
 		DisplayName: "MooseFS",
 		Description: "Synchronise via un cluster MooseFS (protocole natif TCP)",
+		Version:     Version,
 		Params: []plugins.ParamSpec{
 			{
 				Key:         "masterHost",

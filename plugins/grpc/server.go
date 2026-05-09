@@ -267,6 +267,7 @@ func (s *GRPCBackendServer) Describe(_ context.Context, _ *storagepb.DescribeReq
 		Type:        d.Type,
 		DisplayName: d.DisplayName,
 		Description: d.Description,
+		Version:     d.Version,
 		Params:      params,
 	}, nil
 }

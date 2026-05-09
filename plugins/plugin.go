@@ -210,6 +210,9 @@ type PluginDescriptor struct {
 	DisplayName string `json:"displayName"`
 	// Description is a short one-sentence summary of what the plugin does.
 	Description string `json:"description"`
+	// Version is the plugin's semver string, injected at build time via ldflags.
+	// "unknown" when the plugin was built without ldflags injection.
+	Version string `json:"version"`
 	// Params defines the configuration fields for Zone 2 (Remote).
 	// An empty slice is valid for plugins with no remote-specific configuration.
 	Params []ParamSpec `json:"params"`

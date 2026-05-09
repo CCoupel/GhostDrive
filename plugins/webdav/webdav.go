@@ -20,6 +20,11 @@ import (
 	"github.com/CCoupel/GhostDrive/plugins"
 )
 
+// Version is injected at build time via ldflags:
+//
+//	-X 'github.com/CCoupel/GhostDrive/plugins/webdav.Version=1.5.2'
+var Version = "unknown"
+
 // ─── Sentinel errors ─────────────────────────────────────────────────────────
 
 var (
@@ -125,6 +130,7 @@ func (b *Backend) Describe() plugins.PluginDescriptor {
 		Type:        "webdav",
 		DisplayName: "WebDAV",
 		Description: "Synchronise via un serveur WebDAV (Nextcloud, ownCloud, NAS…)",
+		Version:     Version,
 		Params: []plugins.ParamSpec{
 			{Key: "url", Label: "URL serveur", Type: plugins.ParamTypeString, Required: true, Placeholder: "https://nas.local/dav"},
 			{Key: "authType", Label: "Authentification", Type: plugins.ParamTypeSelect, Required: false, Default: "basic", Options: []string{"basic", "bearer"}},

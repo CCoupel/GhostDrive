@@ -350,6 +350,9 @@ func (a *App) GetLoadedPlugins() []PluginBuildInfo {
 	}
 	result := make([]PluginBuildInfo, 0, len(infos))
 	for _, p := range infos {
+		if p.Status != "loaded" {
+			continue
+		}
 		result = append(result, pluginInfoToPluginBuildInfo(p))
 	}
 	return result

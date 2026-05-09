@@ -5,6 +5,14 @@ All notable changes to GhostDrive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] — 2026-05-09
+
+### Fixed
+
+- **#100** — Page "À propos" : seuls les plugins effectivement chargés (`status == "loaded"`) sont affichés — les plugins d'une autre plateforme présents dans le même dossier (ex: `.ghdp` Linux sur Windows) ne sont plus listés.
+- **#100** — Page "À propos" : version du plugin extraite depuis le nom du fichier `.ghdp` (ex: `ghostdrive-moosefs-v1.5.2-windows-amd64.ghdp` → `v1.5.2`) au lieu de `vuknown`. Champ `commit` supprimé de `PluginBuildInfo` (toujours `"unknown"`, non significatif). Span `commit: unknown` retiré de l'UI.
+- **#100** — CI `build.yml` : injection des ldflags `-X AppVersion` et `-X GitCommit` dans le build Wails pour que la section "Moteur" affiche la version et le commit corrects.
+
 ## [1.5.0] — 2026-05-03
 
 ### Added

@@ -132,8 +132,11 @@ jobs:
           CGO_ENABLED: 1
           CC: ${{ matrix.cc }}
         run: |
-          FILE="ghostdrive-v${{ needs.version.outputs.version }}-${{ matrix.suffix }}"
-          wails build -platform ${{ matrix.goos }}/${{ matrix.goarch }} -o "$FILE" -skipbindings
+          VERSION="${{ needs.version.outputs.version }}"
+          COMMIT="${GITHUB_SHA::7}"
+          LDFLAGS="-s -w -X 'github.com/CCoupel/GhostDrive/internal/app.AppVersion=${VERSION}' -X 'github.com/CCoupel/GhostDrive/internal/app.GitCommit=${COMMIT}'"
+          FILE="ghostdrive-v${VERSION}-${{ matrix.suffix }}"
+          wails build -platform ${{ matrix.goos }}/${{ matrix.goarch }} -o "$FILE" -skipbindings -ldflags "$LDFLAGS"
           echo "✅ ${{ matrix.goos }}/${{ matrix.goarch }} → $FILE"
 
       - name: Build plugins (auto-discovery — pure Go, CGO_ENABLED=0)
@@ -155,7 +158,8 @@ jobs:
             pkg=$(go list "./$cmd_dir/" 2>/dev/null) || continue
             [ -z "$pkg" ] && continue
             out="build/ghostdrive-${plugin_name}-v${VERSION}-${PLUGIN_SUFFIX}"
-            go build -ldflags="-s -w" -o "$out" "./$cmd_dir/"
+            PKG_PATH="github.com/CCoupel/GhostDrive/plugins/${plugin_name}"
+            go build -ldflags="-s -w -X '${PKG_PATH}.Version=${VERSION}'" -o "$out" "./$cmd_dir/"
             echo "✅ ${plugin_name} → $out (place next to the ghostdrive binary)"
             built=$((built + 1))
           done
