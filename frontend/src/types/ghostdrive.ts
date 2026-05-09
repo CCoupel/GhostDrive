@@ -151,6 +151,24 @@ export interface AppConfig {
   driveLetter?: string;
 }
 
+// ── Build Info (v1.5.x — About tab) ──────────────────────────────────────────
+
+/** Version/VCS metadata for the running GhostDrive engine (GetBuildInfo binding). */
+export interface BuildInfo {
+  version:   string;  // e.g. "1.5.0"
+  commit:    string;  // 7-char VCS hash or "unknown"
+  goVersion: string;  // e.g. "go1.21.0"
+  buildTime: string;  // RFC3339 or "unknown"
+}
+
+/** Build metadata for a dynamically-loaded plugin (GetLoadedPlugins binding). */
+export interface PluginBuildInfo {
+  name:    string;  // plugin type, e.g. "moosefs"
+  version: string;  // plugin version or "unknown"
+  commit:  string;  // VCS commit or "unknown" (not exposed via gRPC)
+  path:    string;  // absolute path to the .ghdp binary
+}
+
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
 export interface LogEntry {
