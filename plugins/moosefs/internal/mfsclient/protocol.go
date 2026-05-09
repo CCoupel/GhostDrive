@@ -15,11 +15,16 @@
 //
 // # Status codes (as returned in answer payloads)
 //
+// Real MooseFS 4.x values from mfsdef.h:
+//
 //	0x00 = STATUS_OK
-//	0x01 = STATUS_ENOENT
-//	0x02 = STATUS_EACCES
-//	0x06 = STATUS_EEXIST
-//	0x0B = STATUS_ENOTEMPTY
+//	0x01 = ERROR_EPERM
+//	0x02 = ERROR_ENOTDIR
+//	0x03 = ERROR_ENOENT  ← confirmed from real server (Lookup on missing segment)
+//	0x04 = ERROR_EACCES
+//	0x05 = ERROR_EEXIST
+//	0x06 = ERROR_EINVAL
+//	0x09 = ERROR_ENOTEMPTY
 //	0xFF = STATUS_ERROR (generic)
 package mfsclient
 
@@ -37,10 +42,10 @@ const RootNodeID uint32 = 1
 
 const (
 	StatusOK        uint8 = 0
-	StatusENOENT    uint8 = 1
-	StatusEACCES    uint8 = 2
-	StatusEEXIST    uint8 = 6   // real MooseFS value (was 2 in old stubs)
-	StatusENOTEMPTY uint8 = 11  // real MooseFS value (was 3 in old stubs)
+	StatusENOENT    uint8 = 3   // confirmed from real MooseFS server (was 1 — wrong)
+	StatusEACCES    uint8 = 4
+	StatusEEXIST    uint8 = 5   // MooseFS ERROR_EEXIST (was 6)
+	StatusENOTEMPTY uint8 = 9   // MooseFS ERROR_ENOTEMPTY (was 11)
 	StatusERROR     uint8 = 255
 )
 
