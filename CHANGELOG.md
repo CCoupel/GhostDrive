@@ -19,8 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **#96** — Plugin proxy logs now surface at correct severity: error/warn messages routed through `prefixWriter→logger.Info` are upgraded from INFO to ERROR/WARN in the Logs UI
-- **#97** — MooseFS folder rename no longer fails with `ERROR_IO_DEVICE` (0x8007045D): `Getattr` now returns `ENOENT` instead of `EIO` for missing destination paths, preventing WinFsp pre-flight abort
+- **#96** — Logs FUSE/MooseFS désormais visibles dans l'UI : les callbacks WinFsp (`Getattr`, `Rename`, `Create`, `Release`) utilisent `logger.Info/Error` et l'ordre `io.MultiWriter` est corrigé (logStore en premier) pour éviter le short-circuit sur `os.Stderr` en mode GUI Windows.
+- **#97** — Le renommage de dossier MooseFS ne provoque plus `ERROR_IO_DEVICE` (0x8007045D) : correction des constantes de statut MooseFS 4.x (`StatusENOENT=3`, `StatusEACCES=4`, `StatusEEXIST=5`, `StatusENOTEMPTY=9`) — `Getattr` retourne désormais `ENOENT` au lieu de `EIO` pour les destinations manquantes, permettant à WinFsp de continuer le rename.
+- **Création de fichier vide** : "New file" depuis l'Explorateur Windows fonctionne — `Create()` pré-crée le fichier temporaire vide pour que `Release` puisse l'uploader même sans appel à `Write`.
+- **Upload gRPC 0 octet** : le chunk de métadonnées (`LocalPath`, `RemotePath`, `TotalBytes`) est désormais envoyé avant la boucle de lecture, garantissant que le serveur reçoit le chemin distant même pour les fichiers vides.
 - **Badge "Manuel" supprimé** : le badge redondant affiché sur les cards backend en mode autoSync off a été retiré. L'icône RefreshCw grisée est le seul indicateur du mode manuel. (#93)
 - **I/O chunk server optimisée** : mutex libéré avant les appels chunk server (ReadChunk/WriteChunk) — élimine deadlock potentiel et améliore concurrence. (#94)
 - **Borne maximale ReadFrame** : limite de sécurité à 128 MiB pour la taille des frames lus du master MooseFS. (#94)
@@ -28,7 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
-- Le protocole TCP MooseFS 4.x est entièrement implémenté avec vrais opcodes (CLTOMA_*/MATOCL_*) — validation en cours sur cluster production (v1.5.1).
 - `GetQuota` retourne (-1, -1, nil) — MooseFS ne l'expose pas via le protocole minimal implémenté.
 - `Move` : upload-first (source préservée si l'upload échoue). FUSE_RENAME natif prévu v1.6.x.
 
