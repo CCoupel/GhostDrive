@@ -89,7 +89,8 @@ binaire Windows/amd64       .ghdp linux/amd64           .ghdp windows/amd64
 ```bash
 # ── Environnement ────────────────────────────────────────────────────────────
 export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin:"/mnt/c/Program Files/nodejs"
-VERSION=<version>   # ex: 1.5.0
+VERSION=$(cat config.json | jq -r '.version')   # ex: 1.5.0
+COMMIT=$(git rev-parse --short HEAD)             # 7 chars, ex: fdcb04a
 PROJ=/home/cyril/GITHUB/GhostDrive   # clone Linux (git pull avant build)
 OUT_DIR=$PROJ/build/qualif/$VERSION
 mkdir -p $OUT_DIR
@@ -142,6 +143,7 @@ PIDS=()
     echo "[wails] tentative build Windows/amd64..."
     CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
       $HOME/go/bin/wails build -platform windows/amd64 \
+        -ldflags "-X 'github.com/CCoupel/GhostDrive/internal/app.GitCommit=${COMMIT}' -X 'github.com/CCoupel/GhostDrive/internal/app.AppVersion=${VERSION}'" \
         -o "$OUT_DIR/$BIN_NAME" 2>&1 | sed 's/^/[wails] /'
     # wails peut ignorer -o avec chemin absolu → copier depuis build/bin/
     [ -f "$OUT_DIR/$BIN_NAME" ] || \
@@ -170,7 +172,7 @@ PIDS=()
       GOOS=windows GOARCH=amd64 \
         CC=x86_64-w64-mingw32-gcc \
         CGO_ENABLED=1 \
-        go build -ldflags="-s -w" \
+        go build -ldflags="-s -w -X 'github.com/CCoupel/GhostDrive/internal/app.GitCommit=${COMMIT}' -X 'github.com/CCoupel/GhostDrive/internal/app.AppVersion=${VERSION}'" \
         -o "$OUT_DIR/$BIN_NAME" \
         . 2>&1 | sed 's/^/[cgo] /'
       if [ -f "$OUT_DIR/$BIN_NAME" ]; then
