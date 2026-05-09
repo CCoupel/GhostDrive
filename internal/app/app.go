@@ -87,6 +87,7 @@ func (a *App) Startup(ctx context.Context) {
 	log.SetOutput(io.MultiWriter(os.Stderr, a.logStore))
 	// Also route internal/logger (used by plugin stderr prefixWriter) to the store.
 	logger.SetExtraWriter(a.logStore)
+	log.Printf("[INFO]  [app] logging initialized — logStore active")
 
 	// Load configuration
 	path := a.cfgPath

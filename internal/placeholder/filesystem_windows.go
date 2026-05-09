@@ -118,6 +118,7 @@ func ensureDownloaded(cfg plugins.BackendConfig, backend plugins.StorageBackend,
 // ── Getattr ──────────────────────────────────────────────────────────────────
 
 func (fs *GhostFileSystem) Getattr(path string, stat *fuse.Stat_t, _ uint64) int {
+	log.Printf("[INFO]  [placeholder/getattr] ENTER path=%q", path)
 	now := nowTs()
 
 	// Virtual root directory.
