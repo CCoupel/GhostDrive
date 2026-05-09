@@ -84,7 +84,7 @@ func (a *App) Startup(ctx context.Context) {
 			wailsruntime.EventsEmit(a.ctx, "logs:new", e)
 		}
 	})
-	log.SetOutput(io.MultiWriter(os.Stderr, a.logStore))
+	log.SetOutput(io.MultiWriter(a.logStore, os.Stderr))
 	// Also route internal/logger (used by plugin stderr prefixWriter) to the store.
 	logger.SetExtraWriter(a.logStore)
 	w := log.Writer()

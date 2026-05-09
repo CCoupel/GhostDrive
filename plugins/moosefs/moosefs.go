@@ -29,7 +29,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,6 +36,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CCoupel/GhostDrive/internal/logger"
 	"github.com/CCoupel/GhostDrive/plugins"
 	"github.com/CCoupel/GhostDrive/plugins/moosefs/internal/mfsclient"
 )
@@ -157,13 +157,13 @@ func (b *Backend) Connect(cfg plugins.BackendConfig) error {
 		}
 	}
 
-	log.Printf("connect: dialing %s:%d subDir=%q", masterHost, masterPort, subDir)
+	logger.Info("connect: dialing %s:%d subDir=%q", masterHost, masterPort, subDir)
 	client, err := dialAndRegister(cfg)
 	if err != nil {
-		log.Printf("connect: failed: %v", err)
+		logger.Error("connect: failed: %v", err)
 		return fmt.Errorf("moosefs: connect: %w", err)
 	}
-	log.Printf("connect: registered sessionID=%d ready", client.SessionID())
+	logger.Info("connect: registered sessionID=%d ready", client.SessionID())
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -240,14 +240,14 @@ func (b *Backend) reconnect() error {
 	cfg := b.lastCfg
 	b.mu.RUnlock()
 
-	log.Printf("reconnect: reconnecting to master")
+	logger.Info("reconnect: reconnecting to master")
 
 	newClient, err := dialAndRegister(cfg)
 	if err != nil {
 		b.mu.Lock()
 		b.connected = false
 		b.mu.Unlock()
-		log.Printf("reconnect: failed: %v", err)
+		logger.Error("reconnect: failed: %v", err)
 		return fmt.Errorf("moosefs: reconnect: %w", err)
 	}
 
@@ -258,7 +258,7 @@ func (b *Backend) reconnect() error {
 	b.client = newClient
 	b.connected = true
 	b.mu.Unlock()
-	log.Printf("reconnect: success sessionID=%d", newClient.SessionID())
+	logger.Info("reconnect: success sessionID=%d", newClient.SessionID())
 	return nil
 }
 
@@ -348,7 +348,7 @@ func (b *Backend) Upload(ctx context.Context, local, remote string, progress plu
 		n, readErr := f.Read(buf)
 		if n > 0 {
 			if writeErr := c.Write(nodeID, offset, buf[:n]); writeErr != nil {
-				log.Printf("upload %s: write at offset %d: %v", remote, offset, writeErr)
+				logger.Error("upload %s: write at offset %d: %v", remote, offset, writeErr)
 				return fmt.Errorf("moosefs: upload %s: write at offset %d: %w", remote, offset, writeErr)
 			}
 			offset += uint64(n)
@@ -409,7 +409,7 @@ func (b *Backend) Download(ctx context.Context, remote, local string, progress p
 
 		chunk, readErr := c.Read(nodeID, offset, chunkSize)
 		if readErr != nil {
-			log.Printf("download %s: read at offset %d: %v", remote, offset, readErr)
+			logger.Error("download %s: read at offset %d: %v", remote, offset, readErr)
 			return fmt.Errorf("moosefs: download %s: read at offset %d: %w", remote, offset, readErr)
 		}
 		if len(chunk) == 0 {
@@ -479,7 +479,7 @@ func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {
 		srcParentID, srcName, err := resolveParent(ctx, c, subDir, oldPath)
 		if err != nil {
 			if attempt == 0 && isConnError(err) {
-				log.Printf("move %s → %s: connection error, reconnecting: %v", oldPath, newPath, err)
+				logger.Warn("move %s → %s: connection error, reconnecting: %v", oldPath, newPath, err)
 				if reconnErr := b.reconnect(); reconnErr != nil {
 					return fmt.Errorf("moosefs: move %s → %s: %w", oldPath, newPath, err)
 				}
@@ -491,7 +491,7 @@ func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {
 		dstParentID, dstName, err := resolveParent(ctx, c, subDir, newPath)
 		if err != nil {
 			if attempt == 0 && isConnError(err) {
-				log.Printf("move %s → %s: connection error, reconnecting: %v", oldPath, newPath, err)
+				logger.Warn("move %s → %s: connection error, reconnecting: %v", oldPath, newPath, err)
 				if reconnErr := b.reconnect(); reconnErr != nil {
 					return fmt.Errorf("moosefs: move %s → %s: %w", oldPath, newPath, err)
 				}
@@ -502,7 +502,7 @@ func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {
 
 		if err := c.Rename(srcParentID, srcName, dstParentID, dstName); err != nil {
 			if attempt == 0 && isConnError(err) {
-				log.Printf("move %s → %s: connection error, reconnecting: %v", oldPath, newPath, err)
+				logger.Warn("move %s → %s: connection error, reconnecting: %v", oldPath, newPath, err)
 				if reconnErr := b.reconnect(); reconnErr != nil {
 					return fmt.Errorf("moosefs: move %s → %s: %w", oldPath, newPath, err)
 				}
@@ -510,7 +510,7 @@ func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {
 			}
 			return fmt.Errorf("moosefs: move %s → %s: %w", oldPath, newPath, err)
 		}
-		log.Printf("move %s → %s: OK", oldPath, newPath)
+		logger.Info("move %s → %s: OK", oldPath, newPath)
 		return nil
 	}
 	return ErrNotConnected
@@ -531,7 +531,7 @@ func (b *Backend) List(ctx context.Context, dirPath string) ([]plugins.FileInfo,
 		nodeID, err := resolvePath(ctx, c, subDir, dirPath)
 		if err != nil {
 			if attempt == 0 && isConnError(err) {
-				log.Printf("list %s: connection error, reconnecting: %v", dirPath, err)
+				logger.Warn("list %s: connection error, reconnecting: %v", dirPath, err)
 				if reconnErr := b.reconnect(); reconnErr != nil {
 					return nil, fmt.Errorf("moosefs: list %s: %w", dirPath, err)
 				}
@@ -543,16 +543,16 @@ func (b *Backend) List(ctx context.Context, dirPath string) ([]plugins.FileInfo,
 		entries, err := c.ReadDir(nodeID)
 		if err != nil {
 			if attempt == 0 && isConnError(err) {
-				log.Printf("list %s: readdir connection error, reconnecting: %v", dirPath, err)
+				logger.Warn("list %s: readdir connection error, reconnecting: %v", dirPath, err)
 				if reconnErr := b.reconnect(); reconnErr != nil {
 					return nil, fmt.Errorf("moosefs: list %s: readdir: %w", dirPath, err)
 				}
 				continue
 			}
-			log.Printf("list %s: readdir(%d) error: %v", dirPath, nodeID, err)
+			logger.Error("list %s: readdir(%d) error: %v", dirPath, nodeID, err)
 			return nil, fmt.Errorf("moosefs: list %s: readdir: %w", dirPath, err)
 		}
-		log.Printf("list %s: readdir(%d) returned %d entries", dirPath, nodeID, len(entries))
+		logger.Info("list %s: readdir(%d) returned %d entries", dirPath, nodeID, len(entries))
 
 		// ReadDir returns [namelen:8][name][inode:32][dtype:8] per entry.
 		// Filter out "." and ".." pseudo-entries that some servers include.
@@ -588,7 +588,7 @@ func (b *Backend) Stat(ctx context.Context, filePath string) (*plugins.FileInfo,
 		nodeID, err := resolvePath(ctx, c, subDir, filePath)
 		if err != nil {
 			if attempt == 0 && isConnError(err) {
-				log.Printf("stat %s: connection error, reconnecting: %v", filePath, err)
+				logger.Warn("stat %s: connection error, reconnecting: %v", filePath, err)
 				if reconnErr := b.reconnect(); reconnErr != nil {
 					return nil, fmt.Errorf("moosefs: stat %s: %w", filePath, err)
 				}
@@ -763,19 +763,19 @@ func (b *Backend) GetQuota(_ context.Context) (free, total int64, err error) {
 		free, total, err = c.StatFS()
 		if err != nil {
 			if attempt == 0 && isConnError(err) {
-				log.Printf("getquota: connection error, reconnecting: %v", err)
+				logger.Warn("getquota: connection error, reconnecting: %v", err)
 				if reconnErr := b.reconnect(); reconnErr != nil {
-					log.Printf("getquota: free=%d total=%d err=%v", free, total, err)
+					logger.Error("getquota: free=%d total=%d err=%v", free, total, err)
 					return 0, 0, fmt.Errorf("moosefs: getquota: %w", err)
 				}
 				continue
 			}
-			log.Printf("getquota: free=%d total=%d err=%v", free, total, err)
+			logger.Error("getquota: free=%d total=%d err=%v", free, total, err)
 			return 0, 0, fmt.Errorf("moosefs: getquota: %w", err)
 		}
-		log.Printf("getquota: free=%d total=%d err=%v", free, total, err)
+		logger.Info("getquota: free=%d total=%d", free, total)
 		return free, total, nil
 	}
-	log.Printf("getquota: free=%d total=%d err=%v", free, total, ErrNotConnected)
+	logger.Error("getquota: free=%d total=%d err=%v", free, total, ErrNotConnected)
 	return 0, 0, ErrNotConnected
 }
