@@ -1,0 +1,72 @@
+package app
+
+import (
+	"runtime/debug"
+
+	"github.com/CCoupel/GhostDrive/plugins/loader"
+)
+
+// BuildInfo contains version and build metadata for the GhostDrive engine.
+// Exposed via the GetBuildInfo Wails binding.
+type BuildInfo struct {
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`    // 7 chars from VCS, e.g. "fdcb04a"
+	GoVersion string `json:"goVersion"` // e.g. "go1.21.0"
+	BuildTime string `json:"buildTime"` // RFC3339 or "unknown"
+}
+
+// PluginBuildInfo contains build metadata for a dynamically-loaded plugin.
+// Exposed via the GetLoadedPlugins Wails binding.
+type PluginBuildInfo struct {
+	Name    string `json:"name"`    // plugin type, e.g. "moosefs"
+	Version string `json:"version"` // plugin version or "unknown"
+	Commit  string `json:"commit"`  // VCS commit if available, or "unknown"
+	Path    string `json:"path"`    // absolute path to the .ghdp binary
+}
+
+// GetBuildInfo returns version and VCS metadata for the running GhostDrive binary.
+// GoVersion is read from runtime/debug.ReadBuildInfo(); Commit and BuildTime are
+// extracted from the embedded vcs.revision / vcs.time build settings.
+//
+// Wails binding: window.go.App.GetBuildInfo()
+func (a *App) GetBuildInfo() BuildInfo {
+	a.mu.RLock()
+	version := a.cfg.Version
+	a.mu.RUnlock()
+
+	info := BuildInfo{
+		Version:   version,
+		Commit:    "unknown",
+		GoVersion: "unknown",
+		BuildTime: "unknown",
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		info.GoVersion = bi.GoVersion
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				if len(s.Value) >= 7 {
+					info.Commit = s.Value[:7]
+				} else if s.Value != "" {
+					info.Commit = s.Value
+				}
+			case "vcs.time":
+				if s.Value != "" {
+					info.BuildTime = s.Value
+				}
+			}
+		}
+	}
+	return info
+}
+
+// pluginInfoToPluginBuildInfo maps a loader.PluginInfo to a PluginBuildInfo.
+// Commit is always "unknown" because plugins do not expose VCS metadata via gRPC.
+func pluginInfoToPluginBuildInfo(p loader.PluginInfo) PluginBuildInfo {
+	return PluginBuildInfo{
+		Name:    p.Name,
+		Version: p.Version,
+		Commit:  "unknown",
+		Path:    p.Path,
+	}
+}

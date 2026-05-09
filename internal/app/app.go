@@ -23,7 +23,6 @@ import (
 	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/CCoupel/GhostDrive/plugins"
 	grpcbridge "github.com/CCoupel/GhostDrive/plugins/grpc"
-	"github.com/CCoupel/GhostDrive/plugins/loader"
 	"github.com/CCoupel/GhostDrive/plugins/local"
 	pluginsregistry "github.com/CCoupel/GhostDrive/plugins/registry"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -334,17 +333,21 @@ func (a *App) GetAvailableBackendTypes() []string {
 	return backends.AvailableTypes()
 }
 
-// GetLoadedPlugins returns the list of dynamically-loaded plugins with their
-// current status. Does not include static (compiled-in) plugins.
+// GetLoadedPlugins returns build info for each dynamically-loaded plugin.
+// Does not include static (compiled-in) plugins.
 //
 // Wails binding: window.go.App.GetLoadedPlugins()
-func (a *App) GetLoadedPlugins() []loader.PluginInfo {
+func (a *App) GetLoadedPlugins() []PluginBuildInfo {
 	if a.dynRegistry == nil {
-		return []loader.PluginInfo{}
+		return []PluginBuildInfo{}
 	}
-	result := a.dynRegistry.ListDynamicPlugins()
-	if result == nil {
-		return []loader.PluginInfo{}
+	infos := a.dynRegistry.ListDynamicPlugins()
+	if infos == nil {
+		return []PluginBuildInfo{}
+	}
+	result := make([]PluginBuildInfo, 0, len(infos))
+	for _, p := range infos {
+		result = append(result, pluginInfoToPluginBuildInfo(p))
 	}
 	return result
 }
