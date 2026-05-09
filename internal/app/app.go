@@ -87,6 +87,8 @@ func (a *App) Startup(ctx context.Context) {
 	log.SetOutput(io.MultiWriter(os.Stderr, a.logStore))
 	// Also route internal/logger (used by plugin stderr prefixWriter) to the store.
 	logger.SetExtraWriter(a.logStore)
+	w := log.Writer()
+	log.Printf("[INFO]  [app] log.Writer type: %T", w)
 	log.Printf("[INFO]  [app] logging initialized — logStore active")
 
 	// Load configuration

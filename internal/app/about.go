@@ -79,6 +79,15 @@ func (a *App) GetBuildInfo() BuildInfo {
 	return info
 }
 
+// GetLogCount returns the number of log entries currently held in the in-process
+// log store. The frontend uses this to verify that logs are being captured even
+// when the live streaming via logs:new events is not working.
+//
+// Wails binding: window.go.App.GetLogCount()
+func (a *App) GetLogCount() int {
+	return len(a.logStore.GetEntries(0))
+}
+
 // pluginInfoToPluginBuildInfo maps a loader.PluginInfo to a PluginBuildInfo.
 // Commit is always "unknown" because plugins do not expose VCS metadata via gRPC.
 func pluginInfoToPluginBuildInfo(p loader.PluginInfo) PluginBuildInfo {
