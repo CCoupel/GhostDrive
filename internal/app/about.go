@@ -6,6 +6,17 @@ import (
 	"github.com/CCoupel/GhostDrive/plugins/loader"
 )
 
+// GitCommit and AppVersion are injected at build time via -ldflags:
+//
+//	-X 'github.com/CCoupel/GhostDrive/internal/app.GitCommit=<sha7>'
+//	-X 'github.com/CCoupel/GhostDrive/internal/app.AppVersion=<semver>'
+//
+// When not injected (local dev / plain go build) they default to "unknown".
+var (
+	GitCommit  = "unknown"
+	AppVersion = "unknown"
+)
+
 // BuildInfo contains version and build metadata for the GhostDrive engine.
 // Exposed via the GetBuildInfo Wails binding.
 type BuildInfo struct {
@@ -25,18 +36,25 @@ type PluginBuildInfo struct {
 }
 
 // GetBuildInfo returns version and VCS metadata for the running GhostDrive binary.
-// GoVersion is read from runtime/debug.ReadBuildInfo(); Commit and BuildTime are
-// extracted from the embedded vcs.revision / vcs.time build settings.
+//
+// Priority:
+//  1. AppVersion / GitCommit injected via -ldflags at build time (wails build / go build).
+//  2. vcs.revision from runtime/debug.ReadBuildInfo() as fallback for GitCommit.
+//  3. a.cfg.Version (from config.json) as fallback for Version.
 //
 // Wails binding: window.go.App.GetBuildInfo()
 func (a *App) GetBuildInfo() BuildInfo {
-	a.mu.RLock()
-	version := a.cfg.Version
-	a.mu.RUnlock()
+	// Resolve version: ldflags override > config.json value.
+	version := AppVersion
+	if version == "unknown" || version == "" {
+		a.mu.RLock()
+		version = a.cfg.Version
+		a.mu.RUnlock()
+	}
 
 	info := BuildInfo{
 		Version:   version,
-		Commit:    "unknown",
+		Commit:    GitCommit,
 		GoVersion: "unknown",
 		BuildTime: "unknown",
 	}
@@ -45,9 +63,10 @@ func (a *App) GetBuildInfo() BuildInfo {
 		for _, s := range bi.Settings {
 			switch s.Key {
 			case "vcs.revision":
-				if len(s.Value) >= 7 {
+				// Fallback: use vcs.revision only when GitCommit was not injected.
+				if GitCommit == "unknown" && len(s.Value) >= 7 {
 					info.Commit = s.Value[:7]
-				} else if s.Value != "" {
+				} else if GitCommit == "unknown" && s.Value != "" {
 					info.Commit = s.Value
 				}
 			case "vcs.time":
