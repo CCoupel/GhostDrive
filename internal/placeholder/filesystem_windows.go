@@ -157,27 +157,23 @@ func (fs *GhostFileSystem) Getattr(path string, stat *fuse.Stat_t, _ uint64) int
 
 	info, err := r.backend.Stat(context.Background(), r.relPath)
 	if err != nil {
-		// Use errors.Is as primary check — reliably traverses the %w chain to
-		// plugins.ErrFileNotFound regardless of intermediate wrapping text.
-		// The string fallback covers backends that return ad-hoc "not found" /
-		// "no such" messages without wrapping the sentinel.
-		if errors.Is(err, plugins.ErrFileNotFound) ||
-			strings.Contains(err.Error(), "not found") ||
-			strings.Contains(err.Error(), "no such") {
-			log.Printf("[INFO] placeholder: Getattr %q → ENOENT", path)
+		log.Printf("[INFO]  [placeholder/getattr] path=%q stat_err=%q", path, err.Error())
+		if errors.Is(err, plugins.ErrFileNotFound) {
+			log.Printf("[INFO]  [placeholder/getattr] path=%q → ENOENT (errors.Is match)", path)
 			return -fuse.ENOENT
 		}
-		// Any other error (TCP drop, unexpected server status, etc.) maps to EIO.
-		// On Windows WinFsp maps EIO → STATUS_IO_DEVICE_ERROR, which aborts
-		// rename without calling our Rename callback. Log the full error so we
-		// can diagnose which error code triggered EIO.
-		log.Printf("[ERROR] placeholder: Getattr %q → EIO: %v", path, err)
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no such") {
+			log.Printf("[INFO]  [placeholder/getattr] path=%q → ENOENT (string match)", path)
+			return -fuse.ENOENT
+		}
+		log.Printf("[ERROR] [placeholder/getattr] path=%q → EIO (unmatched err=%q)", path, err.Error())
 		return -fuse.EIO
 	}
 	if info == nil {
-		log.Printf("[INFO] placeholder: Getattr %q → ENOENT (nil info)", path)
+		log.Printf("[INFO]  [placeholder/getattr] path=%q → ENOENT (nil info)", path)
 		return -fuse.ENOENT
 	}
+	log.Printf("[INFO]  [placeholder/getattr] path=%q → OK (dir=%v size=%d)", path, info.IsDir, info.Size)
 
 	mts := tsFromTime(info.ModTime)
 	if info.IsDir {
@@ -476,6 +472,7 @@ func (fs *GhostFileSystem) Rename(oldpath, newpath string) (errc int) {
 // WinFsp uses the 3-param FUSE3 rename variant (with flags) on the CGO build.
 // Without this, cgofuse returns -EINVAL for any non-zero flags without calling Rename.
 func (fs *GhostFileSystem) Rename3(oldpath, newpath string, flags uint32) int {
+	log.Printf("[INFO]  [placeholder/rename3] entry oldpath=%q newpath=%q flags=%#x", oldpath, newpath, flags)
 	if flags&fuse.RENAME_EXCHANGE != 0 {
 		return -fuse.EINVAL
 	}
