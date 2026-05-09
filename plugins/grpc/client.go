@@ -120,8 +120,16 @@ func (b *GRPCBackend) Upload(ctx context.Context, local, remote string, progress
 		return mapGRPCError("grpc: Upload", err)
 	}
 
-	// First message carries metadata.
-	firstMsg := true
+	// Always send metadata first (even for 0-byte files) so the server always
+	// receives the remote path regardless of whether any data chunks follow.
+	if sendErr := stream.Send(&storagepb.UploadChunk{
+		LocalPath:  local,
+		RemotePath: remote,
+		TotalBytes: totalBytes,
+	}); sendErr != nil {
+		return mapGRPCError("grpc: Upload: send metadata", sendErr)
+	}
+
 	buf := make([]byte, uploadChunkSize)
 	var bytesSent int64
 
@@ -134,16 +142,7 @@ func (b *GRPCBackend) Upload(ctx context.Context, local, remote string, progress
 
 		n, readErr := f.Read(buf)
 		if n > 0 {
-			chunk := &storagepb.UploadChunk{
-				Data: buf[:n],
-			}
-			if firstMsg {
-				chunk.LocalPath = local
-				chunk.RemotePath = remote
-				chunk.TotalBytes = totalBytes
-				firstMsg = false
-			}
-			if sendErr := stream.Send(chunk); sendErr != nil {
+			if sendErr := stream.Send(&storagepb.UploadChunk{Data: buf[:n]}); sendErr != nil {
 				return mapGRPCError("grpc: Upload: send chunk", sendErr)
 			}
 			bytesSent += int64(n)

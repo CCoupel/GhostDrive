@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -15,12 +16,13 @@ import (
 
 	"github.com/CCoupel/GhostDrive/internal/backends"
 	"github.com/CCoupel/GhostDrive/internal/config"
+	"github.com/CCoupel/GhostDrive/internal/logging"
+	"github.com/CCoupel/GhostDrive/internal/logger"
 	"github.com/CCoupel/GhostDrive/internal/placeholder"
 	"github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/CCoupel/GhostDrive/plugins"
 	grpcbridge "github.com/CCoupel/GhostDrive/plugins/grpc"
-	"github.com/CCoupel/GhostDrive/plugins/loader"
 	"github.com/CCoupel/GhostDrive/plugins/local"
 	pluginsregistry "github.com/CCoupel/GhostDrive/plugins/registry"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -39,6 +41,7 @@ type App struct {
 	dynRegistry  *pluginsregistry.DynamicRegistry   // v0.6.x dynamic plugin loader
 	descriptors  map[string]plugins.PluginDescriptor // cached plugin descriptors by type
 	localCleanup func()                              // cleanup for ServeInProcess local backend
+	logStore     *logging.Store                      // in-process log capture for the Logs UI tab
 }
 
 // NewApp creates a new App. Configuration is loaded in Startup once the
@@ -56,6 +59,7 @@ func NewApp(cfgPath string) *App {
 		engines:      make(map[string]*sync.Engine),
 		driveManager: placeholder.NewDriveManager(),
 		descriptors:  make(map[string]plugins.PluginDescriptor),
+		logStore:     logging.NewStore(),
 	}
 }
 
@@ -68,7 +72,24 @@ func (a *App) Startup(ctx context.Context) {
 	if a.descriptors == nil {
 		a.descriptors = make(map[string]plugins.PluginDescriptor)
 	}
+	if a.logStore == nil {
+		a.logStore = logging.NewStore()
+	}
 	a.mu.Unlock()
+
+	// Redirect standard log output through the in-process log store so the
+	// Logs UI tab receives all log lines in real time.
+	a.logStore.SetOnNew(func(e logging.Entry) {
+		if a.ctx != nil {
+			wailsruntime.EventsEmit(a.ctx, "logs:new", e)
+		}
+	})
+	log.SetOutput(io.MultiWriter(a.logStore, os.Stderr))
+	// Also route internal/logger (used by plugin stderr prefixWriter) to the store.
+	logger.SetExtraWriter(a.logStore)
+	w := log.Writer()
+	log.Printf("[INFO]  [app] log.Writer type: %T", w)
+	log.Printf("[INFO]  [app] logging initialized — logStore active")
 
 	// Load configuration
 	path := a.cfgPath
@@ -315,17 +336,21 @@ func (a *App) GetAvailableBackendTypes() []string {
 	return backends.AvailableTypes()
 }
 
-// GetLoadedPlugins returns the list of dynamically-loaded plugins with their
-// current status. Does not include static (compiled-in) plugins.
+// GetLoadedPlugins returns build info for each dynamically-loaded plugin.
+// Does not include static (compiled-in) plugins.
 //
 // Wails binding: window.go.App.GetLoadedPlugins()
-func (a *App) GetLoadedPlugins() []loader.PluginInfo {
+func (a *App) GetLoadedPlugins() []PluginBuildInfo {
 	if a.dynRegistry == nil {
-		return []loader.PluginInfo{}
+		return []PluginBuildInfo{}
 	}
-	result := a.dynRegistry.ListDynamicPlugins()
-	if result == nil {
-		return []loader.PluginInfo{}
+	infos := a.dynRegistry.ListDynamicPlugins()
+	if infos == nil {
+		return []PluginBuildInfo{}
+	}
+	result := make([]PluginBuildInfo, 0, len(infos))
+	for _, p := range infos {
+		result = append(result, pluginInfoToPluginBuildInfo(p))
 	}
 	return result
 }
@@ -793,6 +818,19 @@ func (a *App) TestBackendConnection(bc plugins.BackendConfig) (types.BackendStat
 	}
 	status.Connected = true
 	return status, nil
+}
+
+// ─── Logs ─────────────────────────────────────────────────────────────────────
+
+// GetLogs returns all captured log entries with ID > sinceID.
+// Pass sinceID=0 to retrieve all stored entries (up to 2000).
+func (a *App) GetLogs(sinceID int64) []logging.Entry {
+	return a.logStore.GetEntries(sinceID)
+}
+
+// ClearLogs removes all stored log entries.
+func (a *App) ClearLogs() {
+	a.logStore.Clear()
 }
 
 // GetBackendStatuses returns connection status for all configured backends.

@@ -10,6 +10,10 @@ export function ClearCache() {
   return window['go']['app']['App']['ClearCache']();
 }
 
+export function ClearLogs() {
+  return window['go']['app']['App']['ClearLogs']();
+}
+
 export function Context() {
   return window['go']['app']['App']['Context']();
 }
@@ -38,6 +42,10 @@ export function GetBackendStatuses() {
   return window['go']['app']['App']['GetBackendStatuses']();
 }
 
+export function GetBuildInfo() {
+  return window['go']['app']['App']['GetBuildInfo']();
+}
+
 export function GetCacheStats() {
   return window['go']['app']['App']['GetCacheStats']();
 }
@@ -60,6 +68,14 @@ export function GetGhostDriveRoot() {
 
 export function GetLoadedPlugins() {
   return window['go']['app']['App']['GetLoadedPlugins']();
+}
+
+export function GetLogCount() {
+  return window['go']['app']['App']['GetLogCount']();
+}
+
+export function GetLogs(arg1) {
+  return window['go']['app']['App']['GetLogs'](arg1);
 }
 
 export function GetMountPoint() {

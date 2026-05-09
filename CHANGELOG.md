@@ -5,6 +5,36 @@ All notable changes to GhostDrive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-05-03
+
+### Added
+
+- **Plugin MooseFS** : nouveau backend de stockage natif — connexion directe au master MooseFS via TCP (protocole natif MooseFS 4.x), sans mount intermédiaire. Opérations supportées : List, Stat, Upload, Download, Delete, Move, CreateDir, Watch (polling). (#26)
+- **Tests d'intégration MooseFS** : suite complète avec fake TCP server (coverage 81.9%). (#27)
+- **Protocole TCP MooseFS 4.x complet** : implémentation des vrais opcodes (CLTOMA_*/MATOCL_* 400-437) remplaçant les opcodes fictifs (501-508). Phase 1 : FUSE_REGISTER (blob ACL + sessionID), Lookup O(1), StatFS, GetAttr, ReadDir, Mknod, Mkdir, Unlink, Rmdir avec vrais formats payload. Phase 2 : CSClient pour I/O chunk server (opcodes 200-213, CRC-32 IEEE en lecture). (#94)
+
+### Changed
+
+- **Volume label WinFsp dynamique** : le label du drive dans l'explorateur Windows correspond désormais au nom du backend configuré (ex : "MonNAS" au lieu de "GhostDrive"). Fallback "GhostDrive" si le nom est vide. (#92)
+
+### Fixed
+
+- **#96** — Logs FUSE/MooseFS désormais visibles dans l'UI : les callbacks WinFsp (`Getattr`, `Rename`, `Create`, `Release`) utilisent `logger.Info/Error` et l'ordre `io.MultiWriter` est corrigé (logStore en premier) pour éviter le short-circuit sur `os.Stderr` en mode GUI Windows.
+- **#97** — Le renommage de dossier MooseFS ne provoque plus `ERROR_IO_DEVICE` (0x8007045D) : correction des constantes de statut MooseFS 4.x (`StatusENOENT=3`, `StatusEACCES=4`, `StatusEEXIST=5`, `StatusENOTEMPTY=9`) — `Getattr` retourne désormais `ENOENT` au lieu de `EIO` pour les destinations manquantes, permettant à WinFsp de continuer le rename.
+- **Création de fichier vide** : "New file" depuis l'Explorateur Windows fonctionne — `Create()` pré-crée le fichier temporaire vide pour que `Release` puisse l'uploader même sans appel à `Write`.
+- **Upload gRPC 0 octet** : le chunk de métadonnées (`LocalPath`, `RemotePath`, `TotalBytes`) est désormais envoyé avant la boucle de lecture, garantissant que le serveur reçoit le chemin distant même pour les fichiers vides.
+- **Badge "Manuel" supprimé** : le badge redondant affiché sur les cards backend en mode autoSync off a été retiré. L'icône RefreshCw grisée est le seul indicateur du mode manuel. (#93)
+- **I/O chunk server optimisée** : mutex libéré avant les appels chunk server (ReadChunk/WriteChunk) — élimine deadlock potentiel et améliore concurrence. (#94)
+- **Borne maximale ReadFrame** : limite de sécurité à 128 MiB pour la taille des frames lus du master MooseFS. (#94)
+- **Vérification CRC-32 IEEE** : les lectures depuis chunk server vérifient désormais l'intégrité des données via CRC-32 IEEE. (#94)
+
+### Notes
+
+- `GetQuota` retourne (-1, -1, nil) — MooseFS ne l'expose pas via le protocole minimal implémenté.
+- `Move` : upload-first (source préservée si l'upload échoue). FUSE_RENAME natif prévu v1.6.x.
+
+---
+
 ## [1.1.2] — 2026-05-03
 
 ### Fixed

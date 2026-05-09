@@ -5,6 +5,7 @@ import { SettingsPage } from './components/settings/SettingsPage';
 import { ConfigPage } from './pages/ConfigPage';
 import { AboutPage } from './pages/AboutPage';
 import { FileBrowserPage } from './pages/FileBrowserPage';
+import { LogsPage } from './pages/LogsPage';
 import { useSyncStatus } from './hooks/useSyncStatus';
 import { useBackends } from './hooks/useBackends';
 import { useDriveStatuses } from './hooks/useDriveStatus';
@@ -21,7 +22,7 @@ const DEFAULT_CONFIG: AppConfig = {
   autoStart: false,
 };
 
-type View = 'backends' | 'configuration' | 'about' | 'drive';
+type View = 'backends' | 'configuration' | 'about' | 'drive' | 'logs';
 
 export function App() {
   const [view, setView] = useState<View>('backends');
@@ -68,6 +69,9 @@ export function App() {
             )}
           </span>
         </NavTab>
+        <NavTab active={view === 'logs'} onClick={() => setView('logs')}>
+          Logs
+        </NavTab>
         <NavTab active={view === 'about'} onClick={() => setView('about')}>
           À propos
         </NavTab>
@@ -80,6 +84,8 @@ export function App() {
           <AboutPage appConfig={appConfig} />
         ) : view === 'drive' ? (
           <FileBrowserPage />
+        ) : view === 'logs' ? (
+          <LogsPage />
         ) : (
           <SettingsPage />
         )}

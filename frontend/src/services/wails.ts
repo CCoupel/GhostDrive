@@ -4,7 +4,9 @@ import type {
   AppConfig,
   BackendConfig,
   BackendStatus,
+  BuildInfo,
   DriveStatus,
+  PluginBuildInfo,
   PluginDescriptor,
   SyncState,
   FileInfo,
@@ -76,6 +78,22 @@ export const ghostdriveApi = {
   getVersion: (): Promise<string> => App.GetVersion(),
   quit: (): Promise<void> => App.Quit(),
 
+  // About tab — build info + loaded plugins (v1.5.x — ecd2f19)
+
+  /**
+   * Returns version and VCS metadata for the running GhostDrive engine.
+   * Binding added in ecd2f19; not yet in auto-generated App.d.ts → cast via any.
+   */
+  getBuildInfo: (): Promise<BuildInfo> =>
+    (App as any).GetBuildInfo() as Promise<BuildInfo>,
+
+  /**
+   * Returns build metadata for each dynamically-loaded plugin.
+   * Go return type changed to PluginBuildInfo (adds `commit` field) in ecd2f19.
+   */
+  getLoadedPlugins: (): Promise<PluginBuildInfo[]> =>
+    (App as any).GetLoadedPlugins() as Promise<PluginBuildInfo[]>,
+
   // Drive virtuel (WinFsp) — par backend depuis v1.1.x #88
 
   /**
@@ -95,6 +113,14 @@ export const ghostdriveApi = {
   /** Retourne les lettres de lecteur Windows disponibles (ex: ['E:', 'F:', 'G:']). */
   getAvailableDriveLetters: (): Promise<string[]> =>
     (App as any).GetAvailableDriveLetters() as Promise<string[]>,
+
+  /** Retourne les entrées de log avec ID > sinceID (0 = toutes). */
+  getLogs: (sinceID: number): Promise<import('../types/ghostdrive').LogEntry[]> =>
+    App.GetLogs(sinceID) as unknown as Promise<import('../types/ghostdrive').LogEntry[]>,
+
+  /** Efface toutes les entrées de log stockées. */
+  clearLogs: (): Promise<void> =>
+    App.ClearLogs(),
 };
 
 export function onEvent<T extends WailsEventName>(

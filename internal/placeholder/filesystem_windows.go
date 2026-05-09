@@ -5,9 +5,9 @@ package placeholder
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/CCoupel/GhostDrive/internal/logger"
 	"github.com/CCoupel/GhostDrive/plugins"
 	"github.com/winfsp/cgofuse/fuse"
 )
@@ -117,6 +118,7 @@ func ensureDownloaded(cfg plugins.BackendConfig, backend plugins.StorageBackend,
 // ── Getattr ──────────────────────────────────────────────────────────────────
 
 func (fs *GhostFileSystem) Getattr(path string, stat *fuse.Stat_t, _ uint64) int {
+	logger.Info("[placeholder/getattr] ENTER path=%q", path)
 	now := nowTs()
 
 	// Virtual root directory.
@@ -156,15 +158,23 @@ func (fs *GhostFileSystem) Getattr(path string, stat *fuse.Stat_t, _ uint64) int
 
 	info, err := r.backend.Stat(context.Background(), r.relPath)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no such") {
+		logger.Info("[placeholder/getattr] path=%q stat_err=%q", path, err.Error())
+		if errors.Is(err, plugins.ErrFileNotFound) {
+			logger.Info("[placeholder/getattr] path=%q → ENOENT (errors.Is match)", path)
 			return -fuse.ENOENT
 		}
-		log.Printf("placeholder: Getattr %s: %v", path, err)
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no such") {
+			logger.Info("[placeholder/getattr] path=%q → ENOENT (string match)", path)
+			return -fuse.ENOENT
+		}
+		logger.Error("[placeholder/getattr] path=%q → EIO (unmatched err=%q)", path, err.Error())
 		return -fuse.EIO
 	}
 	if info == nil {
+		logger.Info("[placeholder/getattr] path=%q → ENOENT (nil info)", path)
 		return -fuse.ENOENT
 	}
+	logger.Info("[placeholder/getattr] path=%q → OK (dir=%v size=%d)", path, info.IsDir, info.Size)
 
 	mts := tsFromTime(info.ModTime)
 	if info.IsDir {
@@ -205,7 +215,7 @@ func (fs *GhostFileSystem) Readdir(path string,
 		}
 		entries, err := fs.backends[0].Backend.List(context.Background(), "/")
 		if err != nil {
-			log.Printf("placeholder: Readdir /: %v", err)
+			logger.Error("placeholder: Readdir /: %v", err)
 			return -fuse.EIO
 		}
 		for _, e := range entries {
@@ -234,7 +244,7 @@ func (fs *GhostFileSystem) Readdir(path string,
 
 	entries, err := r.backend.List(context.Background(), r.relPath)
 	if err != nil {
-		log.Printf("placeholder: Readdir %s: %v", path, err)
+		logger.Error("placeholder: Readdir %s: %v", path, err)
 		return -fuse.EIO
 	}
 
@@ -302,7 +312,7 @@ func (fs *GhostFileSystem) Open(path string, flags int) (int, uint64) {
 		// Stat() failing means the file is new — proceed with an empty temp.
 		if _, err := r.backend.Stat(context.Background(), r.relPath); err == nil {
 			if dlErr := r.backend.Download(context.Background(), r.relPath, localPath, nil); dlErr != nil {
-				log.Printf("placeholder: Open pre-download %s: %v", path, dlErr)
+				logger.Warn("placeholder: Open pre-download %s: %v", path, dlErr)
 				// Non-fatal: full-overwrite writes still work correctly.
 			}
 		}
@@ -311,7 +321,7 @@ func (fs *GhostFileSystem) Open(path string, flags int) (int, uint64) {
 		var err error
 		localPath, err = ensureDownloaded(r.config, r.backend, r.relPath)
 		if err != nil {
-			log.Printf("placeholder: Open %s: %v", path, err)
+			logger.Error("placeholder: Open %s: %v", path, err)
 			return -fuse.EIO, ^uint64(0)
 		}
 	}
@@ -332,7 +342,7 @@ func (fs *GhostFileSystem) Read(path string, buff []byte, ofst int64, fh uint64)
 
 	f, err := os.Open(entry.tempPath)
 	if err != nil {
-		log.Printf("placeholder: Read open temp %s: %v", path, err)
+		logger.Error("placeholder: Read open temp %s: %v", path, err)
 		return -fuse.EIO
 	}
 	defer f.Close()
@@ -388,7 +398,7 @@ func (fs *GhostFileSystem) Release(path string, fh uint64) int {
 		r := fs.route(path)
 		if r != nil {
 			if err := r.backend.Upload(context.Background(), entry.tempPath, r.relPath, nil); err != nil {
-				log.Printf("placeholder: Release upload %s: %v", path, err)
+				logger.Error("placeholder: Release upload %s: %v", path, err)
 			}
 		}
 		_ = os.Remove(entry.tempPath)
@@ -413,6 +423,12 @@ func (fs *GhostFileSystem) Create(path string, _ int, _ uint32) (int, uint64) {
 	}
 	localPath := filepath.Join(dir, filepath.Base(path))
 
+	// Pre-create the empty file so Release can upload it even if no Write is ever called
+	// (e.g. Windows Explorer "New file" creates a 0-byte file with Create+Release only).
+	if f, err := os.Create(localPath); err == nil {
+		f.Close()
+	}
+
 	fs.mu.Lock()
 	fs.handles[fh] = &openEntry{tempPath: localPath, writeable: true}
 	fs.mu.Unlock()
@@ -427,13 +443,20 @@ func (fs *GhostFileSystem) Unlink(path string) int {
 		return -fuse.ENOENT
 	}
 	if err := r.backend.Delete(context.Background(), r.relPath); err != nil {
-		log.Printf("placeholder: Unlink %s: %v", path, err)
+		logger.Error("placeholder: Unlink %s: %v", path, err)
 		return -fuse.EIO
 	}
 	return 0
 }
 
-func (fs *GhostFileSystem) Rename(oldpath, newpath string) int {
+func (fs *GhostFileSystem) Rename(oldpath, newpath string) (errc int) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("placeholder: Rename panic %q → %q: %v", oldpath, newpath, r)
+			errc = -fuse.EIO
+		}
+	}()
+	logger.Info("placeholder: Rename entry %q → %q", oldpath, newpath)
 	ro := fs.route(oldpath)
 	rn := fs.route(newpath)
 	if ro == nil || rn == nil {
@@ -444,10 +467,23 @@ func (fs *GhostFileSystem) Rename(oldpath, newpath string) int {
 		return -fuse.EXDEV
 	}
 	if err := ro.backend.Move(context.Background(), ro.relPath, rn.relPath); err != nil {
-		log.Printf("placeholder: Rename %s → %s: %v", oldpath, newpath, err)
+		logger.Error("placeholder: Rename %q → %q relPaths=%q→%q: %v",
+			oldpath, newpath, ro.relPath, rn.relPath, err)
 		return -fuse.EIO
 	}
+	logger.Info("placeholder: Rename success %q → %q", oldpath, newpath)
 	return 0
+}
+
+// Rename3 implements fuse.FileSystemRename3 for FUSE3 / WinFsp compatibility.
+// WinFsp uses the 3-param FUSE3 rename variant (with flags) on the CGO build.
+// Without this, cgofuse returns -EINVAL for any non-zero flags without calling Rename.
+func (fs *GhostFileSystem) Rename3(oldpath, newpath string, flags uint32) int {
+	logger.Info("[placeholder/rename3] entry oldpath=%q newpath=%q flags=%#x", oldpath, newpath, flags)
+	if flags&fuse.RENAME_EXCHANGE != 0 {
+		return -fuse.EINVAL
+	}
+	return fs.Rename(oldpath, newpath)
 }
 
 func (fs *GhostFileSystem) Mkdir(path string, _ uint32) int {
@@ -456,8 +492,30 @@ func (fs *GhostFileSystem) Mkdir(path string, _ uint32) int {
 		return -fuse.ENOENT
 	}
 	if err := r.backend.CreateDir(context.Background(), r.relPath); err != nil {
-		log.Printf("placeholder: Mkdir %s: %v", path, err)
+		logger.Error("placeholder: Mkdir %s: %v", path, err)
 		return -fuse.EIO
 	}
+	return 0
+}
+
+func (fs *GhostFileSystem) Statfs(path string, stat *fuse.Statfs_t) int {
+	if len(fs.backends) == 0 {
+		return -fuse.EIO
+	}
+	free, total, err := fs.backends[0].Backend.GetQuota(context.Background())
+	if err != nil || total == 0 {
+		stat.Bsize = 4096
+		stat.Frsize = 4096
+		stat.Blocks = 1 << 40 / 4096
+		stat.Bfree = 1 << 39 / 4096
+		stat.Bavail = stat.Bfree
+		return 0
+	}
+	bsize := uint64(4096)
+	stat.Bsize = bsize
+	stat.Frsize = bsize
+	stat.Blocks = uint64(total) / bsize
+	stat.Bfree = uint64(free) / bsize
+	stat.Bavail = stat.Bfree
 	return 0
 }

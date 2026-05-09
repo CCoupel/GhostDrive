@@ -441,7 +441,8 @@ export function SyncPointForm({
       );
       setTestState({ status: 'ok', result });
     } catch (e) {
-      setTestState({ status: 'fail', message: (e as Error).message ?? 'Connexion impossible' });
+      const msg = e instanceof Error ? e.message : typeof e === 'string' && e ? e : 'Connexion impossible';
+      setTestState({ status: 'fail', message: msg });
     }
   };
 

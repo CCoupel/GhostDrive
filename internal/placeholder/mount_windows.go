@@ -121,10 +121,15 @@ func (d *WinFspDrive) Mount(mountPoint string, backends []MountedBackend) error 
 	d.done = make(chan struct{})
 	d.lastError = "" // clear on successful mount start
 
+	volName := "GhostDrive"
+	if len(backends) > 0 && backends[0].Name != "" {
+		volName = backends[0].Name
+	}
+
 	go func() {
 		defer close(d.done)
 		// host.Mount blocks until the drive is unmounted.
-		if ok := host.Mount(mountPoint, []string{"-o", "uid=-1,gid=-1,volname=GhostDrive"}); !ok {
+		if ok := host.Mount(mountPoint, []string{"-o", fmt.Sprintf("uid=-1,gid=-1,volname=%s", volName)}); !ok {
 			log.Printf("placeholder: WinFsp mount %s failed", mountPoint)
 			d.mu.Lock()
 			d.lastError = fmt.Sprintf("winfsp: mount %s failed", mountPoint)

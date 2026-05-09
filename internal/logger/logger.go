@@ -31,6 +31,7 @@ var (
 	logFile      *os.File
 	logPath      string
 	debugEnabled bool
+	extraWriter  io.Writer // optional additional sink (e.g. in-memory log store)
 
 	infoLog  *log.Logger
 	debugLog *log.Logger
@@ -60,6 +61,15 @@ func defaultLogPath() string {
 	return filepath.Join(home, ".local", "share", "ghostdrive", "logs", "ghostdrive.log")
 }
 
+// SetExtraWriter routes all log output to w in addition to the log file/stderr.
+// Intended to be called once from app.Startup to wire the in-memory log store.
+func SetExtraWriter(w io.Writer) {
+	mu.Lock()
+	defer mu.Unlock()
+	extraWriter = w
+	setupLoggers()
+}
+
 // setupLoggers (re-)creates the four level-prefixed loggers.
 // Must be called either before any goroutine starts (init) or with mu held.
 func setupLoggers() {
@@ -69,6 +79,9 @@ func setupLoggers() {
 	}
 	if debugEnabled || logFile == nil {
 		writers = append(writers, os.Stderr)
+	}
+	if extraWriter != nil {
+		writers = append(writers, extraWriter)
 	}
 
 	var w io.Writer

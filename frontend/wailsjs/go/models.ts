@@ -1,3 +1,44 @@
+export namespace app {
+	
+	export class BuildInfo {
+	    version: string;
+	    commit: string;
+	    goVersion: string;
+	    buildTime: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BuildInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.version = source["version"];
+	        this.commit = source["commit"];
+	        this.goVersion = source["goVersion"];
+	        this.buildTime = source["buildTime"];
+	    }
+	}
+	export class PluginBuildInfo {
+	    name: string;
+	    version: string;
+	    commit: string;
+	    path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PluginBuildInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.version = source["version"];
+	        this.commit = source["commit"];
+	        this.path = source["path"];
+	    }
+	}
+
+}
+
 export namespace config {
 	
 	export class AppConfig {
@@ -49,26 +90,26 @@ export namespace config {
 
 }
 
-export namespace loader {
+export namespace logging {
 	
-	export class PluginInfo {
-	    name: string;
-	    version: string;
-	    path: string;
-	    status: string;
-	    error?: string;
+	export class Entry {
+	    id: number;
+	    time: string;
+	    level: string;
+	    source: string;
+	    message: string;
 	
 	    static createFrom(source: any = {}) {
-	        return new PluginInfo(source);
+	        return new Entry(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.version = source["version"];
-	        this.path = source["path"];
-	        this.status = source["status"];
-	        this.error = source["error"];
+	        this.id = source["id"];
+	        this.time = source["time"];
+	        this.level = source["level"];
+	        this.source = source["source"];
+	        this.message = source["message"];
 	    }
 	}
 
@@ -77,10 +118,12 @@ export namespace loader {
 export namespace placeholder {
 	
 	export class DriveStatus {
-	    Mounted: boolean;
-	    MountPoint: string;
-	    BackendPaths: Record<string, string>;
-	    LastError: string;
+	    mounted: boolean;
+	    mountPoint: string;
+	    backendID: string;
+	    backendName: string;
+	    backendPaths: Record<string, string>;
+	    lastError: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new DriveStatus(source);
@@ -88,10 +131,12 @@ export namespace placeholder {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.Mounted = source["Mounted"];
-	        this.MountPoint = source["MountPoint"];
-	        this.BackendPaths = source["BackendPaths"];
-	        this.LastError = source["LastError"];
+	        this.mounted = source["mounted"];
+	        this.mountPoint = source["mountPoint"];
+	        this.backendID = source["backendID"];
+	        this.backendName = source["backendName"];
+	        this.backendPaths = source["backendPaths"];
+	        this.lastError = source["lastError"];
 	    }
 	}
 
