@@ -423,6 +423,12 @@ func (fs *GhostFileSystem) Create(path string, _ int, _ uint32) (int, uint64) {
 	}
 	localPath := filepath.Join(dir, filepath.Base(path))
 
+	// Pre-create the empty file so Release can upload it even if no Write is ever called
+	// (e.g. Windows Explorer "New file" creates a 0-byte file with Create+Release only).
+	if f, err := os.Create(localPath); err == nil {
+		f.Close()
+	}
+
 	fs.mu.Lock()
 	fs.handles[fh] = &openEntry{tempPath: localPath, writeable: true}
 	fs.mu.Unlock()
