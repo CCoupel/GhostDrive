@@ -692,7 +692,9 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 	logger.Debug("[mfsclient] Write: CS %s:%d connected", csIP, srv.Port)
 	defer cs.Close()
 
-	if err := WriteChunk(cs, info.ChunkID, info.Version, chunkOffset, data); err != nil {
+	// Pass Servers[1:] as the replication chain so CS1 forwards to CS2..CSN.
+	chainServers := info.Servers[1:]
+	if err := WriteChunk(cs, info.ChunkID, info.Version, chunkOffset, data, chainServers); err != nil {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): write chunk: %w", nodeID, offset, err)
 	}
 

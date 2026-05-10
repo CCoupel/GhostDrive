@@ -180,7 +180,9 @@ func (s *integFakeCSServer) serveRead(conn net.Conn, payload []byte) {
 }
 
 func (s *integFakeCSServer) serveWrite(conn net.Conn, payload []byte) {
-	if len(payload) < 13 {
+	// CLTOCS_WRITE payload: [chunkId:64][version:32][N*(ip:32+port:16)]
+	// N is implicit: (payloadLen-12)/6.  Minimum 12 bytes (N=0).
+	if len(payload) < 12 {
 		return
 	}
 	chunkID, _, _ := mfsclient.ReadUint64(payload, 0)

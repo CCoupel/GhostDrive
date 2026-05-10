@@ -14,14 +14,16 @@
 // # Write protocol  (MooseFS 4.x — MFSCommunication.h confirmed)
 //
 //	Client → CS  CLTOCS_WRITE (210):       [chunkId:64][version:32][N*(ip:32+port:16)]
-//	                                        N=0: direct write (no chain)
+//	                                        N is implicit: (payloadLen−12)/6
+//	                                        N=0: direct write, no replication chain
+//	                                        N≥1: CS must forward to listed peers for replication
 //	Client → CS  CLTOCS_WRITE_DATA (212):  [chunkId:64][writeId:32][blocknum:16][blockOffset:16][size:32][crc:32][data:size]
 //	                                        blocknum    = (chunkOffset + written) / 65536
 //	                                        blockOffset = (chunkOffset + written) % 65536
 //	                                        writeId     = monotonic frame counter (1, 2, …)
 //	Client → CS  CLTOCS_WRITE_FINISH (213):[chunkId:64][version:32]
 //	CS → Client  CSTOCL_WRITE_STATUS (211):[chunkId:64][writeId:32][status:8]
-//	                                        CS echoes the last writeId from WRITE_DATA
+//	                                        CS echoes writeId from the last WRITE_DATA frame
 package mfsclient
 
 import (
@@ -123,16 +125,28 @@ func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size 
 // WriteChunk writes data to chunk chunkID/version at the given offset within
 // the chunk via the chunk server connection cs.
 //
+// chain contains the additional chunk servers that cs must replicate to.
+// When the master returns N servers, the caller dials Servers[0] and passes
+// Servers[1:] as chain.  N=0 (nil/empty chain) means direct write with no
+// replication.  N is implicit in the CLTOCS_WRITE payload length:
+//
+//	payloadLen = 12 + len(chain)*6  →  N = (payloadLen−12)/6
+//
 // Data is split into 65536-byte blocks and sent as individual CLTOCS_WRITE_DATA
 // frames.  A CRC-32 (IEEE) checksum is computed for each frame.
 // After all data frames, CLTOCS_WRITE_END is sent and CSTOCL_WRITE_STATUS is
 // waited for.
-func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data []byte) error {
+func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data []byte, chain []ChunkServer) error {
 	// 1. Send CLTOCS_WRITE init frame.
+	// N is implicit from payload length: (payloadLen-12)/6.
+	// No explicit N byte — adding chain entries is sufficient.
 	var initPayload []byte
 	initPayload = PutUint64(initPayload, chunkID)
 	initPayload = PutUint32(initPayload, version)
-	initPayload = PutUint8(initPayload, 0) // N=0: no write-chain servers
+	for _, srv := range chain {
+		initPayload = PutUint32(initPayload, srv.IP)
+		initPayload = PutUint16(initPayload, srv.Port)
+	}
 
 	if err := WriteFrame(cs, CltocsFuseWrite, initPayload); err != nil {
 		return fmt.Errorf("csclient: WriteChunk %d: send init: %w", chunkID, err)
