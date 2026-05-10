@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.10] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : WRITE_CHUNK_END format corrigé (37B) — ajout des champs `chunkindx:32` et `chunkopflags:8` conformément au protocole MooseFS >= 3.0.74 (#101)
+- MooseFS plugin : ignore les trames NOP (cmd=0) dans la lecture de WRITE_STATUS — évite l'erreur "expected WRITE_STATUS got 0" sur les CS qui envoient des keepalives (#101)
+
+---
+
 ## [1.5.9] — 2026-05-10
 
 ### Fixed
