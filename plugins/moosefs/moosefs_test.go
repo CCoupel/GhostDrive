@@ -229,14 +229,15 @@ func (s *integFakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 
 // integFakeServer is a minimal in-memory MooseFS TCP server.
 type integFakeServer struct {
-	ln     net.Listener
-	mu     sync.Mutex
-	nodes  map[uint32]*integNode
-	nextID atomic.Uint32
-	done   chan struct{}
-	cs     *integFakeCSServer // embedded chunk server
-	csIP   uint32             // CS listen IP (uint32 big-endian)
-	csPort uint16             // CS listen port
+	ln            net.Listener
+	mu            sync.Mutex
+	nodes         map[uint32]*integNode
+	nextID        atomic.Uint32
+	done          chan struct{}
+	cs            *integFakeCSServer // embedded chunk server
+	csIP          uint32             // CS listen IP (uint32 big-endian)
+	csPort        uint16             // CS listen port
+	registerCount atomic.Int32       // counts successful NewSession REGISTER calls
 }
 
 // newIntegFakeServer creates a fake server seeded with the root node only.
@@ -383,6 +384,7 @@ func (s *integFakeServer) svrRegister(conn net.Conn, payload []byte) {
 	}
 	rcode := payload[64]
 	if rcode == mfsclient.RegisterNewSession {
+		s.registerCount.Add(1)
 		var resp []byte
 		resp = mfsclient.PutUint32(resp, 263168) // version
 		resp = mfsclient.PutUint32(resp, 42)     // sessionId
@@ -1322,3 +1324,49 @@ func TestDescribe(t *testing.T) {
 
 // Ensure unused fmt import compiles.
 var _ = fmt.Sprintf
+
+// TestReconnect_singleflight verifies that concurrent reconnect() calls produce
+// exactly ONE new MooseFS session (RegisterNewSession) even when N goroutines
+// detect a connection error simultaneously.
+//
+// The test runs reconnect() from 8 goroutines at once against the integFakeServer.
+// reconnect() internally sets b.connected=false and then acquires reconnMu, so
+// only the first goroutine through the lock will actually dial; the others will
+// see b.connected==true after waiting and return nil immediately.
+func TestReconnect_singleflight(t *testing.T) {
+	srv := newIntegFakeServer()
+	addr := srv.start(t)
+
+	b := newTestBackend(t, addr)
+
+	// Snapshot register count after initial Connect (exactly 1 session open).
+	initial := srv.registerCount.Load()
+	require.Equal(t, int32(1), initial, "precondition: exactly 1 RegisterNewSession on Connect")
+
+	// Fire N goroutines simultaneously.  Each calls reconnect() as it would after
+	// detecting a connection error.  Only one must actually dial the master.
+	const N = 8
+	var wg sync.WaitGroup
+	wg.Add(N)
+	errs := make([]error, N)
+	for i := 0; i < N; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = b.reconnect()
+		}(i)
+	}
+	wg.Wait()
+
+	// All goroutines must succeed.
+	for i, err := range errs {
+		assert.NoError(t, err, "goroutine %d must not return an error", i)
+	}
+
+	// Exactly one new RegisterNewSession must have been sent.
+	got := srv.registerCount.Load() - initial
+	assert.Equal(t, int32(1), got,
+		"singleflight: expected exactly 1 new RegisterNewSession, got %d", got)
+
+	// Backend must be connected after all goroutines finish.
+	assert.True(t, b.IsConnected(), "backend must be connected after singleflight reconnect")
+}

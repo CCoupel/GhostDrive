@@ -70,6 +70,12 @@ type Backend struct {
 	subDir    string // backend root on the cluster (default "/")
 	pollMs    int    // Watch polling interval in milliseconds
 	lastCfg   plugins.BackendConfig
+
+	// reconnMu serialises reconnection attempts so that only one goroutine
+	// dials the master at a time.  Other goroutines that detect a connection
+	// error concurrently will block here and, once the first reconnect
+	// succeeds, find b.connected == true and return nil immediately.
+	reconnMu sync.Mutex
 }
 
 // New returns an unconnected Backend.  Call Connect before any other method.
@@ -240,20 +246,39 @@ func isConnError(err error) bool {
 }
 
 // reconnect re-establishes the TCP connection using the last successful config.
-// Replaces b.client in place and resets b.connected on failure.
+//
+// It implements a singleflight pattern via reconnMu: if multiple goroutines
+// detect a connection error simultaneously only the first one that acquires
+// reconnMu actually dials the master.  The others block on reconnMu and, once
+// released, see b.connected == true and return nil without creating a second
+// session.
+//
 // Must NOT be called with b.mu held.
 func (b *Backend) reconnect() error {
+	// Mark as disconnected before acquiring reconnMu so that goroutines waiting
+	// on the lock see connected==false and know reconnection is still needed.
+	b.mu.Lock()
+	b.connected = false
+	b.mu.Unlock()
+
+	// Singleflight: serialise concurrent reconnection attempts.
+	b.reconnMu.Lock()
+	defer b.reconnMu.Unlock()
+
+	// Re-check after acquiring the lock: a goroutine ahead of us may have
+	// already reconnected successfully.
 	b.mu.RLock()
+	alreadyOK := b.connected
 	cfg := b.lastCfg
 	b.mu.RUnlock()
+	if alreadyOK {
+		return nil
+	}
 
 	logger.Info("reconnect: reconnecting to master")
 
 	newClient, err := dialAndRegister(cfg)
 	if err != nil {
-		b.mu.Lock()
-		b.connected = false
-		b.mu.Unlock()
 		logger.Error("reconnect: failed: %v", err)
 		return fmt.Errorf("moosefs: reconnect: %w", err)
 	}
