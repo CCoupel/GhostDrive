@@ -17,8 +17,15 @@ import (
 	"net"
 	"sync"
 
+	"github.com/CCoupel/GhostDrive/internal/logger"
 	"github.com/CCoupel/GhostDrive/plugins"
 )
+
+// mfsClientVersion is the MooseFS client version we declare during REGISTER.
+// Encoding: (major << 16) | (minor << 8) | patch.
+// Must be >= the server's minimum supported client version.
+// Keep in sync with the master version deployed on the cluster.
+const mfsClientVersion = (4 << 16) | (58 << 8) | 4 // 4.58.4 = 276996
 
 // Client is a synchronous MooseFS TCP client.
 // All methods are safe to call from multiple goroutines; they are protected
@@ -147,10 +154,9 @@ func (c *Client) Register() error {
 	req = append(req, []byte(FuseRegisterBlobACL)...) // 64 bytes blob
 	req = PutUint8(req, RegisterNewSession)            // rcode = 2
 
-	// Version: 4.56.0 = (4<<16)|(56<<8)|0 = 276480.
-	// Must be >= the server's minimum supported client version.
-	// MooseFS 4.x masters reject older clients (e.g. 4.4.0 = 263168) with EPERM.
-	req = PutUint32(req, 276480)
+	// Declare our client version — see mfsClientVersion constant above.
+	// MooseFS 4.x masters reject older clients with EPERM.
+	req = PutUint32(req, mfsClientVersion)
 
 	// ileng=0 (empty instance name — accepted by all MooseFS 4.x masters).
 	req = PutUint32(req, 0)
@@ -850,8 +856,10 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 			entrySize = 14 // ip:32 + port:16 + cs_ver:32 + labelmask:32
 		}
 
-	default:
+	case 0:
 		// Proto 0: no protocolid byte; off is still at 4 (start of [length:64]).
+		// The byte at offset 4 is the MSB of the 64-bit file length (always 0
+		// for files < 72 PiB), not a separate protocol identifier.
 		_, off, err = ReadUint64(ans, off) // file length
 		if err != nil {
 			return nil, fmt.Errorf("length (proto0): %w", err)
@@ -865,6 +873,18 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 			return nil, fmt.Errorf("version (proto0): %w", err)
 		}
 		entrySize = 6 // ip:32 + port:16 (no cs_ver in proto 0)
+
+	default:
+		// Unknown protocolid — likely a newer MooseFS protocol version (>= proto 3)
+		// that GhostDrive does not yet support.  Falling back to proto 0 would
+		// silently misparse the response and produce incorrect chunk server lists.
+		// Return an explicit error so the caller can surface a diagnostic.
+		limit := len(ans)
+		if limit > 32 {
+			limit = 32
+		}
+		logger.Warn("mfsclient: parseChunkInfo: unknown protocolid=%d — MooseFS may have introduced a new chunk-info format. Raw (first %d bytes): %x", protocolID, limit, ans[:limit])
+		return nil, fmt.Errorf("parseChunkInfo: unknown protocolid %d (raw: %x) — upgrade GhostDrive or report this to the project", protocolID, ans[:limit])
 	}
 
 	remaining := len(ans) - off
