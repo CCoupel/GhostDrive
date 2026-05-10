@@ -15,8 +15,10 @@
 //
 //	Client → CS  CLTOCS_WRITE (210):       [protocolid:8=1][chunkId:64][version:32][N*(ip:32+port:16)]
 //	                                        N is implicit: (payloadLen−13)/6  (protocolid byte counts)
-//	                                        N=0: direct write, no replication chain
+//	                                        N=0: direct write, no replication chain (recommended for
+//	                                              FUSE clients — master replicates async post-commit)
 //	                                        N≥1: CS must forward to listed peers for replication
+//	                                              (synchronous; unreachable peers cause CANTCONNECT)
 //	CS → Client  CSTOCL_WRITE_STATUS (211):[chunkId:64][writeId:32=0][status:8]
 //	                                        MANDATORY write-init ACK sent by CS once the replication
 //	                                        chain is established (waitforstatus=1 in writedata.c).

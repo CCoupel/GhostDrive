@@ -695,9 +695,13 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 	logger.Debug("[mfsclient] Write: CS %s:%d connected", csIP, srv.Port)
 	defer cs.Close()
 
-	// Pass Servers[1:] as the replication chain so CS1 forwards to CS2..CSN.
-	chainServers := info.Servers[1:]
-	if err := WriteChunk(cs, info.ChunkID, info.Version, chunkOffset, data, chainServers); err != nil {
+	// Pass nil chain: write to CS1 only. The MooseFS master handles async
+	// replication to other CSes after WRITE_CHUNK_END is committed.
+	// Passing Servers[1:] as a chain causes CS1 to synchronously forward data
+	// to CS2..CSN before returning the write-init ACK; when a chain CS is
+	// unreachable this produces a ~5 s TCP timeout followed by CANTCONNECT or EOF,
+	// blocking the entire write. Nil chain is a valid mode for FUSE clients.
+	if err := WriteChunk(cs, info.ChunkID, info.Version, chunkOffset, data, nil); err != nil {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): write chunk: %w", nodeID, offset, err)
 	}
 
