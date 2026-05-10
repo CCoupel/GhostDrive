@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.9] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : ajout du byte `protocolid:8=1` en premier octet de `CLTOCS_WRITE` (opcode 210) — corrige CANTCONNECT (0x1a) sur MooseFS 4.x quand chunkId MSB ≠ 0 (#101)
+- MooseFS plugin : encodage de la chaîne CS (CS2..CSN) dans `CLTOCS_WRITE` — corrige la réplication multi-CS (#101)
+- MooseFS plugin : opcode `CSTOCL_WRITE_STATUS` corrigé 213→211 pour MooseFS 4.x, fallback 213 pour ≤3.x (#101)
+- MooseFS plugin : opcodes `CLTOCS_WRITE_DATA` (211→212) et `CLTOCS_WRITE_FINISH` (212→213) corrigés (#101)
+- MooseFS plugin : ajout du champ `writeId:32` dans les frames `CLTOCS_WRITE_DATA` (#101)
+- MooseFS plugin : logs plugin subprocess toujours visibles (GHOSTDRIVE_DEBUG=1 forcé dans le subprocess) (#101)
+
+---
+
 ## [1.5.8] — 2026-05-10
 
 ### Fixed
