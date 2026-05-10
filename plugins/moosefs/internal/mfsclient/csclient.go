@@ -128,9 +128,16 @@ func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size 
 // chain contains the additional chunk servers that cs must replicate to.
 // When the master returns N servers, the caller dials Servers[0] and passes
 // Servers[1:] as chain.  N=0 (nil/empty chain) means direct write with no
-// replication.  N is implicit in the CLTOCS_WRITE payload length:
+// replication.
 //
-//	payloadLen = 12 + len(chain)*6  →  N = (payloadLen−12)/6
+// CLTOCS_WRITE payload format (MooseFS >= 1.7.32 / all 4.x):
+//
+//	[protocolid:8=1][chunkid:64][version:32][(N-1)*(ip:32+port:16)]
+//	payloadLen = 13 + len(chain)*6
+//
+// protocolid=1 is mandatory: if absent (or wrong), the CS reads chunkid[0] as
+// protocolid, shifts all subsequent fields by one byte and misparses the chain
+// IP/port → CANTCONNECT.
 //
 // Data is split into 65536-byte blocks and sent as individual CLTOCS_WRITE_DATA
 // frames.  A CRC-32 (IEEE) checksum is computed for each frame.
@@ -138,9 +145,9 @@ func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size 
 // waited for.
 func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data []byte, chain []ChunkServer) error {
 	// 1. Send CLTOCS_WRITE init frame.
-	// N is implicit from payload length: (payloadLen-12)/6.
-	// No explicit N byte — adding chain entries is sufficient.
+	// protocolid:8=1 must be the first byte (MooseFS >= 1.7.32 requirement).
 	var initPayload []byte
+	initPayload = PutUint8(initPayload, 1) // protocolid:8 = 1
 	initPayload = PutUint64(initPayload, chunkID)
 	initPayload = PutUint32(initPayload, version)
 	for _, srv := range chain {

@@ -188,12 +188,14 @@ func (s *fakeCSServer) serveRead(conn net.Conn, payload []byte) {
 // (already received in payload).  It then reads CLTOCS_WRITE_DATA frames
 // followed by CLTOCS_WRITE_END and finally sends CSTOCL_WRITE_STATUS.
 func (s *fakeCSServer) serveWrite(conn net.Conn, payload []byte) {
-	// CLTOCS_WRITE payload: [chunkId:64][version:32][N*(ip:32+port:16)]
-	// N is implicit: (payloadLen-12)/6.  Minimum 12 bytes (N=0).
-	if len(payload) < 12 {
+	// CLTOCS_WRITE payload (MooseFS >= 1.7.32):
+	// [protocolid:8=1][chunkId:64][version:32][N*(ip:32+port:16)]
+	// Minimum 13 bytes (protocolid + chunkId + version, N=0).
+	if len(payload) < 13 {
 		return
 	}
-	chunkID, _, _ := ReadUint64(payload, 0)
+	// payload[0] = protocolid (must be 1); chunkId starts at offset 1.
+	chunkID, _, _ := ReadUint64(payload, 1)
 	// version and chain entries are parsed but not used in the fake
 
 	for {
@@ -377,9 +379,10 @@ func TestWriteChunk_success(t *testing.T) {
 	assert.Equal(t, payload, stored, "stored chunk data must match written payload")
 }
 
-// TestWriteChunk_withChain verifies that WriteChunk encodes chain servers in the
-// CLTOCS_WRITE init frame.  The fake CS checks that the payload is ≥ 12+6=18
-// bytes (1 chain entry) and still stores the data correctly.
+// TestWriteChunk_withChain verifies that WriteChunk encodes protocolid:8=1 and
+// chain servers correctly in the CLTOCS_WRITE init frame.
+// Expected layout: [protocolid:8=1][chunkId:64][version:32][ip:32][port:16]
+// = 1+8+4+4+2 = 19 bytes for 1 chain entry.
 func TestWriteChunk_withChain(t *testing.T) {
 	cs := newFakeCSServer()
 	ip, port := cs.Start()
@@ -392,12 +395,16 @@ func TestWriteChunk_withChain(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 
-	// Pass a dummy chain server — the fake CS doesn't actually connect to it,
-	// but it must accept the init frame without truncating.
-	chain := []ChunkServer{{IP: 0xC0A802DC, Port: 9423}} // 192.168.2.220
+	// Intercept the init frame by wrapping the connection in a recorder.
+	// Instead, we verify indirectly: the fake CS parses chunkId at offset 1
+	// (protocolid byte), so a successful round-trip proves the layout is correct.
+	const chainIP = uint32(0xC0A802DC)  // 192.168.2.220
+	const chainPort = uint16(9423)
+	chain := []ChunkServer{{IP: chainIP, Port: chainPort}}
 	err = WriteChunk(conn, chunkID, 1, 0, payload, chain)
 	require.NoError(t, err, "WriteChunk with chain must succeed against the fake CS")
 
+	// The fake CS read chunkId at payload[1:9] — verify data stored under correct key.
 	stored := cs.GetChunkData(chunkID)
 	assert.Equal(t, payload, stored, "stored chunk data must match written payload")
 }

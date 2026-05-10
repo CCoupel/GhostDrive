@@ -180,12 +180,14 @@ func (s *integFakeCSServer) serveRead(conn net.Conn, payload []byte) {
 }
 
 func (s *integFakeCSServer) serveWrite(conn net.Conn, payload []byte) {
-	// CLTOCS_WRITE payload: [chunkId:64][version:32][N*(ip:32+port:16)]
-	// N is implicit: (payloadLen-12)/6.  Minimum 12 bytes (N=0).
-	if len(payload) < 12 {
+	// CLTOCS_WRITE payload (MooseFS >= 1.7.32):
+	// [protocolid:8=1][chunkId:64][version:32][N*(ip:32+port:16)]
+	// Minimum 13 bytes (protocolid + chunkId + version, N=0).
+	if len(payload) < 13 {
 		return
 	}
-	chunkID, _, _ := mfsclient.ReadUint64(payload, 0)
+	// payload[0] = protocolid (must be 1); chunkId starts at offset 1.
+	chunkID, _, _ := mfsclient.ReadUint64(payload, 1)
 	for {
 		cmd, data, err := mfsclient.ReadFrame(conn)
 		if err != nil {
