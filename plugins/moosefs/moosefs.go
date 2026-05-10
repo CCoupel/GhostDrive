@@ -27,6 +27,7 @@ package moosefs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -297,7 +298,21 @@ func dialAndRegister(cfg plugins.BackendConfig) (*mfsclient.Client, error) {
 // Upload reads the local file at local and writes it to the remote path
 // remote in 64 KiB chunks via Mknod + Write.
 // The remote parent directory must already exist.
+// On connection loss (EOF), it reconnects and retries once.
 func (b *Backend) Upload(ctx context.Context, local, remote string, progress plugins.ProgressCallback) error {
+	err := b.upload(ctx, local, remote, progress)
+	if err != nil && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+		logger.Warn("upload %s: connection lost, reconnecting…", remote)
+		if reconnErr := b.reconnect(); reconnErr != nil {
+			return err
+		}
+		logger.Info("upload %s: retrying after reconnect", remote)
+		err = b.upload(ctx, local, remote, progress)
+	}
+	return err
+}
+
+func (b *Backend) upload(ctx context.Context, local, remote string, progress plugins.ProgressCallback) error {
 	connected, c, subDir, _ := b.state()
 	if !connected {
 		return ErrNotConnected
@@ -318,6 +333,7 @@ func (b *Backend) Upload(ctx context.Context, local, remote string, progress plu
 		return fmt.Errorf("moosefs: upload %s: stat local: %w", remote, err)
 	}
 	totalSize := info.Size()
+	logger.Debug("upload %s: local size=%d", remote, totalSize)
 
 	// Resolve parent and base name.
 	parentID, baseName, err := resolveParent(ctx, c, subDir, remote)
