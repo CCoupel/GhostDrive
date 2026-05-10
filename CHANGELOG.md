@@ -5,6 +5,16 @@ All notable changes to GhostDrive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **#101** — Copie de fichier vers MooseFS restait à 0 octet — 3 bugs protocole MooseFS 4.x corrigés : format WRITE_CHUNK request (16B→13B, chunkopflags), parsing réponse WRITE_CHUNK (proto 0/1/2), champ inode manquant dans WRITE_CHUNK_END
+- **#101** — Dirty flag WinFsp : la phase Create (0 octet) ne déclenche plus d'upload, seul le Release après Write réel upload le fichier
+- **#101** — Logs DEBUG toujours visibles dans l'UI (routés vers le store in-process indépendamment de GHOSTDRIVE_DEBUG)
+
+---
+
 ## [1.5.2] — 2026-05-09
 
 ### Fixed
