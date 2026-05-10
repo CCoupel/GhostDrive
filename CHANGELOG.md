@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **#101** — Copie de fichier vers MooseFS restait à 0 octet — 3 bugs protocole MooseFS 4.x corrigés : format WRITE_CHUNK request (16B→13B, chunkopflags), parsing réponse WRITE_CHUNK (proto 0/1/2), champ inode manquant dans WRITE_CHUNK_END
 - **#101** — Dirty flag WinFsp : la phase Create (0 octet) ne déclenche plus d'upload, seul le Release après Write réel upload le fichier
 - **#101** — Logs DEBUG toujours visibles dans l'UI (routés vers le store in-process indépendamment de GHOSTDRIVE_DEBUG)
+- **#101** — Version client MooseFS déclarée : bump 4.56.0 → 4.58.4 pour correspondre au master ; erreur explicite + hexdump WARN sur protocolID inconnu dans parseChunkInfo
 
 ---
 
