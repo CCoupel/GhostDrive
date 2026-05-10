@@ -22,10 +22,13 @@ import (
 )
 
 // mfsClientVersion is the MooseFS client version we declare during REGISTER.
-// Encoding: (major << 16) | (minor << 8) | patch.
+// Encoding: VERSION2INT(maj, mid, min) = (maj<<16) | (mid<<8) | (min*2) when maj>1.
+// The *2 multiplier on the patch component is required by the official MooseFS
+// VERSION2INT macro; omitting it produces an off-by-one version that the master
+// logs as 4.58.2 instead of 4.58.4.
 // Must be >= the server's minimum supported client version.
 // Keep in sync with the master version deployed on the cluster.
-const mfsClientVersion = (4 << 16) | (58 << 8) | 4 // 4.58.4 = 276996
+const mfsClientVersion = (4 << 16) | (58 << 8) | (4 * 2) // VERSION2INT(4,58,4) = 277000
 
 // Client is a synchronous MooseFS TCP client.
 // All methods are safe to call from multiple goroutines; they are protected
