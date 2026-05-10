@@ -202,14 +202,17 @@ func (s *fakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 
 		switch cmd {
 		case CltocsFuseWriteData:
-			// [chunkId:64][blocknum:16][blockOffset:16][size:32][crc:32][data:size]
-			if len(data) < 20 {
+			// MooseFS 4.x CLTOCS_WRITE_DATA (212):
+			// [chunkId:64][writeId:32][blocknum:16][blockOffset:16][size:32][crc:32][data:size]
+			if len(data) < 24 { // minimum: 8+4+2+2+4+4 = 24 bytes before data
 				return
 			}
-			blockNum, off, _ := ReadUint16(data, 8) // after chunkId
-			blockOff, off, _ := ReadUint16(data, off)
-			size, off, _ := ReadUint32(data, off)
-			off += 4 // skip CRC
+			var off int
+			_, off, _ = ReadUint32(data, 8)  // writeId:32 — skip (offset 8 after chunkId:64)
+			blockNum, off, _ := ReadUint16(data, off) // blockNum at offset 12
+			blockOff, off, _ := ReadUint16(data, off) // blockOff at offset 14
+			size, off, _ := ReadUint32(data, off)     // size at offset 16
+			off += 4                                   // skip CRC at offset 20
 			if off+int(size) > len(data) {
 				return
 			}
@@ -217,7 +220,7 @@ func (s *fakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 			dataOffset := uint32(blockNum)*65536 + uint32(blockOff)
 			s.storeBlock(chunkID, dataOffset, block)
 
-		case CltocsFuseWriteEnd:
+		case CltocsFuseWriteEnd: // CLTOCS_WRITE_FINISH (213)
 			// Send CSTOCL_WRITE_STATUS: [chunkId:64][writeId:32][status:8]
 			var resp []byte
 			resp = PutUint64(resp, chunkID)

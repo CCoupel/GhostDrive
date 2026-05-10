@@ -191,20 +191,24 @@ func (s *integFakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 		}
 		switch cmd {
 		case mfsclient.CltocsFuseWriteData:
-			if len(data) < 20 {
+			// MooseFS 4.x CLTOCS_WRITE_DATA (212):
+			// [chunkId:64][writeId:32][blockNum:16][blockOff:16][size:32][crc:32][data]
+			if len(data) < 24 { // minimum: 8+4+2+2+4+4 = 24 bytes
 				return
 			}
-			blockNum, off, _ := mfsclient.ReadUint16(data, 8)
-			blockOff, off, _ := mfsclient.ReadUint16(data, off)
-			size, off, _ := mfsclient.ReadUint32(data, off)
-			off += 4 // skip CRC
+			var off int
+			_, off, _ = mfsclient.ReadUint32(data, 8)        // skip writeId:32
+			blockNum, off, _ := mfsclient.ReadUint16(data, off) // blockNum at offset 12
+			blockOff, off, _ := mfsclient.ReadUint16(data, off) // blockOff at offset 14
+			size, off, _ := mfsclient.ReadUint32(data, off)     // size at offset 16
+			off += 4                                             // skip CRC
 			if off+int(size) > len(data) {
 				return
 			}
 			block := data[off : off+int(size)]
 			dataOffset := uint32(blockNum)*65536 + uint32(blockOff)
 			s.storeBlock(chunkID, dataOffset, block)
-		case mfsclient.CltocsFuseWriteEnd:
+		case mfsclient.CltocsFuseWriteEnd: // CLTOCS_WRITE_FINISH (213)
 			var resp []byte
 			resp = mfsclient.PutUint64(resp, chunkID)
 			resp = mfsclient.PutUint32(resp, 0)

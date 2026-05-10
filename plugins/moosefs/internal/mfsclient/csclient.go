@@ -11,16 +11,17 @@
 //	             [chunkId:64][blocknum:16][blockOffset:16][size:32][crc:32][data:size]
 //	CS → Client  CSTOCL_READ_STATUS (201):  [chunkId:64][status:8]
 //
-// # Write protocol
+// # Write protocol  (MooseFS 4.x — MFSCommunication.h confirmed)
 //
-//	Client → CS  CLTOCS_WRITE (210):  [chunkId:64][version:32][N:8=0]
-//	Client → CS  CLTOCS_WRITE_DATA (211), one or more frames:
-//	             [chunkId:64][blocknum:16][blockOffset:16][size:32][crc:32][data:size]
-//	             blocknum    = (chunkOffset + written) / 65536
-//	             blockOffset = (chunkOffset + written) % 65536
-//	Client → CS  CLTOCS_WRITE_END (212):  [chunkId:64][version:32]
-//	CS → Client  CSTOCL_WRITE_STATUS (211):  [chunkId:64][writeId:32][status:8]
-//	             (MooseFS 4.x uses opcode 211; MooseFS ≤ 3.x used 213 — both accepted)
+//	Client → CS  CLTOCS_WRITE (210):       [chunkId:64][version:32][N*(ip:32+port:16)]
+//	                                        N=0: direct write (no chain)
+//	Client → CS  CLTOCS_WRITE_DATA (212):  [chunkId:64][writeId:32][blocknum:16][blockOffset:16][size:32][crc:32][data:size]
+//	                                        blocknum    = (chunkOffset + written) / 65536
+//	                                        blockOffset = (chunkOffset + written) % 65536
+//	                                        writeId     = monotonic frame counter (1, 2, …)
+//	Client → CS  CLTOCS_WRITE_FINISH (213):[chunkId:64][version:32]
+//	CS → Client  CSTOCL_WRITE_STATUS (211):[chunkId:64][writeId:32][status:8]
+//	                                        CS echoes the last writeId from WRITE_DATA
 package mfsclient
 
 import (
@@ -138,9 +139,12 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 	}
 
 	// 2. Send CLTOCS_WRITE_DATA frames, one per 65536-byte block.
+	// Each frame includes a writeId:32 monotonic counter starting at 1.
+	// The CS echoes the last writeId in its CSTOCL_WRITE_STATUS response.
 	const blockSize = 65536
 	total := uint32(len(data))
 	written := uint32(0)
+	var writeID uint32 // incremented per frame; echoed back in WRITE_STATUS
 
 	for written < total {
 		pos := offset + written          // absolute position within the chunk
@@ -156,8 +160,10 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 		block := data[written:end]
 		checksum := crc32.ChecksumIEEE(block)
 
+		writeID++
 		var framePayload []byte
 		framePayload = PutUint64(framePayload, chunkID)
+		framePayload = PutUint32(framePayload, writeID) // writeId:32 — required by MooseFS 4.x
 		framePayload = PutUint16(framePayload, blockNum)
 		framePayload = PutUint16(framePayload, blockOff)
 		framePayload = PutUint32(framePayload, uint32(len(block)))
@@ -180,24 +186,23 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 	}
 
 	// 4. Read CSTOCL_WRITE_STATUS: [chunkId:64][writeId:32][status:8] = 13 bytes.
-	// MooseFS 4.x sends opcode 211 (= CstoclFuseWriteStatus).
-	// MooseFS ≤ 3.x sent opcode 213 (= CstoclFuseWriteStatusLegacy).
-	// Both are accepted for backward compatibility.
+	// MooseFS 4.x sends opcode 211 (CstoclFuseWriteStatus), confirmed 4.58.4.
 	cmd, resp, err := ReadFrame(cs)
 	if err != nil {
 		return fmt.Errorf("csclient: WriteChunk %d: recv status: %w", chunkID, err)
 	}
 	logger.Debug("csclient: WriteChunk %d: recv cmd=%d resp_len=%d", chunkID, cmd, len(resp))
-	if cmd != CstoclFuseWriteStatus && cmd != CstoclFuseWriteStatusLegacy {
-		return fmt.Errorf("csclient: WriteChunk %d: expected WRITE_STATUS (%d or %d), got %d",
-			chunkID, CstoclFuseWriteStatus, CstoclFuseWriteStatusLegacy, cmd)
+	if cmd != CstoclFuseWriteStatus {
+		return fmt.Errorf("csclient: WriteChunk %d: expected WRITE_STATUS (opcode %d), got %d",
+			chunkID, CstoclFuseWriteStatus, cmd)
 	}
 	if len(resp) < 13 {
 		return fmt.Errorf("csclient: WriteChunk %d: WRITE_STATUS too short (%d bytes)", chunkID, len(resp))
 	}
 	status := resp[12]
 	if status != StatusOK {
-		return fmt.Errorf("csclient: WriteChunk %d: server write status 0x%02x", chunkID, status)
+		return fmt.Errorf("csclient: WriteChunk %d: server write status 0x%02x (%s)",
+			chunkID, status, CSStatusName(status))
 	}
 	return nil
 }
