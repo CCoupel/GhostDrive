@@ -714,7 +714,7 @@ func (s *integFakeServer) svrRead(conn net.Conn, payload []byte) {
 // ─── Chunk server coordination handlers ───────────────────────────────────────
 
 // svrReadChunk handles CLTOMA_FUSE_READ_CHUNK (432).
-// Pre-loads node content into the CS, then replies with ChunkInfo.
+// Pre-loads node content into the CS, then replies with ChunkInfo (proto 2).
 func (s *integFakeServer) svrReadChunk(conn net.Conn, payload []byte) {
 	if len(payload) < 12 {
 		return
@@ -724,7 +724,9 @@ func (s *integFakeServer) svrReadChunk(conn net.Conn, payload []byte) {
 
 	s.mu.Lock()
 	n, ok := s.nodes[nodeID]
+	var fileLen uint64
 	if ok {
+		fileLen = uint64(len(n.content))
 		s.cs.setChunkData(uint64(nodeID), n.content)
 	}
 	s.mu.Unlock()
@@ -734,21 +736,27 @@ func (s *integFakeServer) svrReadChunk(conn net.Conn, payload []byte) {
 		return
 	}
 
+	// Proto 2 response: [msgid:32][protocolid:8=2][fileLen:64][chunkID:64][version:32]
+	//                   N × [ip:32 port:16 cs_ver:32 labelmask:32]  (N=1 implicit)
 	var resp []byte
 	resp = mfsclient.PutUint32(resp, msgid)
-	resp = mfsclient.PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
-	resp = mfsclient.PutUint32(resp, 1)              // version
-	resp = mfsclient.PutUint8(resp, 1)               // N = 1 server
+	resp = mfsclient.PutUint8(resp, 2)               // protocolid = 2
+	resp = mfsclient.PutUint64(resp, fileLen)         // current file length
+	resp = mfsclient.PutUint64(resp, uint64(nodeID))  // chunkID = nodeID (fake mapping)
+	resp = mfsclient.PutUint32(resp, 1)               // version
 	resp = mfsclient.PutUint32(resp, s.csIP)
 	resp = mfsclient.PutUint16(resp, s.csPort)
-	resp = mfsclient.PutUint32(resp, 0) // CS version
+	resp = mfsclient.PutUint32(resp, 0) // cs_ver
+	resp = mfsclient.PutUint32(resp, 0) // labelmask
 	_ = mfsclient.WriteFrame(conn, mfsclient.MatoclFuseReadChunk, resp)
 }
 
 // svrWriteChunk handles CLTOMA_FUSE_WRITE_CHUNK (434).
-// Returns ChunkInfo pointing to the embedded CS.
+// Returns ChunkInfo pointing to the embedded CS (proto 2).
+//
+// MooseFS 4.x request payload: [msgid:32][inode:32][chunkindx:32][chunkopflags:8] = 13 bytes.
 func (s *integFakeServer) svrWriteChunk(conn net.Conn, payload []byte) {
-	if len(payload) < 16 {
+	if len(payload) < 13 {
 		return
 	}
 	msgid, off, _ := mfsclient.ReadUint32(payload, 0)
@@ -763,26 +771,33 @@ func (s *integFakeServer) svrWriteChunk(conn net.Conn, payload []byte) {
 		return
 	}
 
+	// Proto 2 response: [msgid:32][protocolid:8=2][fileLen:64][chunkID:64][version:32]
+	//                   N × [ip:32 port:16 cs_ver:32 labelmask:32]  (N=1 implicit)
 	var resp []byte
 	resp = mfsclient.PutUint32(resp, msgid)
-	resp = mfsclient.PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
-	resp = mfsclient.PutUint32(resp, 1)              // version
-	resp = mfsclient.PutUint8(resp, 1)               // N = 1 server
+	resp = mfsclient.PutUint8(resp, 2)               // protocolid = 2
+	resp = mfsclient.PutUint64(resp, 0)               // fileLen (pre-write, 0 for new file)
+	resp = mfsclient.PutUint64(resp, uint64(nodeID))  // chunkID = nodeID (fake mapping)
+	resp = mfsclient.PutUint32(resp, 1)               // version
 	resp = mfsclient.PutUint32(resp, s.csIP)
 	resp = mfsclient.PutUint16(resp, s.csPort)
-	resp = mfsclient.PutUint32(resp, 0) // CS version
+	resp = mfsclient.PutUint32(resp, 0) // cs_ver
+	resp = mfsclient.PutUint32(resp, 0) // labelmask
 	_ = mfsclient.WriteFrame(conn, mfsclient.MatoclFuseWriteChunk, resp)
 }
 
 // svrWriteChunkEnd handles CLTOMA_FUSE_WRITE_CHUNK_END (436).
 // Copies CS data back into node.content and updates the node's size.
+//
+// MooseFS 4.x request payload: [msgid:32][chunkid:64][version:32][inode:32][length:64] = 28 bytes.
 func (s *integFakeServer) svrWriteChunkEnd(conn net.Conn, payload []byte) {
 	if len(payload) < 28 {
 		return
 	}
 	msgid, off, _ := mfsclient.ReadUint32(payload, 0)
 	chunkID, off, _ := mfsclient.ReadUint64(payload, off)
-	_, off, _ = mfsclient.ReadUint32(payload, off)    // version (skip)
+	_, off, _ = mfsclient.ReadUint32(payload, off)     // version (skip)
+	_, off, _ = mfsclient.ReadUint32(payload, off)     // inode (skip — already known via chunkID)
 	length, _, _ := mfsclient.ReadUint64(payload, off) // new total file length
 
 	nodeID := uint32(chunkID) // reverse of fake mapping

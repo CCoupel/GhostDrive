@@ -640,10 +640,13 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
+		// CLTOMA_FUSE_WRITE_CHUNK (434) — MooseFS 4.x (>= 3.0.4) payload:
+		//   [msgid:32][inode:32][chunkindx:32][chunkopflags:8]  = 13 bytes
+		// chunkopflags: 0x01=CANMODTIME 0x02=CONTINUEOP 0x04=CANUSERESERVESPACE
 		req := PutUint32(nil, 0) // msgid
 		req = PutUint32(req, nodeID)
 		req = PutUint32(req, index)
-		req = PutUint32(req, 0) // lockid
+		req = PutUint8(req, 0) // chunkopflags = 0
 
 		ans, err := c.roundtrip(CltomFuseWriteChunk, MatoclFuseWriteChunk, req)
 		if err != nil {
@@ -655,7 +658,12 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 		}
 		info, err := parseChunkInfo(ans)
 		if err != nil {
-			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): parse chunk info: %w", nodeID, offset, err)
+			limit := len(ans)
+			if limit > 64 {
+				limit = 64
+			}
+			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): parse chunk info: %w [raw %d bytes: % x]",
+				nodeID, offset, err, len(ans), ans[:limit])
 		}
 		if len(info.Servers) == 0 {
 			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): no chunk servers available", nodeID, offset)
@@ -683,11 +691,13 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// CLTOMA_FUSE_WRITE_CHUNK_END (436) — MooseFS 4.x payload:
+	//   [msgid:32][chunkid:64][version:32][inode:32][length:64]  = 28 bytes
 	endReq := PutUint32(nil, 0) // msgid
 	endReq = PutUint64(endReq, info.ChunkID)
 	endReq = PutUint32(endReq, info.Version)
-	endReq = PutUint64(endReq, newLength)
-	endReq = PutUint32(endReq, 0) // lockid
+	endReq = PutUint32(endReq, nodeID)    // inode (was missing — caused length field misalignment)
+	endReq = PutUint64(endReq, newLength) // total file length after write
 
 	endAns, err := c.roundtrip(CltomFuseWriteChunkEnd, MatoclFuseWriteChunkEnd, endReq)
 	if err != nil {
@@ -773,61 +783,116 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 
 // ─── Internal: chunk info parsing ────────────────────────────────────────────
 
-// parseChunkInfo decodes the common master response format for READ_CHUNK and
-// WRITE_CHUNK answers:
+// parseChunkInfo decodes the master response for READ_CHUNK (433) and
+// WRITE_CHUNK (435). Three protocol variants are supported, detected from the
+// byte at offset 4 (immediately after msgid):
 //
-//	[msgid:32][chunkID:64][version:32][N:8][N × (ip:32 + port:16 + version:32)]
+//	Proto 2 (MooseFS >= 3.0.10, incl. all 4.x) — protocolid byte = 2:
+//	  [msgid:32][protocolid:8=2][length:64][chunkid:64][version:32]
+//	  N × [ip:32 port:16 cs_ver:32 labelmask:32]  (14 bytes/entry, N implicit)
+//
+//	Proto 1 (MooseFS >= 1.7.32, < 3.0.10) — protocolid byte = 1:
+//	  [msgid:32][protocolid:8=1][length:64][chunkid:64][version:32]
+//	  N × [ip:32 port:16 cs_ver:32]  (10 bytes/entry, N implicit)
+//
+//	Proto 0 (MooseFS < 1.7.32) — no protocolid byte:
+//	  [msgid:32][length:64][chunkid:64][version:32]
+//	  N × [ip:32 port:16]  (6 bytes/entry, N implicit)
+//
+// N is never transmitted explicitly; it is derived from the remaining payload
+// bytes divided by the per-entry size.
 func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
-	const minLen = 4 + 8 + 4 + 1 // msgid + chunkID + version + N
-	if len(ans) < minLen {
-		return nil, fmt.Errorf("response too short (%d bytes, need ≥%d)", len(ans), minLen)
+	if len(ans) < 5 {
+		return nil, fmt.Errorf("response too short (%d bytes)", len(ans))
 	}
 
 	off := 4 // skip msgid
 
-	chunkID, newOff, err := ReadUint64(ans, off)
-	if err != nil {
-		return nil, fmt.Errorf("chunkID: %w", err)
-	}
-	off = newOff
+	// Detect protocol version from the byte immediately following msgid.
+	// Proto 1/2: this byte is explicitly protocolid (1 or 2).
+	// Proto 0: this byte is the MSB of the file length (always 0 for files < 72 PiB).
+	protocolID := ans[off]
 
-	version, newOff, err := ReadUint32(ans, off)
-	if err != nil {
-		return nil, fmt.Errorf("version: %w", err)
-	}
-	off = newOff
+	var (
+		err       error
+		chunkID   uint64
+		version   uint32
+		entrySize int
+	)
 
-	n, newOff, err := ReadUint8(ans, off)
-	if err != nil {
-		return nil, fmt.Errorf("server count: %w", err)
+	switch protocolID {
+	case 1, 2:
+		// Proto 1/2: consume protocolid, then [length:64][chunkid:64][version:32].
+		off++ // consume protocolid byte
+		_, off, err = ReadUint64(ans, off) // file length — not needed in ChunkInfo
+		if err != nil {
+			return nil, fmt.Errorf("length: %w", err)
+		}
+		chunkID, off, err = ReadUint64(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("chunkID: %w", err)
+		}
+		version, off, err = ReadUint32(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("version: %w", err)
+		}
+		switch protocolID {
+		case 1:
+			entrySize = 10 // ip:32 + port:16 + cs_ver:32
+		case 2:
+			entrySize = 14 // ip:32 + port:16 + cs_ver:32 + labelmask:32
+		}
+
+	default:
+		// Proto 0: no protocolid byte; off is still at 4 (start of [length:64]).
+		_, off, err = ReadUint64(ans, off) // file length
+		if err != nil {
+			return nil, fmt.Errorf("length (proto0): %w", err)
+		}
+		chunkID, off, err = ReadUint64(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("chunkID (proto0): %w", err)
+		}
+		version, off, err = ReadUint32(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("version (proto0): %w", err)
+		}
+		entrySize = 6 // ip:32 + port:16 (no cs_ver in proto 0)
 	}
-	off = newOff
+
+	n := 0
+	if entrySize > 0 && len(ans) > off {
+		n = (len(ans) - off) / entrySize
+	}
 
 	info := &ChunkInfo{
 		ChunkID: chunkID,
 		Version: version,
 		Servers: make([]ChunkServer, 0, n),
 	}
-	for i := 0; i < int(n); i++ {
+
+	for i := 0; i < n; i++ {
 		var srv ChunkServer
-		srv.IP, newOff, err = ReadUint32(ans, off)
+		srv.IP, off, err = ReadUint32(ans, off)
 		if err != nil {
 			return nil, fmt.Errorf("server[%d] IP: %w", i, err)
 		}
-		off = newOff
-
-		srv.Port, newOff, err = ReadUint16(ans, off)
+		srv.Port, off, err = ReadUint16(ans, off)
 		if err != nil {
 			return nil, fmt.Errorf("server[%d] port: %w", i, err)
 		}
-		off = newOff
-
-		srv.Version, newOff, err = ReadUint32(ans, off)
-		if err != nil {
-			return nil, fmt.Errorf("server[%d] version: %w", i, err)
+		if entrySize >= 10 { // proto 1 or 2: cs_ver field present
+			srv.Version, off, err = ReadUint32(ans, off)
+			if err != nil {
+				return nil, fmt.Errorf("server[%d] cs_ver: %w", i, err)
+			}
 		}
-		off = newOff
-
+		if entrySize == 14 { // proto 2 only: labelmask field present
+			_, off, err = ReadUint32(ans, off) // labelmask — not used by GhostDrive
+			if err != nil {
+				return nil, fmt.Errorf("server[%d] labelmask: %w", i, err)
+			}
+		}
 		info.Servers = append(info.Servers, srv)
 	}
 	return info, nil

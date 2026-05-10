@@ -568,8 +568,11 @@ func (s *fakeMFSServer) handleRead(conn net.Conn, payload []byte) {
 
 // handleReadChunk handles CLTOMA_FUSE_READ_CHUNK (432).
 //
-// Payload: [msgid:32][nodeID:32][index:32]
-// Response: [msgid:32][chunkID:64][version:32][N:8=1][ip:32][port:16][csVersion:32]
+// Payload: [msgid:32][nodeID:32][index:32] (chunkopflags:8 optional, accepted if present)
+// Response proto 2:
+//
+//	[msgid:32][protocolid:8=2][length:64][chunkID:64][version:32]
+//	1×[ip:32 port:16 cs_ver:32 labelmask:32]
 //
 // Before responding, the handler pre-loads the node's content into the
 // embedded fakeCSServer so that the subsequent ReadChunk call against the CS
@@ -594,30 +597,42 @@ func (s *fakeMFSServer) handleReadChunk(conn net.Conn, payload []byte) {
 		return
 	}
 
+	// Build proto 2 response: protocolid=2, file length, chunkid, version, 1 server.
+	fileLen := uint64(0)
+	if n != nil {
+		fileLen = uint64(len(n.content))
+	}
 	var resp []byte
 	resp = PutUint32(resp, msgid)
-	resp = PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
-	resp = PutUint32(resp, 1)              // chunk version
-	resp = PutUint8(resp, 1)              // N = 1 server
+	resp = PutUint8(resp, 2)               // protocolid = 2
+	resp = PutUint64(resp, fileLen)         // current file length
+	resp = PutUint64(resp, uint64(nodeID))  // chunkID = nodeID (fake mapping)
+	resp = PutUint32(resp, 1)               // chunk version
 	resp = PutUint32(resp, s.csIP)
 	resp = PutUint16(resp, s.csPort)
-	resp = PutUint32(resp, 0) // CS version (unused in fake)
+	resp = PutUint32(resp, 0) // cs_ver (unused in fake)
+	resp = PutUint32(resp, 0) // labelmask (unused in fake)
 	_ = WriteFrame(conn, MatoclFuseReadChunk, resp)
 }
 
 // handleWriteChunk handles CLTOMA_FUSE_WRITE_CHUNK (434).
 //
-// Payload: [msgid:32][nodeID:32][index:32][lockid:32]
-// Response: [msgid:32][chunkID:64][version:32][N:8=1][ip:32][port:16][csVersion:32]
+// Payload (MooseFS 4.x / >= 3.0.4): [msgid:32][nodeID:32][index:32][chunkopflags:8]
+// Response proto 2:
+//
+//	[msgid:32][protocolid:8=2][length:64][chunkID:64][version:32]
+//	1×[ip:32 port:16 cs_ver:32 labelmask:32]
 func (s *fakeMFSServer) handleWriteChunk(conn net.Conn, payload []byte) {
-	if len(payload) < 16 {
+	// Minimum 13 bytes: msgid(4)+nodeID(4)+index(4)+chunkopflags(1).
+	// Accept 16 bytes too for backward compat with old test callers.
+	if len(payload) < 13 {
 		return
 	}
 	msgid, off, _ := ReadUint32(payload, 0)
 	nodeID, _, _ := ReadUint32(payload, off)
 
 	s.mu.Lock()
-	_, ok := s.nodes[nodeID]
+	node, ok := s.nodes[nodeID]
 	s.mu.Unlock()
 
 	if !ok {
@@ -625,20 +640,27 @@ func (s *fakeMFSServer) handleWriteChunk(conn net.Conn, payload []byte) {
 		return
 	}
 
+	// Build proto 2 response: protocolid=2, file length, chunkid, version, 1 server entry.
+	fileLen := uint64(0)
+	if node != nil {
+		fileLen = uint64(len(node.content))
+	}
 	var resp []byte
 	resp = PutUint32(resp, msgid)
-	resp = PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
-	resp = PutUint32(resp, 1)              // chunk version
-	resp = PutUint8(resp, 1)              // N = 1 server
+	resp = PutUint8(resp, 2)               // protocolid = 2
+	resp = PutUint64(resp, fileLen)         // current file length
+	resp = PutUint64(resp, uint64(nodeID))  // chunkID = nodeID (fake mapping)
+	resp = PutUint32(resp, 1)               // chunk version
 	resp = PutUint32(resp, s.csIP)
 	resp = PutUint16(resp, s.csPort)
-	resp = PutUint32(resp, 0) // CS version (unused in fake)
+	resp = PutUint32(resp, 0) // cs_ver (unused in fake)
+	resp = PutUint32(resp, 0) // labelmask (unused in fake)
 	_ = WriteFrame(conn, MatoclFuseWriteChunk, resp)
 }
 
 // handleWriteChunkEnd handles CLTOMA_FUSE_WRITE_CHUNK_END (436).
 //
-// Payload: [msgid:32][chunkID:64][version:32][length:64][lockid:32]
+// Payload (MooseFS 4.x): [msgid:32][chunkID:64][version:32][inode:32][length:64]
 //
 // Copies the data written to the fakeCSServer back into node.content and
 // sets the node's size to `length` (total bytes written so far).
@@ -650,6 +672,7 @@ func (s *fakeMFSServer) handleWriteChunkEnd(conn net.Conn, payload []byte) {
 	msgid, off, _ := ReadUint32(payload, 0)
 	chunkID, off, _ := ReadUint64(payload, off)
 	_, off, _ = ReadUint32(payload, off)   // version (skip)
+	_, off, _ = ReadUint32(payload, off)   // inode (skip — we recover nodeID from chunkID)
 	length, _, _ := ReadUint64(payload, off) // new total file length
 
 	nodeID := uint32(chunkID) // reverse of fake mapping: chunkID = nodeID
