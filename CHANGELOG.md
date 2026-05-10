@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.8] — 2026-05-10
+
+### Fixed
+
+- **#101** — MooseFS 4.x : corrige les opcodes CLTOCS_WRITE_DATA (211→212) et CLTOCS_WRITE_FINISH (212→213) — les mauvais opcodes amenaient le CS à rejeter les écritures avec MFS_ERROR_CANTCONNECT (0x1a)
+- **#101** — MooseFS 4.x : ajoute le champ writeId:32 manquant dans les frames CLTOCS_WRITE_DATA requis par MooseFS 4.x
+
+### Changed
+
+- Suppression des logs DEBUG Getattr (ENTER/OK) trop verbeux — seuls les cas d'erreur (ENOENT/EIO) sont conservés
+
+---
+
 ## [1.5.7] — 2026-05-10
 
 ### Fixed
