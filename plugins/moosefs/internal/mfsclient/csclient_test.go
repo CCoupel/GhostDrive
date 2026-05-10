@@ -1,8 +1,9 @@
 // Package mfsclient — tests for the chunk server client (csclient.go).
 //
 // fakeCSServer implements an in-memory MooseFS chunk server that speaks the
-// real CS protocol (opcodes 200-213).  It is also used by client_test.go to
-// back the fakeMFSServer when testing the high-level Read/Write methods.
+// real CS protocol (MooseFS 4.x opcodes 200-212 + WRITE_STATUS=211).
+// It is also used by client_test.go to back the fakeMFSServer when testing
+// the high-level Read/Write methods.
 package mfsclient
 
 import (
@@ -19,7 +20,8 @@ import (
 // ─── fakeCSServer ─────────────────────────────────────────────────────────────
 
 // fakeCSServer is an in-memory MooseFS chunk server for testing.
-// It stores chunk data in memory and speaks the real CS protocol.
+// It stores chunk data in memory and speaks the real CS protocol (MooseFS 4.x).
+// WRITE_STATUS uses opcode 211 (CstoclFuseWriteStatus) per MooseFS 4.x.
 type fakeCSServer struct {
 	listener net.Listener
 	mu       sync.Mutex

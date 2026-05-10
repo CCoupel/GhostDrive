@@ -100,7 +100,17 @@ const (
 	CltocsFuseWrite       uint32 = 210
 	CltocsFuseWriteData   uint32 = 211
 	CltocsFuseWriteEnd    uint32 = 212
-	CstoclFuseWriteStatus uint32 = 213
+
+	// CstoclFuseWriteStatus is the CS→Client write-status opcode for MooseFS 4.x.
+	// MooseFS 4.x uses opcode 211 for CSTOCL_WRITE_STATUS — the same numeric value
+	// as CLTOCS_WRITE_DATA (211); the connection direction disambiguates the meaning.
+	// Confirmed against MooseFS 4.58.4: after CLTOCS_WRITE_END the CS replies with
+	// opcode 211, payload [chunkId:64][writeId:32][status:8].
+	CstoclFuseWriteStatus uint32 = 211 // MooseFS 4.x (confirmed 4.58.4)
+
+	// CstoclFuseWriteStatusLegacy is the CSTOCL_WRITE_STATUS opcode for MooseFS ≤ 3.x.
+	// Kept for backward compatibility; WriteChunk accepts both values.
+	CstoclFuseWriteStatusLegacy uint32 = 213
 )
 
 // ChunkSize is the MooseFS chunk size (64 MiB).

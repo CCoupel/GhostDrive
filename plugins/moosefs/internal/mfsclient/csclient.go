@@ -19,7 +19,8 @@
 //	             blocknum    = (chunkOffset + written) / 65536
 //	             blockOffset = (chunkOffset + written) % 65536
 //	Client → CS  CLTOCS_WRITE_END (212):  [chunkId:64][version:32]
-//	CS → Client  CSTOCL_WRITE_STATUS (213):  [chunkId:64][writeId:32][status:8]
+//	CS → Client  CSTOCL_WRITE_STATUS (211):  [chunkId:64][writeId:32][status:8]
+//	             (MooseFS 4.x uses opcode 211; MooseFS ≤ 3.x used 213 — both accepted)
 package mfsclient
 
 import (
@@ -27,6 +28,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"net"
+
+	"github.com/CCoupel/GhostDrive/internal/logger"
 )
 
 // DialCS opens a TCP connection to the MooseFS chunk server at the given IP
@@ -177,13 +180,17 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 	}
 
 	// 4. Read CSTOCL_WRITE_STATUS: [chunkId:64][writeId:32][status:8] = 13 bytes.
+	// MooseFS 4.x sends opcode 211 (= CstoclFuseWriteStatus).
+	// MooseFS ≤ 3.x sent opcode 213 (= CstoclFuseWriteStatusLegacy).
+	// Both are accepted for backward compatibility.
 	cmd, resp, err := ReadFrame(cs)
 	if err != nil {
 		return fmt.Errorf("csclient: WriteChunk %d: recv status: %w", chunkID, err)
 	}
-	if cmd != CstoclFuseWriteStatus {
-		return fmt.Errorf("csclient: WriteChunk %d: expected WRITE_STATUS (%d), got %d",
-			chunkID, CstoclFuseWriteStatus, cmd)
+	logger.Debug("csclient: WriteChunk %d: recv cmd=%d resp_len=%d", chunkID, cmd, len(resp))
+	if cmd != CstoclFuseWriteStatus && cmd != CstoclFuseWriteStatusLegacy {
+		return fmt.Errorf("csclient: WriteChunk %d: expected WRITE_STATUS (%d or %d), got %d",
+			chunkID, CstoclFuseWriteStatus, CstoclFuseWriteStatusLegacy, cmd)
 	}
 	if len(resp) < 13 {
 		return fmt.Errorf("csclient: WriteChunk %d: WRITE_STATUS too short (%d bytes)", chunkID, len(resp))
