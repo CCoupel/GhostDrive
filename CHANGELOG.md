@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.13] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : lecture obligatoire de l'ACK WRITE_STATUS(writeid=0) après CLTOCS_WRITE — le CS confirme que la chaîne de réplication est établie avant d'accepter les WRITE_DATA ; CANTCONNECT détecté proprement à cette étape (#101)
+- MooseFS plugin : version client corrigée — VERSION2INT(4,58,4)=277000 (formule min×2), le master voyait incorrectement le client en v4.58.2 (#101)
+
+---
+
 ## [1.5.12] — 2026-05-10
 
 ### Fixed
