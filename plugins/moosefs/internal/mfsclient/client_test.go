@@ -1165,3 +1165,85 @@ func TestMkdir_createDir(t *testing.T) {
 	assert.Equal(t, nodeID, attr.NodeID)
 	assert.True(t, attr.IsDir())
 }
+
+// ─── parseChunkInfo / lockid tests ───────────────────────────────────────────
+
+// TestWrite_lockIDParsing verifies that parseChunkInfo correctly extracts the
+// optional lockid:32 token appended after the CS entries in a proto 2 response,
+// and that a zero-initialised LockID is returned when the master omits it.
+//
+// This reproduces the diagnostic path for bug #101 (post-upload stat size=0):
+// if the master sends a non-zero lockid and we fail to extract it, WRITE_CHUNK_END
+// is sent with lockid=0 which may prevent the master from committing the file length.
+func TestWrite_lockIDParsing(t *testing.T) {
+	const (
+		wantChunkID = uint64(0xCAFEBABEDEAD1234)
+		wantVersion = uint32(7)
+		wantLockID  = uint32(0xDEADBEEF)
+	)
+
+	t.Run("proto2_with_lockid", func(t *testing.T) {
+		// Build a proto 2 WRITE_CHUNK response (MATOCL_FUSE_WRITE_CHUNK=435)
+		// with 1 CS entry followed by a lockid:32 token.
+		//   [msgid:32][protocolid:8=2][length:64][chunkid:64][version:32]
+		//   [ip:32][port:16][cs_ver:32][labelmask:32]   (14 bytes, proto 2 entry)
+		//   [lockid:32]
+		var resp []byte
+		resp = PutUint32(resp, 0)           // msgid
+		resp = PutUint8(resp, 2)            // protocolid = 2
+		resp = PutUint64(resp, 0)           // file length
+		resp = PutUint64(resp, wantChunkID) // chunkID
+		resp = PutUint32(resp, wantVersion) // version
+		resp = PutUint32(resp, 0x7F000001)  // ip = 127.0.0.1
+		resp = PutUint16(resp, 9422)        // port
+		resp = PutUint32(resp, 0)           // cs_ver
+		resp = PutUint32(resp, 0)           // labelmask
+		resp = PutUint32(resp, wantLockID)  // lockid — trailing 4 bytes
+
+		info, err := parseChunkInfo(resp)
+		require.NoError(t, err)
+		assert.Equal(t, wantChunkID, info.ChunkID, "chunkID must be decoded correctly")
+		assert.Equal(t, wantVersion, info.Version, "version must be decoded correctly")
+		assert.Len(t, info.Servers, 1, "exactly 1 CS entry expected")
+		assert.Equal(t, wantLockID, info.LockID,
+			"lockid must be extracted from the trailing 4 bytes of a proto 2 response")
+	})
+
+	t.Run("proto2_no_lockid", func(t *testing.T) {
+		// Same response but without the trailing lockid bytes — master did not send one.
+		var resp []byte
+		resp = PutUint32(resp, 0)
+		resp = PutUint8(resp, 2)
+		resp = PutUint64(resp, 0)
+		resp = PutUint64(resp, wantChunkID)
+		resp = PutUint32(resp, wantVersion)
+		resp = PutUint32(resp, 0x7F000001)
+		resp = PutUint16(resp, 9422)
+		resp = PutUint32(resp, 0)
+		resp = PutUint32(resp, 0)
+		// No lockid appended.
+
+		info, err := parseChunkInfo(resp)
+		require.NoError(t, err)
+		assert.Equal(t, uint32(0), info.LockID,
+			"LockID must be 0 when master omits the trailing lockid field")
+	})
+
+	t.Run("proto2_no_cs_with_lockid", func(t *testing.T) {
+		// Edge case: 0 CS entries + lockid (master metadata available, CS unreachable).
+		// remaining = 4 bytes → n = 4/14 = 0 → lockid is still extracted.
+		var resp []byte
+		resp = PutUint32(resp, 0)
+		resp = PutUint8(resp, 2)
+		resp = PutUint64(resp, 0)
+		resp = PutUint64(resp, wantChunkID)
+		resp = PutUint32(resp, wantVersion)
+		resp = PutUint32(resp, wantLockID) // trailing 4 bytes — interpreted as lockid
+
+		info, err := parseChunkInfo(resp)
+		require.NoError(t, err)
+		assert.Empty(t, info.Servers, "no CS entries expected")
+		assert.Equal(t, wantLockID, info.LockID,
+			"lockid must be extracted even when there are 0 CS entries")
+	})
+}

@@ -677,7 +677,7 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 		if len(info.Servers) == 0 {
 			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): no chunk servers available", nodeID, offset)
 		}
-		logger.Debug("[mfsclient] Write: chunk %d — %d servers found: %v", index, len(info.Servers), info.Servers)
+		logger.Debug("[mfsclient] Write: chunk %d — %d servers found: %v lockid=%d", index, len(info.Servers), info.Servers, info.LockID)
 		return info, nil
 	}()
 	if err != nil {
@@ -945,6 +945,9 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 	// MooseFS 4.x may append a lockid:32 token after the CS entries.
 	// Any trailing 4 bytes that don't form a complete CS entry are the lockid;
 	// it must be echoed verbatim in the subsequent WRITE_CHUNK_END request.
+	// Diagnostic: trailing=4 → lockid present; trailing=0 → omitted by master.
+	logger.Debug("mfsclient: parseChunkInfo: len=%d off=%d trailing=%d proto=%d nCS=%d",
+		len(ans), off, len(ans)-off, protocolID, len(info.Servers))
 	if len(ans)-off == 4 {
 		info.LockID, _, _ = ReadUint32(ans, off)
 	}
