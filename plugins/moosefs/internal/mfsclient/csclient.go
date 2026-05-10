@@ -277,24 +277,35 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 // to detect fast-failure WRITE_STATUS frames (e.g. CANTCONNECT) before the
 // client sends any WRITE_DATA.
 //
-// It uses a 5 ms read deadline:
+// It uses a 5 ms read deadline per iteration with a hard cap of maxPreflightNOPs
+// consecutive NOP keepalives:
 //   - Timeout → no early error; CS is ready for WRITE_DATA (normal path).
-//   - ANTOAN_NOP → CS is still connecting the chain peer; extend deadline.
+//   - ANTOAN_NOP (up to maxPreflightNOPs) → CS is still connecting; extend deadline.
+//   - ANTOAN_NOP beyond cap → too many keepalives; proceed to WRITE_DATA anyway.
 //   - WRITE_STATUS(error) → chain error caught early; WriteChunk aborts.
-//   - WRITE_STATUS(OK) → treated as a ready signal (proceed).
+//   - WRITE_STATUS(OK) → protocol violation (CS cannot confirm OK before receiving
+//     data); WriteChunk aborts with an explicit error to avoid silently consuming
+//     the frame that the final WRITE_STATUS read loop expects.
 //   - Any other frame → unexpected; WriteChunk aborts.
 //
 // For chain-peer timeouts (~5 s TCP default) the pre-flight window expires
 // before the CS reacts, so the error surfaces later as an improved EOF message
 // in the WriteChunk read loop.
 func csPreflightRead(cs net.Conn, chunkID uint64) error {
-	const preflightDeadline = 5 * time.Millisecond
+	const (
+		preflightDeadline = 5 * time.Millisecond
+		// maxPreflightNOPs is the maximum number of consecutive NOP keepalives
+		// accepted in the pre-flight window.  Beyond this we stop peeking and
+		// proceed to WRITE_DATA so the loop cannot run indefinitely.
+		maxPreflightNOPs = 10
+	)
 
 	if err := cs.SetReadDeadline(time.Now().Add(preflightDeadline)); err != nil {
 		// Cannot set deadline (unusual) — skip pre-flight silently.
 		return nil
 	}
 
+	nops := 0
 	for {
 		earlyCmd, earlyResp, earlyErr := ReadFrame(cs)
 		if earlyErr != nil {
@@ -308,6 +319,14 @@ func csPreflightRead(cs net.Conn, chunkID uint64) error {
 		}
 
 		if earlyCmd == ANTOAN_NOP {
+			nops++
+			if nops >= maxPreflightNOPs {
+				// Too many keepalives — CS is taking a long time to connect the
+				// chain peer.  Proceed to WRITE_DATA; if the chain fails the
+				// error will surface in the final WRITE_STATUS read loop.
+				_ = cs.SetReadDeadline(time.Time{})
+				return nil
+			}
 			// CS is still establishing the chain — extend deadline and keep peeking.
 			_ = cs.SetReadDeadline(time.Now().Add(preflightDeadline))
 			continue
@@ -321,8 +340,12 @@ func csPreflightRead(cs net.Conn, chunkID uint64) error {
 				return fmt.Errorf("csclient: WriteChunk %d: early chain error (status 0x%02x %s)",
 					chunkID, s, CSStatusName(s))
 			}
-			// Unexpected OK before WRITE_DATA — treat as a ready signal.
-			return nil
+			// WRITE_STATUS(OK) before any WRITE_DATA is a protocol violation:
+			// the CS cannot confirm a successful write before receiving data.
+			// Returning an error is safer than silently consuming this frame,
+			// which would cause the final WRITE_STATUS read to stall or fail.
+			return fmt.Errorf("csclient: WriteChunk %d: unexpected WRITE_STATUS(OK) before WRITE_DATA"+
+				" — CS protocol violation (stale frame or unexpected CS behaviour)", chunkID)
 		}
 		return fmt.Errorf("csclient: WriteChunk %d: unexpected pre-flight cmd %d from CS", chunkID, earlyCmd)
 	}

@@ -484,6 +484,132 @@ func TestWriteChunk_earlyCANTCONNECT(t *testing.T) {
 		"error must identify CANTCONNECT status")
 }
 
+// TestWriteChunk_preflightNOPcap verifies that the pre-flight loop does not run
+// indefinitely when the CS sends many consecutive NOP keepalives.
+// After maxPreflightNOPs NOPs, WriteChunk must proceed to WRITE_DATA (and succeed).
+func TestWriteChunk_preflightNOPcap(t *testing.T) {
+	// Custom server: sends maxPreflightNOPs+5 NOPs after CLTOCS_WRITE, then
+	// serves the write normally.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	cs := newFakeCSServer()
+	const chunkID = uint64(7007)
+	payload := []byte("preflight-nop-cap-test")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Consume CLTOCS_WRITE init.
+		cmd, _, err := ReadFrame(conn)
+		if err != nil || cmd != CltocsFuseWrite {
+			return
+		}
+
+		// Send 15 NOP keepalives (> maxPreflightNOPs=10) before any data.
+		for i := 0; i < 15; i++ {
+			if err := WriteFrame(conn, ANTOAN_NOP, nil); err != nil {
+				return
+			}
+		}
+
+		// Now serve WRITE_DATA + WRITE_FINISH normally.
+		for {
+			c, data, e := ReadFrame(conn)
+			if e != nil {
+				return
+			}
+			if c == CltocsFuseWriteData && len(data) >= 24 {
+				_, off, _ := ReadUint32(data, 8)
+				blockNum, off, _ := ReadUint16(data, off)
+				blockOff, off, _ := ReadUint16(data, off)
+				size, off, _ := ReadUint32(data, off)
+				off += 4 // skip CRC
+				block := data[off : off+int(size)]
+				cs.storeBlock(chunkID, uint32(blockNum)*65536+uint32(blockOff), block)
+			} else if c == CltocsFuseWriteEnd {
+				var resp []byte
+				resp = PutUint64(resp, chunkID)
+				resp = PutUint32(resp, 0)
+				resp = PutUint8(resp, StatusOK)
+				_ = WriteFrame(conn, CstoclFuseWriteStatus, resp)
+				return
+			}
+		}
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	csIP := binary.BigEndian.Uint32(addr.IP.To4())
+	csPort := uint16(addr.Port)
+
+	conn, err := DialCS(csIP, csPort)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	err = WriteChunk(conn, chunkID, 1, 0, payload, nil)
+	require.NoError(t, err, "WriteChunk must succeed after hitting the NOP cap and proceeding")
+
+	stored := cs.GetChunkData(chunkID)
+	assert.Equal(t, payload, stored, "stored data must match written payload")
+	<-done
+}
+
+// TestWriteChunk_preflightUnexpectedOK verifies that WriteChunk returns an
+// explicit error when the CS sends WRITE_STATUS(OK) before any WRITE_DATA —
+// a protocol violation that would silently consume the frame the final
+// WRITE_STATUS read loop expects.
+func TestWriteChunk_preflightUnexpectedOK(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	const chunkID = uint64(8008)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Consume CLTOCS_WRITE init.
+		cmd, payload, err := ReadFrame(conn)
+		if err != nil || cmd != CltocsFuseWrite || len(payload) < 13 {
+			return
+		}
+
+		// Send WRITE_STATUS(OK, writeId=0) immediately — protocol violation.
+		var resp []byte
+		resp = PutUint64(resp, chunkID)
+		resp = PutUint32(resp, 0)    // writeId = 0
+		resp = PutUint8(resp, StatusOK)
+		_ = WriteFrame(conn, CstoclFuseWriteStatus, resp)
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	csIP := binary.BigEndian.Uint32(addr.IP.To4())
+	csPort := uint16(addr.Port)
+
+	conn, err := DialCS(csIP, csPort)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	err = WriteChunk(conn, chunkID, 1, 0, []byte("unexpected-ok-test"), nil)
+	require.Error(t, err, "WriteChunk must return error on unexpected WRITE_STATUS(OK) before WRITE_DATA")
+	assert.Contains(t, err.Error(), "protocol violation",
+		"error must describe the protocol violation")
+	<-done
+}
+
 // TestWriteChunk_chainEOF verifies that WriteChunk returns a diagnostic error
 // when the CS closes the connection (EOF) without sending WRITE_STATUS —
 // the behaviour observed with MooseFS 4.58.8 when the chain CS times out.
