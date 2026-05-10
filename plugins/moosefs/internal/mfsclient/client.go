@@ -674,6 +674,7 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 		if len(info.Servers) == 0 {
 			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): no chunk servers available", nodeID, offset)
 		}
+		logger.Debug("[mfsclient] Write: chunk %d — %d servers found: %v", index, len(info.Servers), info.Servers)
 		return info, nil
 	}()
 	if err != nil {
@@ -682,10 +683,13 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 
 	// Phase 2: I/O chunk server hors mutex — c.conn n'est pas utilisé ici.
 	srv := info.Servers[0]
+	csIP := net.IP([]byte{byte(srv.IP >> 24), byte(srv.IP >> 16), byte(srv.IP >> 8), byte(srv.IP)})
+	logger.Debug("[mfsclient] Write: dialing CS %s:%d", csIP, srv.Port)
 	cs, err := DialCS(srv.IP, srv.Port)
 	if err != nil {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): dial CS: %w", nodeID, offset, err)
 	}
+	logger.Debug("[mfsclient] Write: CS %s:%d connected", csIP, srv.Port)
 	defer cs.Close()
 
 	if err := WriteChunk(cs, info.ChunkID, info.Version, chunkOffset, data); err != nil {
@@ -697,6 +701,7 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	logger.Debug("[mfsclient] Write: sending WRITE_CHUNK_END lockid=%d", info.LockID)
 	// CLTOMA_FUSE_WRITE_CHUNK_END (436) — MooseFS 4.x payload:
 	//   [msgid:32][chunkid:64][version:32][inode:32][length:64][lockid:32] = 32 bytes
 	// lockid is the token returned by the master in WRITE_CHUNK (435); it must
@@ -718,6 +723,7 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 	if endAns[4] != StatusOK {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END status 0x%02x", nodeID, offset, endAns[4])
 	}
+	logger.Debug("[mfsclient] Write: WRITE_CHUNK_END acked")
 	return nil
 }
 

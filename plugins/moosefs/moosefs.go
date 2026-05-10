@@ -369,10 +369,12 @@ func (b *Backend) upload(ctx context.Context, local, remote string, progress plu
 
 		n, readErr := f.Read(buf)
 		if n > 0 {
+			logger.Debug("[moosefs] upload: writing chunk offset=%d size=%d", offset, n)
 			if writeErr := c.Write(nodeID, offset, buf[:n]); writeErr != nil {
 				logger.Error("upload %s: write at offset %d: %v", remote, offset, writeErr)
 				return fmt.Errorf("moosefs: upload %s: write at offset %d: %w", remote, offset, writeErr)
 			}
+			logger.Debug("[moosefs] upload: chunk offset=%d done", offset)
 			offset += uint64(n)
 			done += int64(n)
 			if progress != nil {
@@ -386,6 +388,7 @@ func (b *Backend) upload(ctx context.Context, local, remote string, progress plu
 			return fmt.Errorf("moosefs: upload %s: read local: %w", remote, readErr)
 		}
 	}
+	logger.Debug("[moosefs] upload: all chunks sent, closing")
 	return nil
 }
 
