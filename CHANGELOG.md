@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.14] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : écriture directe sur CS1 sans chain replication client-side — le master MooseFS gère la réplication asynchrone ; élimine les timeouts EOF quand le CS de réplication est injoignable (#101)
+
+---
+
 ## [1.5.13] — 2026-05-10
 
 ### Fixed
