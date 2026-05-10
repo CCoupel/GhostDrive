@@ -136,10 +136,12 @@ func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size 
 // WriteChunk writes data to chunk chunkID/version at the given offset within
 // the chunk via the chunk server connection cs.
 //
-// chain contains the additional chunk servers that cs must replicate to.
-// When the master returns N servers, the caller dials Servers[0] and passes
-// Servers[1:] as chain.  N=0 (nil/empty chain) means direct write with no
-// replication.
+// chain lists the additional chunk servers that cs must forward data to for
+// synchronous replication.  Pass nil (or empty) for direct write: cs stores
+// the data locally and the MooseFS master schedules async replication to reach
+// the configured goal after WRITE_CHUNK_END.  Passing a non-nil chain causes cs
+// to connect to each listed peer during the write-init ACK phase; if any peer
+// is unreachable the CS returns CANTCONNECT immediately.
 //
 // CLTOCS_WRITE payload format (MooseFS >= 1.7.32 / all 4.x):
 //
@@ -175,11 +177,12 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 	}
 
 	// 2. Read mandatory write-init ACK from the CS.
-	// Per writedata.c (MooseFS source), the CS sends CSTOCL_WRITE_STATUS(writeid=0, OK)
-	// once it has successfully established the replication chain (waitforstatus=1).
-	// The client MUST read this ACK before sending any WRITE_DATA frames.
-	// If a chain peer is unreachable, the CS sends WRITE_STATUS(writeid=0, CANTCONNECT).
-	// ANTOAN_NOP keepalives may arrive while the CS is connecting to chain peers.
+	// Per writedata.c (MooseFS source, waitforstatus=1), the CS always sends
+	// CSTOCL_WRITE_STATUS(writeid=0, OK) before the client may send WRITE_DATA:
+	//   chain=nil  → ACK is immediate (CS writes locally, no peer to connect).
+	//   chain≠nil  → ACK arrives after CS connects all listed peers; ANTOAN_NOP
+	//                keepalives may arrive while connections are in progress;
+	//                unreachable peers produce WRITE_STATUS(writeid=0, CANTCONNECT).
 	for {
 		ackCmd, ackResp, err := ReadFrame(cs)
 		if err != nil {
@@ -191,7 +194,7 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 			return fmt.Errorf("csclient: WriteChunk %d: read write-init ACK: %w", chunkID, err)
 		}
 		if ackCmd == ANTOAN_NOP {
-			continue // keepalive while CS is establishing chain
+			continue // keepalive while CS is connecting chain peers (chain≠nil only)
 		}
 		if ackCmd != CstoclFuseWriteStatus {
 			return fmt.Errorf("csclient: WriteChunk %d: expected WRITE_STATUS ACK (cmd=%d), got cmd=%d",
@@ -206,7 +209,7 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 			return fmt.Errorf("csclient: WriteChunk %d: write-init failed: server status 0x%02x (%s)",
 				chunkID, ackStatus, CSStatusName(ackStatus))
 		}
-		break // ACK OK — chain established, proceed to WRITE_DATA
+		break // ACK OK — CS ready, proceed to WRITE_DATA
 	}
 
 	// 3. Send CLTOCS_WRITE_DATA frames, one per 65536-byte block.
