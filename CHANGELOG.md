@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.12] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : lecture preflight non-bloquante après CLTOCS_WRITE — détecte les CANTCONNECT immédiats du chain CS avant d'envoyer les WRITE_DATA ; limite à 10 NOPs max ; message d'erreur explicite si le CS ferme sans envoyer WRITE_STATUS (#101)
+
+---
+
 ## [1.5.11] — 2026-05-10
 
 ### Fixed
