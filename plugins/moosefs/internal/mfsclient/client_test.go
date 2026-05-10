@@ -660,20 +660,21 @@ func (s *fakeMFSServer) handleWriteChunk(conn net.Conn, payload []byte) {
 
 // handleWriteChunkEnd handles CLTOMA_FUSE_WRITE_CHUNK_END (436).
 //
-// Payload (MooseFS 4.x): [msgid:32][chunkID:64][version:32][inode:32][length:64]
+// Payload (MooseFS 4.x): [msgid:32][chunkID:64][version:32][inode:32][length:64][lockid:32] = 32 bytes
 //
 // Copies the data written to the fakeCSServer back into node.content and
 // sets the node's size to `length` (total bytes written so far).
 // Response: [msgid:32][status:8]
 func (s *fakeMFSServer) handleWriteChunkEnd(conn net.Conn, payload []byte) {
-	if len(payload) < 28 {
+	if len(payload) < 32 {
 		return
 	}
 	msgid, off, _ := ReadUint32(payload, 0)
 	chunkID, off, _ := ReadUint64(payload, off)
-	_, off, _ = ReadUint32(payload, off)   // version (skip)
-	_, off, _ = ReadUint32(payload, off)   // inode (skip — we recover nodeID from chunkID)
-	length, _, _ := ReadUint64(payload, off) // new total file length
+	_, off, _ = ReadUint32(payload, off)     // version (skip)
+	_, off, _ = ReadUint32(payload, off)     // inode (skip — we recover nodeID from chunkID)
+	length, off, _ := ReadUint64(payload, off) // new total file length
+	_ = off                                  // lockid follows (skip — unused by fake server)
 
 	nodeID := uint32(chunkID) // reverse of fake mapping: chunkID = nodeID
 

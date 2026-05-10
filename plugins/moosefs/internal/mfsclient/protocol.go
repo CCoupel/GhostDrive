@@ -179,6 +179,7 @@ type ChunkInfo struct {
 	ChunkID  uint64
 	Version  uint32
 	Servers  []ChunkServer
+	LockID   uint32 // lock token from WRITE_CHUNK response; must be echoed in WRITE_CHUNK_END
 }
 
 // ─── Frame I/O helpers ────────────────────────────────────────────────────────

@@ -692,12 +692,15 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 	defer c.mu.Unlock()
 
 	// CLTOMA_FUSE_WRITE_CHUNK_END (436) — MooseFS 4.x payload:
-	//   [msgid:32][chunkid:64][version:32][inode:32][length:64]  = 28 bytes
+	//   [msgid:32][chunkid:64][version:32][inode:32][length:64][lockid:32] = 32 bytes
+	// lockid is the token returned by the master in WRITE_CHUNK (435); it must
+	// be echoed verbatim.  lockid=0 means "no lock" (we send chunkopflags=0).
 	endReq := PutUint32(nil, 0) // msgid
 	endReq = PutUint64(endReq, info.ChunkID)
 	endReq = PutUint32(endReq, info.Version)
-	endReq = PutUint32(endReq, nodeID)    // inode (was missing — caused length field misalignment)
+	endReq = PutUint32(endReq, nodeID)    // inode
 	endReq = PutUint64(endReq, newLength) // total file length after write
+	endReq = PutUint32(endReq, info.LockID) // lockid — echo master's token
 
 	endAns, err := c.roundtrip(CltomFuseWriteChunkEnd, MatoclFuseWriteChunkEnd, endReq)
 	if err != nil {
@@ -790,17 +793,21 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 //	Proto 2 (MooseFS >= 3.0.10, incl. all 4.x) — protocolid byte = 2:
 //	  [msgid:32][protocolid:8=2][length:64][chunkid:64][version:32]
 //	  N × [ip:32 port:16 cs_ver:32 labelmask:32]  (14 bytes/entry, N implicit)
+//	  [lockid:32]  (optional trailing field — present when server uses chunk locking)
 //
 //	Proto 1 (MooseFS >= 1.7.32, < 3.0.10) — protocolid byte = 1:
 //	  [msgid:32][protocolid:8=1][length:64][chunkid:64][version:32]
 //	  N × [ip:32 port:16 cs_ver:32]  (10 bytes/entry, N implicit)
+//	  [lockid:32]  (optional trailing field)
 //
 //	Proto 0 (MooseFS < 1.7.32) — no protocolid byte:
 //	  [msgid:32][length:64][chunkid:64][version:32]
 //	  N × [ip:32 port:16]  (6 bytes/entry, N implicit)
 //
 // N is never transmitted explicitly; it is derived from the remaining payload
-// bytes divided by the per-entry size.
+// bytes divided by the per-entry size.  Any trailing 4 bytes that do not form
+// a complete CS entry are interpreted as a lockid token that must be echoed
+// back in the WRITE_CHUNK_END request.
 func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 	if len(ans) < 5 {
 		return nil, fmt.Errorf("response too short (%d bytes)", len(ans))
@@ -860,9 +867,10 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 		entrySize = 6 // ip:32 + port:16 (no cs_ver in proto 0)
 	}
 
+	remaining := len(ans) - off
 	n := 0
-	if entrySize > 0 && len(ans) > off {
-		n = (len(ans) - off) / entrySize
+	if entrySize > 0 && remaining > 0 {
+		n = remaining / entrySize
 	}
 
 	info := &ChunkInfo{
@@ -895,5 +903,13 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 		}
 		info.Servers = append(info.Servers, srv)
 	}
+
+	// MooseFS 4.x may append a lockid:32 token after the CS entries.
+	// Any trailing 4 bytes that don't form a complete CS entry are the lockid;
+	// it must be echoed verbatim in the subsequent WRITE_CHUNK_END request.
+	if len(ans)-off == 4 {
+		info.LockID, _, _ = ReadUint32(ans, off)
+	}
+
 	return info, nil
 }
