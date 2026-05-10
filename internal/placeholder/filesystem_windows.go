@@ -422,10 +422,29 @@ func (fs *GhostFileSystem) Release(path string, fh uint64) int {
 			logger.Debug("placeholder: Release fh=%d upload returned: %v", fh, uploadErr)
 			if uploadErr != nil {
 				logger.Error("placeholder: Release upload %s: %v", path, uploadErr)
-			} else if fi, statErr := r.backend.Stat(context.Background(), r.relPath); statErr == nil {
-				logger.Info("placeholder: Release post-upload stat %s size=%d", path, fi.Size)
 			} else {
-				logger.Warn("placeholder: Release post-upload stat failed %s: %v", path, statErr)
+				// Post-upload Stat: retry up to 3 times with 100ms delay to handle
+				// MooseFS async metadata propagation — GetAttr may return size=0
+				// briefly after the last WRITE_CHUNK_END is committed.
+				var fi *plugins.FileInfo
+				var statErr error
+				for attempt := 0; attempt < 3; attempt++ {
+					fi, statErr = r.backend.Stat(context.Background(), r.relPath)
+					if statErr == nil && fi.Size > 0 {
+						break
+					}
+					if attempt < 2 {
+						if statErr == nil {
+							logger.Warn("placeholder: Release post-upload stat %s size=0 (attempt %d/3), retrying…", path, attempt+1)
+						}
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
+				if statErr == nil {
+					logger.Info("placeholder: Release post-upload stat %s size=%d", path, fi.Size)
+				} else {
+					logger.Warn("placeholder: Release post-upload stat failed %s: %v", path, statErr)
+				}
 			}
 		}
 		_ = os.Remove(entry.tempPath)
