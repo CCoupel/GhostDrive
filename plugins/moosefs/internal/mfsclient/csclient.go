@@ -208,11 +208,22 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 
 	// 4. Read CSTOCL_WRITE_STATUS: [chunkId:64][writeId:32][status:8] = 13 bytes.
 	// MooseFS 4.x sends opcode 211 (CstoclFuseWriteStatus), confirmed 4.58.4.
-	cmd, resp, err := ReadFrame(cs)
-	if err != nil {
-		return fmt.Errorf("csclient: WriteChunk %d: recv status: %w", chunkID, err)
+	// The CS may send ANTOAN_NOP (cmd=0) keepalives before the real status frame;
+	// loop until we receive a non-NOP frame.
+	var cmd uint32
+	var resp []byte
+	for {
+		var err error
+		cmd, resp, err = ReadFrame(cs)
+		if err != nil {
+			return fmt.Errorf("csclient: WriteChunk %d: recv status: %w", chunkID, err)
+		}
+		logger.Debug("csclient: WriteChunk %d: recv cmd=%d resp_len=%d", chunkID, cmd, len(resp))
+		if cmd == ANTOAN_NOP {
+			continue // keepalive — wait for real status
+		}
+		break
 	}
-	logger.Debug("csclient: WriteChunk %d: recv cmd=%d resp_len=%d", chunkID, cmd, len(resp))
 	if cmd != CstoclFuseWriteStatus {
 		return fmt.Errorf("csclient: WriteChunk %d: expected WRITE_STATUS (opcode %d), got %d",
 			chunkID, CstoclFuseWriteStatus, cmd)

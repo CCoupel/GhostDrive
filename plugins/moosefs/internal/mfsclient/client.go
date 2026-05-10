@@ -704,15 +704,18 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 	defer c.mu.Unlock()
 
 	logger.Debug("[mfsclient] Write: sending WRITE_CHUNK_END lockid=%d", info.LockID)
-	// CLTOMA_FUSE_WRITE_CHUNK_END (436) — MooseFS 4.x payload:
-	//   [msgid:32][chunkid:64][version:32][inode:32][length:64][lockid:32] = 32 bytes
-	// lockid is the token returned by the master in WRITE_CHUNK (435); it must
-	// be echoed verbatim.  lockid=0 means "no lock" (we send chunkopflags=0).
-	endReq := PutUint32(nil, 0) // msgid
+	// CLTOMA_FUSE_WRITE_CHUNK_END (436) — MooseFS >= 3.0.74 payload (37 bytes):
+	//   [msgid:32][chunkid:64][version:32][inode:32][chunkindx:32][length:64][chunkopflags:8][lockid:32]
+	// chunkindx: chunk index within the file (= offset / ChunkSize, same as used in WRITE_CHUNK).
+	// chunkopflags: operation flags (0 = no special flags).
+	// lockid: token returned by the master in WRITE_CHUNK (435); must be echoed verbatim.
+	endReq := PutUint32(nil, 0)          // msgid
 	endReq = PutUint64(endReq, info.ChunkID)
 	endReq = PutUint32(endReq, info.Version)
-	endReq = PutUint32(endReq, nodeID)    // inode
+	endReq = PutUint32(endReq, nodeID)   // inode
+	endReq = PutUint32(endReq, index)    // chunkindx — chunk index within file
 	endReq = PutUint64(endReq, newLength) // total file length after write
+	endReq = PutUint8(endReq, 0)         // chunkopflags = 0
 	endReq = PutUint32(endReq, info.LockID) // lockid — echo master's token
 
 	endAns, err := c.roundtrip(CltomFuseWriteChunkEnd, MatoclFuseWriteChunkEnd, endReq)

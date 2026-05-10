@@ -797,17 +797,18 @@ func (s *integFakeServer) svrWriteChunk(conn net.Conn, payload []byte) {
 // svrWriteChunkEnd handles CLTOMA_FUSE_WRITE_CHUNK_END (436).
 // Copies CS data back into node.content and updates the node's size.
 //
-// MooseFS 4.x request payload: [msgid:32][chunkid:64][version:32][inode:32][length:64][lockid:32] = 32 bytes.
+// MooseFS >= 3.0.74 request payload: [msgid:32][chunkid:64][version:32][inode:32][chunkindx:32][length:64][chunkopflags:8][lockid:32] = 37 bytes.
 func (s *integFakeServer) svrWriteChunkEnd(conn net.Conn, payload []byte) {
-	if len(payload) < 32 {
+	if len(payload) < 37 {
 		return
 	}
 	msgid, off, _ := mfsclient.ReadUint32(payload, 0)
 	chunkID, off, _ := mfsclient.ReadUint64(payload, off)
 	_, off, _ = mfsclient.ReadUint32(payload, off)       // version (skip)
 	_, off, _ = mfsclient.ReadUint32(payload, off)       // inode (skip — already known via chunkID)
+	_, off, _ = mfsclient.ReadUint32(payload, off)       // chunkindx (skip)
 	length, _, _ := mfsclient.ReadUint64(payload, off)   // new total file length
-	// lockid follows (skip — unused by fake server)
+	// chunkopflags:8 then lockid:32 follow (skip — unused by fake server)
 
 	nodeID := uint32(chunkID) // reverse of fake mapping
 

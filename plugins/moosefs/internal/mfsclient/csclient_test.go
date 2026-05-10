@@ -408,3 +408,83 @@ func TestWriteChunk_withChain(t *testing.T) {
 	stored := cs.GetChunkData(chunkID)
 	assert.Equal(t, payload, stored, "stored chunk data must match written payload")
 }
+
+// TestWriteChunk_NOPskip verifies that WriteChunk silently ignores ANTOAN_NOP
+// (cmd=0) keepalive frames sent by the CS before the real WRITE_STATUS.
+func TestWriteChunk_NOPskip(t *testing.T) {
+	base := newFakeCSServer()
+
+	// Custom listener: injects 3 NOP frames before the real WRITE_STATUS.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	const chunkID = uint64(4004)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Consume CLTOCS_WRITE init frame.
+		cmd, initPayload, err := ReadFrame(conn)
+		if err != nil || cmd != CltocsFuseWrite || len(initPayload) < 13 {
+			return
+		}
+		// chunkId at offset 1 (protocolid byte first).
+
+		// Consume WRITE_DATA + WRITE_END frames, storing data.
+		for {
+			cmd, data, err := ReadFrame(conn)
+			if err != nil {
+				return
+			}
+			if cmd == CltocsFuseWriteData {
+				if len(data) < 24 {
+					return
+				}
+				_, off, _ := ReadUint32(data, 8) // skip writeId
+				blockNum, off, _ := ReadUint16(data, off)
+				blockOff, off, _ := ReadUint16(data, off)
+				size, off, _ := ReadUint32(data, off)
+				off += 4 // skip CRC
+				block := data[off : off+int(size)]
+				base.storeBlock(chunkID, uint32(blockNum)*65536+uint32(blockOff), block)
+			} else if cmd == CltocsFuseWriteEnd {
+				break
+			} else {
+				return
+			}
+		}
+
+		// Send 3 NOP keepalives, then the real WRITE_STATUS.
+		for i := 0; i < 3; i++ {
+			_ = WriteFrame(conn, ANTOAN_NOP, nil)
+		}
+		var resp []byte
+		resp = PutUint64(resp, chunkID)
+		resp = PutUint32(resp, 0) // writeId
+		resp = PutUint8(resp, StatusOK)
+		_ = WriteFrame(conn, CstoclFuseWriteStatus, resp)
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	ip := binary.BigEndian.Uint32(addr.IP.To4())
+	port := uint16(addr.Port)
+
+	conn, err := DialCS(ip, port)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	payload := []byte("nop-skip-test")
+	err = WriteChunk(conn, chunkID, 1, 0, payload, nil)
+	require.NoError(t, err, "WriteChunk must succeed even when CS sends NOP keepalives before WRITE_STATUS")
+
+	<-done
+	stored := base.GetChunkData(chunkID)
+	assert.Equal(t, payload, stored, "stored chunk data must match written payload")
+}
