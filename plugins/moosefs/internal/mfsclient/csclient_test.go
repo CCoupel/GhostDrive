@@ -185,8 +185,13 @@ func (s *fakeCSServer) serveRead(conn net.Conn, payload []byte) {
 // ─── Write handler ────────────────────────────────────────────────────────────
 
 // serveWrite processes the write handshake initiated by CLTOCS_WRITE
-// (already received in payload).  It then reads CLTOCS_WRITE_DATA frames
-// followed by CLTOCS_WRITE_END and finally sends CSTOCL_WRITE_STATUS.
+// (already received in payload).
+//
+// Protocol flow (MooseFS writedata.c — confirmed):
+//  1. Receive CLTOCS_WRITE.
+//  2. Send CSTOCL_WRITE_STATUS(writeid=0, OK) — mandatory write-init ACK.
+//  3. Read CLTOCS_WRITE_DATA frames, accumulating data.
+//  4. On CLTOCS_WRITE_END, send final CSTOCL_WRITE_STATUS(last_writeid, OK).
 func (s *fakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 	// CLTOCS_WRITE payload (MooseFS >= 1.7.32):
 	// [protocolid:8=1][chunkId:64][version:32][N*(ip:32+port:16)]
@@ -198,6 +203,17 @@ func (s *fakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 	chunkID, _, _ := ReadUint64(payload, 1)
 	// version and chain entries are parsed but not used in the fake
 
+	// Send mandatory write-init ACK: CSTOCL_WRITE_STATUS(writeid=0, OK).
+	// The client must receive this before sending any WRITE_DATA frames.
+	var ack []byte
+	ack = PutUint64(ack, chunkID)
+	ack = PutUint32(ack, 0) // writeId = 0 (no data written yet)
+	ack = PutUint8(ack, StatusOK)
+	if err := WriteFrame(conn, CstoclFuseWriteStatus, ack); err != nil {
+		return
+	}
+
+	var lastWriteID uint32
 	for {
 		cmd, data, err := ReadFrame(conn)
 		if err != nil {
@@ -212,7 +228,8 @@ func (s *fakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 				return
 			}
 			var off int
-			_, off, _ = ReadUint32(data, 8)  // writeId:32 — skip (offset 8 after chunkId:64)
+			writeID, off, _ := ReadUint32(data, 8) // writeId:32 at offset 8 after chunkId:64
+			lastWriteID = writeID
 			blockNum, off, _ := ReadUint16(data, off) // blockNum at offset 12
 			blockOff, off, _ := ReadUint16(data, off) // blockOff at offset 14
 			size, off, _ := ReadUint32(data, off)     // size at offset 16
@@ -225,10 +242,10 @@ func (s *fakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 			s.storeBlock(chunkID, dataOffset, block)
 
 		case CltocsFuseWriteEnd: // CLTOCS_WRITE_FINISH (213)
-			// Send CSTOCL_WRITE_STATUS: [chunkId:64][writeId:32][status:8]
+			// Send final CSTOCL_WRITE_STATUS echoing the last writeId.
 			var resp []byte
 			resp = PutUint64(resp, chunkID)
-			resp = PutUint32(resp, 0) // writeId
+			resp = PutUint32(resp, lastWriteID)
 			resp = PutUint8(resp, StatusOK)
 			_ = WriteFrame(conn, CstoclFuseWriteStatus, resp)
 			return // write session complete
@@ -465,10 +482,10 @@ func TestWriteChunk_withChain(t *testing.T) {
 	assert.Equal(t, payload, stored, "stored chunk data must match written payload")
 }
 
-// TestWriteChunk_earlyCANTCONNECT verifies that WriteChunk detects an immediate
-// CSTOCL_WRITE_STATUS(CANTCONNECT) sent by the CS after CLTOCS_WRITE but before
-// any WRITE_DATA — the fast-failure path when a chain CS is unreachable.
-// The pre-flight read in WriteChunk must catch this early error.
+// TestWriteChunk_earlyCANTCONNECT verifies that WriteChunk correctly handles
+// CSTOCL_WRITE_STATUS(CANTCONNECT) returned as the write-init ACK.
+// Per writedata.c, the CS sends WRITE_STATUS(writeid=0, CANTCONNECT) in the ACK
+// slot when it cannot reach a chain peer.  WriteChunk must abort with a clear error.
 func TestWriteChunk_earlyCANTCONNECT(t *testing.T) {
 	srv := newEarlyCANTCONNECTServer()
 	ip, port := srv.Start()
@@ -479,143 +496,19 @@ func TestWriteChunk_earlyCANTCONNECT(t *testing.T) {
 	defer conn.Close()
 
 	err = WriteChunk(conn, uint64(5005), 1, 0, []byte("chain-fail-test"), nil)
-	require.Error(t, err, "WriteChunk must return error when CS sends early CANTCONNECT")
+	require.Error(t, err, "WriteChunk must return error when write-init ACK contains CANTCONNECT")
 	assert.Contains(t, err.Error(), "CANTCONNECT",
 		"error must identify CANTCONNECT status")
 }
 
-// TestWriteChunk_preflightNOPcap verifies that the pre-flight loop does not run
-// indefinitely when the CS sends many consecutive NOP keepalives.
-// After maxPreflightNOPs NOPs, WriteChunk must proceed to WRITE_DATA (and succeed).
-func TestWriteChunk_preflightNOPcap(t *testing.T) {
-	// Custom server: sends maxPreflightNOPs+5 NOPs after CLTOCS_WRITE, then
-	// serves the write normally.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-
-	cs := newFakeCSServer()
-	const chunkID = uint64(7007)
-	payload := []byte("preflight-nop-cap-test")
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		// Consume CLTOCS_WRITE init.
-		cmd, _, err := ReadFrame(conn)
-		if err != nil || cmd != CltocsFuseWrite {
-			return
-		}
-
-		// Send 15 NOP keepalives (> maxPreflightNOPs=10) before any data.
-		for i := 0; i < 15; i++ {
-			if err := WriteFrame(conn, ANTOAN_NOP, nil); err != nil {
-				return
-			}
-		}
-
-		// Now serve WRITE_DATA + WRITE_FINISH normally.
-		for {
-			c, data, e := ReadFrame(conn)
-			if e != nil {
-				return
-			}
-			if c == CltocsFuseWriteData && len(data) >= 24 {
-				_, off, _ := ReadUint32(data, 8)
-				blockNum, off, _ := ReadUint16(data, off)
-				blockOff, off, _ := ReadUint16(data, off)
-				size, off, _ := ReadUint32(data, off)
-				off += 4 // skip CRC
-				block := data[off : off+int(size)]
-				cs.storeBlock(chunkID, uint32(blockNum)*65536+uint32(blockOff), block)
-			} else if c == CltocsFuseWriteEnd {
-				var resp []byte
-				resp = PutUint64(resp, chunkID)
-				resp = PutUint32(resp, 0)
-				resp = PutUint8(resp, StatusOK)
-				_ = WriteFrame(conn, CstoclFuseWriteStatus, resp)
-				return
-			}
-		}
-	}()
-
-	addr := ln.Addr().(*net.TCPAddr)
-	csIP := binary.BigEndian.Uint32(addr.IP.To4())
-	csPort := uint16(addr.Port)
-
-	conn, err := DialCS(csIP, csPort)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	err = WriteChunk(conn, chunkID, 1, 0, payload, nil)
-	require.NoError(t, err, "WriteChunk must succeed after hitting the NOP cap and proceeding")
-
-	stored := cs.GetChunkData(chunkID)
-	assert.Equal(t, payload, stored, "stored data must match written payload")
-	<-done
-}
-
-// TestWriteChunk_preflightUnexpectedOK verifies that WriteChunk returns an
-// explicit error when the CS sends WRITE_STATUS(OK) before any WRITE_DATA —
-// a protocol violation that would silently consume the frame the final
-// WRITE_STATUS read loop expects.
-func TestWriteChunk_preflightUnexpectedOK(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-
-	const chunkID = uint64(8008)
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		// Consume CLTOCS_WRITE init.
-		cmd, payload, err := ReadFrame(conn)
-		if err != nil || cmd != CltocsFuseWrite || len(payload) < 13 {
-			return
-		}
-
-		// Send WRITE_STATUS(OK, writeId=0) immediately — protocol violation.
-		var resp []byte
-		resp = PutUint64(resp, chunkID)
-		resp = PutUint32(resp, 0)    // writeId = 0
-		resp = PutUint8(resp, StatusOK)
-		_ = WriteFrame(conn, CstoclFuseWriteStatus, resp)
-	}()
-
-	addr := ln.Addr().(*net.TCPAddr)
-	csIP := binary.BigEndian.Uint32(addr.IP.To4())
-	csPort := uint16(addr.Port)
-
-	conn, err := DialCS(csIP, csPort)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	err = WriteChunk(conn, chunkID, 1, 0, []byte("unexpected-ok-test"), nil)
-	require.Error(t, err, "WriteChunk must return error on unexpected WRITE_STATUS(OK) before WRITE_DATA")
-	assert.Contains(t, err.Error(), "protocol violation",
-		"error must describe the protocol violation")
-	<-done
-}
 
 // TestWriteChunk_chainEOF verifies that WriteChunk returns a diagnostic error
-// when the CS closes the connection (EOF) without sending WRITE_STATUS —
-// the behaviour observed with MooseFS 4.58.8 when the chain CS times out.
+// when the CS closes the connection during the write-init ACK phase without
+// sending a WRITE_STATUS frame — the behaviour observed with MooseFS 4.58.8
+// when the chain CS times out (~5 s TCP) and the CS gives up.
 func TestWriteChunk_chainEOF(t *testing.T) {
-	// Server that accepts CLTOCS_WRITE, sends 2 NOPs, then closes — simulating
-	// a chain-CS TCP timeout without a final WRITE_STATUS frame.
+	// Server that accepts CLTOCS_WRITE, sends 2 NOP keepalives (simulating chain
+	// connection attempts), then closes WITHOUT sending the mandatory write-init ACK.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer ln.Close()
@@ -635,19 +528,12 @@ func TestWriteChunk_chainEOF(t *testing.T) {
 			return
 		}
 
-		// Consume any WRITE_DATA and WRITE_FINISH frames (drain until error or FINISH).
-		for {
-			c, _, e := ReadFrame(conn)
-			if e != nil || c == CltocsFuseWriteEnd {
-				break
-			}
-		}
-
-		// Send 2 NOP keepalives (like MooseFS does while waiting for chain), then close
-		// WITHOUT sending WRITE_STATUS — the observed MooseFS 4.58.8 EOF behaviour.
+		// Send 2 NOP keepalives (CS polling chain peer), then close with EOF
+		// WITHOUT sending the mandatory WRITE_STATUS ACK — MooseFS 4.58.8 behavior
+		// when chain peer times out.
 		_ = WriteFrame(conn, ANTOAN_NOP, nil)
 		_ = WriteFrame(conn, ANTOAN_NOP, nil)
-		// conn.Close() via defer — sends EOF to the client.
+		// conn.Close() via defer — sends EOF to the client during ACK read.
 	}()
 
 	addr := ln.Addr().(*net.TCPAddr)
@@ -659,7 +545,7 @@ func TestWriteChunk_chainEOF(t *testing.T) {
 	defer conn.Close()
 
 	err = WriteChunk(conn, uint64(6006), 1, 0, []byte("eof-chain-test"), nil)
-	require.Error(t, err, "WriteChunk must return error on CS EOF without WRITE_STATUS")
+	require.Error(t, err, "WriteChunk must return error on CS EOF without write-init ACK")
 	assert.Contains(t, err.Error(), "chain CS",
 		"error must mention chain CS connectivity as likely cause")
 
@@ -694,6 +580,15 @@ func TestWriteChunk_NOPskip(t *testing.T) {
 		}
 		// chunkId at offset 1 (protocolid byte first).
 
+		// Send mandatory write-init ACK before client sends WRITE_DATA.
+		var ack []byte
+		ack = PutUint64(ack, chunkID)
+		ack = PutUint32(ack, 0) // writeId = 0
+		ack = PutUint8(ack, StatusOK)
+		if err := WriteFrame(conn, CstoclFuseWriteStatus, ack); err != nil {
+			return
+		}
+
 		// Consume WRITE_DATA + WRITE_END frames, storing data.
 		for {
 			cmd, data, err := ReadFrame(conn)
@@ -718,7 +613,7 @@ func TestWriteChunk_NOPskip(t *testing.T) {
 			}
 		}
 
-		// Send 3 NOP keepalives, then the real WRITE_STATUS.
+		// Send 3 NOP keepalives before the final WRITE_STATUS.
 		for i := 0; i < 3; i++ {
 			_ = WriteFrame(conn, ANTOAN_NOP, nil)
 		}
@@ -744,4 +639,125 @@ func TestWriteChunk_NOPskip(t *testing.T) {
 	<-done
 	stored := base.GetChunkData(chunkID)
 	assert.Equal(t, payload, stored, "stored chunk data must match written payload")
+}
+
+// TestWriteChunk_writeInitACK_OK verifies that WriteChunk correctly reads the
+// mandatory write-init ACK (WRITE_STATUS writeid=0 OK) before sending WRITE_DATA,
+// including when the CS sends NOP keepalives before the ACK while establishing
+// the replication chain.
+func TestWriteChunk_writeInitACK_OK(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	const chunkID = uint64(9009)
+	data := []byte("write-init-ack-ok-test")
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Receive CLTOCS_WRITE.
+		cmd, initPayload, err := ReadFrame(conn)
+		if err != nil || cmd != CltocsFuseWrite || len(initPayload) < 13 {
+			return
+		}
+
+		// Send 3 NOPs (chain connection in progress), then write-init ACK OK.
+		for i := 0; i < 3; i++ {
+			_ = WriteFrame(conn, ANTOAN_NOP, nil)
+		}
+		var ack []byte
+		ack = PutUint64(ack, chunkID)
+		ack = PutUint32(ack, 0) // writeId = 0
+		ack = PutUint8(ack, StatusOK)
+		if err := WriteFrame(conn, CstoclFuseWriteStatus, ack); err != nil {
+			return
+		}
+
+		// Serve WRITE_DATA + WRITE_END, then send final WRITE_STATUS.
+		var lastWriteID uint32
+		for {
+			c, d, e := ReadFrame(conn)
+			if e != nil {
+				return
+			}
+			if c == CltocsFuseWriteData && len(d) >= 24 {
+				wid, _, _ := ReadUint32(d, 8)
+				lastWriteID = wid
+			} else if c == CltocsFuseWriteEnd {
+				var resp []byte
+				resp = PutUint64(resp, chunkID)
+				resp = PutUint32(resp, lastWriteID)
+				resp = PutUint8(resp, StatusOK)
+				_ = WriteFrame(conn, CstoclFuseWriteStatus, resp)
+				return
+			}
+		}
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	csIP := binary.BigEndian.Uint32(addr.IP.To4())
+	csPort := uint16(addr.Port)
+
+	conn, err := DialCS(csIP, csPort)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	err = WriteChunk(conn, chunkID, 1, 0, data, nil)
+	require.NoError(t, err, "WriteChunk must succeed when CS sends NOPs then write-init ACK OK")
+	<-done
+}
+
+// TestWriteChunk_writeInitACK_CANTCONNECT verifies that WriteChunk returns an
+// error with the CANTCONNECT status name when the write-init ACK carries an error.
+// This is the canonical chain-peer-unreachable error path per writedata.c.
+func TestWriteChunk_writeInitACK_CANTCONNECT(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	const chunkID = uint64(1010)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Receive CLTOCS_WRITE.
+		cmd, initPayload, err := ReadFrame(conn)
+		if err != nil || cmd != CltocsFuseWrite || len(initPayload) < 13 {
+			return
+		}
+
+		// Send write-init ACK with CANTCONNECT status.
+		var resp []byte
+		resp = PutUint64(resp, chunkID)
+		resp = PutUint32(resp, 0) // writeId = 0
+		resp = PutUint8(resp, StatusCSCANTCONNECT)
+		_ = WriteFrame(conn, CstoclFuseWriteStatus, resp)
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	csIP := binary.BigEndian.Uint32(addr.IP.To4())
+	csPort := uint16(addr.Port)
+
+	conn, err := DialCS(csIP, csPort)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	err = WriteChunk(conn, chunkID, 1, 0, []byte("cantconnect-ack-test"), nil)
+	require.Error(t, err, "WriteChunk must return error on CANTCONNECT in write-init ACK")
+	assert.Contains(t, err.Error(), "CANTCONNECT",
+		"error must identify CANTCONNECT status")
+	<-done
 }

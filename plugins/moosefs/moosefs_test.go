@@ -188,6 +188,17 @@ func (s *integFakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 	}
 	// payload[0] = protocolid (must be 1); chunkId starts at offset 1.
 	chunkID, _, _ := mfsclient.ReadUint64(payload, 1)
+
+	// Send mandatory write-init ACK: CSTOCL_WRITE_STATUS(writeid=0, OK).
+	// Per writedata.c, the CS must send this before the client sends WRITE_DATA.
+	var ack []byte
+	ack = mfsclient.PutUint64(ack, chunkID)
+	ack = mfsclient.PutUint32(ack, 0) // writeId = 0 (chain ACK, no data yet)
+	ack = mfsclient.PutUint8(ack, mfsclient.StatusOK)
+	if err := mfsclient.WriteFrame(conn, mfsclient.CstoclFuseWriteStatus, ack); err != nil {
+		return
+	}
+
 	for {
 		cmd, data, err := mfsclient.ReadFrame(conn)
 		if err != nil {
