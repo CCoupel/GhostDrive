@@ -32,6 +32,7 @@ const (
 type openEntry struct {
 	tempPath  string
 	writeable bool
+	dirty     bool // true after at least one Write() — guards against 0-byte Create artifacts
 }
 
 // GhostFileSystem implements fuse.FileSystemInterface by routing calls to the
@@ -118,7 +119,7 @@ func ensureDownloaded(cfg plugins.BackendConfig, backend plugins.StorageBackend,
 // ── Getattr ──────────────────────────────────────────────────────────────────
 
 func (fs *GhostFileSystem) Getattr(path string, stat *fuse.Stat_t, _ uint64) int {
-	logger.Info("[placeholder/getattr] ENTER path=%q", path)
+	logger.Debug("[placeholder/getattr] ENTER path=%q", path)
 	now := nowTs()
 
 	// Virtual root directory.
@@ -158,23 +159,23 @@ func (fs *GhostFileSystem) Getattr(path string, stat *fuse.Stat_t, _ uint64) int
 
 	info, err := r.backend.Stat(context.Background(), r.relPath)
 	if err != nil {
-		logger.Info("[placeholder/getattr] path=%q stat_err=%q", path, err.Error())
+		logger.Debug("[placeholder/getattr] path=%q stat_err=%q", path, err.Error())
 		if errors.Is(err, plugins.ErrFileNotFound) {
-			logger.Info("[placeholder/getattr] path=%q → ENOENT (errors.Is match)", path)
+			logger.Debug("[placeholder/getattr] path=%q → ENOENT (errors.Is match)", path)
 			return -fuse.ENOENT
 		}
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no such") {
-			logger.Info("[placeholder/getattr] path=%q → ENOENT (string match)", path)
+			logger.Debug("[placeholder/getattr] path=%q → ENOENT (string match)", path)
 			return -fuse.ENOENT
 		}
 		logger.Error("[placeholder/getattr] path=%q → EIO (unmatched err=%q)", path, err.Error())
 		return -fuse.EIO
 	}
 	if info == nil {
-		logger.Info("[placeholder/getattr] path=%q → ENOENT (nil info)", path)
+		logger.Debug("[placeholder/getattr] path=%q → ENOENT (nil info)", path)
 		return -fuse.ENOENT
 	}
-	logger.Info("[placeholder/getattr] path=%q → OK (dir=%v size=%d)", path, info.IsDir, info.Size)
+	logger.Debug("[placeholder/getattr] path=%q → OK (dir=%v size=%d)", path, info.IsDir, info.Size)
 
 	mts := tsFromTime(info.ModTime)
 	if info.IsDir {
@@ -298,6 +299,7 @@ func (fs *GhostFileSystem) Open(path string, flags int) (int, uint64) {
 	// both the temp-dir name and the handle key — prevents races between
 	// concurrent Open() calls reading the same fhSeq before it increments.
 	fh := fs.fhSeq.Add(1)
+	logger.Debug("placeholder: Open fh=%d path=%s writeable=%v", fh, path, writeable)
 
 	var localPath string
 	if writeable {
@@ -360,22 +362,30 @@ func (fs *GhostFileSystem) Read(path string, buff []byte, ofst int64, fh uint64)
 func (fs *GhostFileSystem) Write(path string, buff []byte, ofst int64, fh uint64) int {
 	fs.mu.Lock()
 	entry, ok := fs.handles[fh]
+	if ok && entry.writeable {
+		entry.dirty = true
+	}
 	fs.mu.Unlock()
 	if !ok || !entry.writeable {
 		return -fuse.EBADF
 	}
 
+	logger.Debug("placeholder: Write path=%q ofst=%d len=%d fh=%d", path, ofst, len(buff), fh)
+
 	f, err := os.OpenFile(entry.tempPath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
+		logger.Error("placeholder: Write open temp %s: %v", path, err)
 		return -fuse.EIO
 	}
 	defer f.Close()
 
 	if _, err := f.Seek(ofst, io.SeekStart); err != nil {
+		logger.Error("placeholder: Write seek %s ofst=%d: %v", path, ofst, err)
 		return -fuse.EIO
 	}
 	n, err := f.Write(buff)
 	if err != nil {
+		logger.Error("placeholder: Write write %s: %v", path, err)
 		return -fuse.EIO
 	}
 	return n
@@ -393,12 +403,25 @@ func (fs *GhostFileSystem) Release(path string, fh uint64) int {
 		return 0
 	}
 
-	// Upload temp file to backend on close of a writeable handle.
-	if entry.writeable {
+	// Upload temp file to backend only if Write() was called (dirty flag).
+	// Windows Explorer uses a two-phase copy: Create+Release (0 bytes) then
+	// Open+Write+Release (actual content). Skipping the dirty=false phase
+	// prevents the 0-byte Create from overwriting the file on the remote.
+	if entry.writeable && entry.dirty {
 		r := fs.route(path)
 		if r != nil {
+			// Log temp file size before upload to diagnose 0-byte uploads.
+			if fi, statErr := os.Stat(entry.tempPath); statErr == nil {
+				logger.Info("placeholder: Release fh=%d path=%s tempSize=%d", fh, path, fi.Size())
+			} else {
+				logger.Warn("placeholder: Release fh=%d path=%s stat-err=%v", fh, path, statErr)
+			}
 			if err := r.backend.Upload(context.Background(), entry.tempPath, r.relPath, nil); err != nil {
 				logger.Error("placeholder: Release upload %s: %v", path, err)
+			} else if fi, statErr := r.backend.Stat(context.Background(), r.relPath); statErr == nil {
+				logger.Info("placeholder: Release post-upload stat %s size=%d", path, fi.Size)
+			} else {
+				logger.Warn("placeholder: Release post-upload stat failed %s: %v", path, statErr)
 			}
 		}
 		_ = os.Remove(entry.tempPath)
@@ -417,16 +440,26 @@ func (fs *GhostFileSystem) Create(path string, _ int, _ uint32) (int, uint64) {
 
 	// Allocate fh first to ensure the dir name is unique and race-free.
 	fh := fs.fhSeq.Add(1)
+	logger.Debug("placeholder: Create fh=%d path=%s", fh, path)
 	dir := filepath.Join(os.TempDir(), "ghostdrive-write", fmt.Sprintf("c%d", fh))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return -fuse.EIO, ^uint64(0)
 	}
 	localPath := filepath.Join(dir, filepath.Base(path))
 
-	// Pre-create the empty file so Release can upload it even if no Write is ever called
-	// (e.g. Windows Explorer "New file" creates a 0-byte file with Create+Release only).
+	// Pre-create the local empty temp file.
 	if f, err := os.Create(localPath); err == nil {
 		f.Close()
+	}
+
+	// Upload the 0-byte file immediately so Getattr returns OK right after Create.
+	// Windows Explorer calls Getattr to confirm the file was created; without this
+	// upload the file doesn't exist on the remote yet and Explorer shows ENOENT.
+	// Release with dirty=false will skip re-uploading; Release with dirty=true
+	// (after actual writes) will unlink + re-upload with the real content.
+	if err := r.backend.Upload(context.Background(), localPath, r.relPath, nil); err != nil {
+		logger.Warn("placeholder: Create pre-upload %s: %v", path, err)
+		// Non-fatal: Getattr may briefly return ENOENT but writes will still work.
 	}
 
 	fs.mu.Lock()
@@ -479,7 +512,7 @@ func (fs *GhostFileSystem) Rename(oldpath, newpath string) (errc int) {
 // WinFsp uses the 3-param FUSE3 rename variant (with flags) on the CGO build.
 // Without this, cgofuse returns -EINVAL for any non-zero flags without calling Rename.
 func (fs *GhostFileSystem) Rename3(oldpath, newpath string, flags uint32) int {
-	logger.Info("[placeholder/rename3] entry oldpath=%q newpath=%q flags=%#x", oldpath, newpath, flags)
+	logger.Debug("[placeholder/rename3] entry oldpath=%q newpath=%q flags=%#x", oldpath, newpath, flags)
 	if flags&fuse.RENAME_EXCHANGE != 0 {
 		return -fuse.EINVAL
 	}
