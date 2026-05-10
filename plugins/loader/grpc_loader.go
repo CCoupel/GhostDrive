@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -226,6 +227,11 @@ func (l *GRPCLoader) launchPlugin(path string) (*goplugin.Client, *grpcbridge.GR
 
 	pluginName := filepath.Base(path)
 	cmd := exec.Command(path)
+	// Force GHOSTDRIVE_DEBUG=1 in the plugin subprocess so that logger.Debug()
+	// calls write to the plugin's stderr (plugin subprocesses have no extraWriter,
+	// so without this flag debug logs go to io.Discard).  The plugin's stderr is
+	// captured by ClientConfig.Stderr below and routed into the central log.
+	cmd.Env = append(os.Environ(), "GHOSTDRIVE_DEBUG=1")
 	// go-plugin manages its own stdout/stderr pipes internally.
 	// Use ClientConfig.Stderr (the raw stderr passthrough) to route plugin
 	// output into the central GhostDrive log. hideCmdWindow suppresses the

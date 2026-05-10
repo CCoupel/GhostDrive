@@ -416,8 +416,14 @@ func (fs *GhostFileSystem) Release(path string, fh uint64) int {
 			} else {
 				logger.Warn("placeholder: Release fh=%d path=%s stat-err=%v", fh, path, statErr)
 			}
-			if err := r.backend.Upload(context.Background(), entry.tempPath, r.relPath, nil); err != nil {
-				logger.Error("placeholder: Release upload %s: %v", path, err)
+			// These two DEBUG logs are in the main process (not plugin subprocess)
+			// and will always appear in the UI log, regardless of GHOSTDRIVE_DEBUG.
+			// If "starting upload" appears but "upload returned" does not, Upload() hangs.
+			logger.Debug("placeholder: Release fh=%d starting upload to %s", fh, r.relPath)
+			uploadErr := r.backend.Upload(context.Background(), entry.tempPath, r.relPath, nil)
+			logger.Debug("placeholder: Release fh=%d upload returned: %v", fh, uploadErr)
+			if uploadErr != nil {
+				logger.Error("placeholder: Release upload %s: %v", path, uploadErr)
 			} else if fi, statErr := r.backend.Stat(context.Background(), r.relPath); statErr == nil {
 				logger.Info("placeholder: Release post-upload stat %s size=%d", path, fi.Size)
 			} else {
