@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [1.5.7] — 2026-05-10
+
 ### Fixed
 
+- **#101** — MooseFS 4.x : corrige l'opcode CSTOCL_WRITE_STATUS (213→211) — WriteChunk accepte désormais l'opcode 211 (MooseFS 4.x) avec fallback 213 (≤3.x)
 - **#101** — Copie de fichier vers MooseFS restait à 0 octet — 3 bugs protocole MooseFS 4.x corrigés : format WRITE_CHUNK request (16B→13B, chunkopflags), parsing réponse WRITE_CHUNK (proto 0/1/2), champ inode manquant dans WRITE_CHUNK_END
 - **#101** — Dirty flag WinFsp : la phase Create (0 octet) ne déclenche plus d'upload, seul le Release après Write réel upload le fichier
 - **#101** — Logs DEBUG toujours visibles dans l'UI (routés vers le store in-process indépendamment de GHOSTDRIVE_DEBUG)
