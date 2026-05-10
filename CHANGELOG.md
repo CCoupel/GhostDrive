@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.11] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : reconnexions concurrentes au master sérialisées (singleflight mutex) — une seule session TCP créée lors d'une reconnexion, même avec N goroutines concurrentes (#101)
+
+---
+
 ## [1.5.10] — 2026-05-10
 
 ### Fixed
