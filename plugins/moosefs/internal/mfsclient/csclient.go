@@ -13,10 +13,12 @@
 //
 // # Write protocol  (MooseFS 4.x — MFSCommunication.h confirmed)
 //
-//	Client → CS  CLTOCS_WRITE (210):       [chunkId:64][version:32][N*(ip:32+port:16)]
-//	                                        N is implicit: (payloadLen−12)/6
+//	Client → CS  CLTOCS_WRITE (210):       [protocolid:8=1][chunkId:64][version:32][N*(ip:32+port:16)]
+//	                                        N is implicit: (payloadLen−13)/6  (protocolid byte counts)
 //	                                        N=0: direct write, no replication chain
 //	                                        N≥1: CS must forward to listed peers for replication
+//	                                        *** After sending, perform a pre-flight read to catch ***
+//	                                        *** immediate CANTCONNECT errors from the CS.         ***
 //	Client → CS  CLTOCS_WRITE_DATA (212):  [chunkId:64][writeId:32][blocknum:16][blockOffset:16][size:32][crc:32][data:size]
 //	                                        blocknum    = (chunkOffset + written) / 65536
 //	                                        blockOffset = (chunkOffset + written) % 65536
@@ -24,13 +26,18 @@
 //	Client → CS  CLTOCS_WRITE_FINISH (213):[chunkId:64][version:32]
 //	CS → Client  CSTOCL_WRITE_STATUS (211):[chunkId:64][writeId:32][status:8]
 //	                                        CS echoes writeId from the last WRITE_DATA frame
+//	                                        CS may send ANTOAN_NOP keepalives while establishing
+//	                                        the replication chain — skip them in the read loop.
 package mfsclient
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"net"
+	"time"
 
 	"github.com/CCoupel/GhostDrive/internal/logger"
 )
@@ -159,6 +166,24 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 		return fmt.Errorf("csclient: WriteChunk %d: send init: %w", chunkID, err)
 	}
 
+	// Pre-flight: detect fast-failure WRITE_STATUS from the CS before sending data.
+	// After CLTOCS_WRITE, CS1 connects to chain peers (CS2…CSN). If a chain peer is
+	// immediately unreachable (TCP RST / ICMP unreachable), CS1 sends
+	// CSTOCL_WRITE_STATUS(CANTCONNECT) back to the client within a few milliseconds —
+	// before the client has sent any WRITE_DATA.
+	//
+	// Without this pre-flight check, the client blasts WRITE_DATA into a session that
+	// the CS has already abandoned, causing CS1 to close the connection with EOF instead
+	// of a proper WRITE_STATUS (observed with MooseFS 4.58.8 when CS2 is unreachable).
+	//
+	// Strategy: set a 5 ms read deadline immediately after CLTOCS_WRITE.
+	//   • Timeout → no early error, CS is ready for WRITE_DATA (normal path, no latency cost).
+	//   • ANTOAN_NOP → CS is still connecting the chain; extend deadline and keep peeking.
+	//   • WRITE_STATUS(error) → chain error detected early; abort before sending data.
+	if err := csPreflightRead(cs, chunkID); err != nil {
+		return err
+	}
+
 	// 2. Send CLTOCS_WRITE_DATA frames, one per 65536-byte block.
 	// Each frame includes a writeId:32 monotonic counter starting at 1.
 	// The CS echoes the last writeId in its CSTOCL_WRITE_STATUS response.
@@ -216,6 +241,15 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 		var err error
 		cmd, resp, err = ReadFrame(cs)
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				// CS closed the connection without sending WRITE_STATUS.
+				// Most common cause: the replication chain CS could not be reached and
+				// the CS timed out (TCP default ~5 s) without sending CANTCONNECT.
+				// This is observed with MooseFS 4.58.8 when a chain CS is offline.
+				return fmt.Errorf("csclient: WriteChunk %d: CS closed without WRITE_STATUS"+
+					" — chain CS unreachable or chunk ID/version mismatch"+
+					" (check CS-to-CS connectivity and MooseFS master logs): %w", chunkID, err)
+			}
 			return fmt.Errorf("csclient: WriteChunk %d: recv status: %w", chunkID, err)
 		}
 		logger.Debug("csclient: WriteChunk %d: recv cmd=%d resp_len=%d", chunkID, cmd, len(resp))
@@ -237,4 +271,59 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 			chunkID, status, CSStatusName(status))
 	}
 	return nil
+}
+
+// csPreflightRead peeks at the CS read buffer immediately after CLTOCS_WRITE
+// to detect fast-failure WRITE_STATUS frames (e.g. CANTCONNECT) before the
+// client sends any WRITE_DATA.
+//
+// It uses a 5 ms read deadline:
+//   - Timeout → no early error; CS is ready for WRITE_DATA (normal path).
+//   - ANTOAN_NOP → CS is still connecting the chain peer; extend deadline.
+//   - WRITE_STATUS(error) → chain error caught early; WriteChunk aborts.
+//   - WRITE_STATUS(OK) → treated as a ready signal (proceed).
+//   - Any other frame → unexpected; WriteChunk aborts.
+//
+// For chain-peer timeouts (~5 s TCP default) the pre-flight window expires
+// before the CS reacts, so the error surfaces later as an improved EOF message
+// in the WriteChunk read loop.
+func csPreflightRead(cs net.Conn, chunkID uint64) error {
+	const preflightDeadline = 5 * time.Millisecond
+
+	if err := cs.SetReadDeadline(time.Now().Add(preflightDeadline)); err != nil {
+		// Cannot set deadline (unusual) — skip pre-flight silently.
+		return nil
+	}
+
+	for {
+		earlyCmd, earlyResp, earlyErr := ReadFrame(cs)
+		if earlyErr != nil {
+			// Restore deadline before returning.
+			_ = cs.SetReadDeadline(time.Time{})
+			var netErr net.Error
+			if errors.As(earlyErr, &netErr) && netErr.Timeout() {
+				return nil // deadline expired — no early error, CS ready
+			}
+			return fmt.Errorf("csclient: WriteChunk %d: pre-flight read: %w", chunkID, earlyErr)
+		}
+
+		if earlyCmd == ANTOAN_NOP {
+			// CS is still establishing the chain — extend deadline and keep peeking.
+			_ = cs.SetReadDeadline(time.Now().Add(preflightDeadline))
+			continue
+		}
+
+		// Non-NOP frame received before we have sent any WRITE_DATA.
+		_ = cs.SetReadDeadline(time.Time{})
+		if earlyCmd == CstoclFuseWriteStatus && len(earlyResp) >= 13 {
+			s := earlyResp[12]
+			if s != StatusOK {
+				return fmt.Errorf("csclient: WriteChunk %d: early chain error (status 0x%02x %s)",
+					chunkID, s, CSStatusName(s))
+			}
+			// Unexpected OK before WRITE_DATA — treat as a ready signal.
+			return nil
+		}
+		return fmt.Errorf("csclient: WriteChunk %d: unexpected pre-flight cmd %d from CS", chunkID, earlyCmd)
+	}
 }

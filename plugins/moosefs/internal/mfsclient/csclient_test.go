@@ -239,6 +239,62 @@ func (s *fakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 	}
 }
 
+// ─── Early-CANTCONNECT fake server ────────────────────────────────────────────
+
+// earlyCANTCONNECTServer listens on a random port and, after receiving
+// CLTOCS_WRITE, immediately sends CSTOCL_WRITE_STATUS(CANTCONNECT) without
+// reading any WRITE_DATA.  This simulates a CS that detects the chain peer is
+// unreachable before the client has sent data (fast-failure path).
+type earlyCANTCONNECTServer struct {
+	listener net.Listener
+	done     chan struct{}
+}
+
+func newEarlyCANTCONNECTServer() *earlyCANTCONNECTServer {
+	return &earlyCANTCONNECTServer{done: make(chan struct{})}
+}
+
+func (s *earlyCANTCONNECTServer) Start() (ip uint32, port uint16) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		panic("earlyCANTCONNECTServer: listen: " + err.Error())
+	}
+	s.listener = ln
+	go func() {
+		defer close(s.done)
+		conn, err := s.listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		s.handle(conn)
+	}()
+	addr := ln.Addr().(*net.TCPAddr)
+	return binary.BigEndian.Uint32(addr.IP.To4()), uint16(addr.Port)
+}
+
+func (s *earlyCANTCONNECTServer) Stop() {
+	_ = s.listener.Close()
+	<-s.done
+}
+
+func (s *earlyCANTCONNECTServer) handle(conn net.Conn) {
+	// Consume CLTOCS_WRITE init frame.
+	cmd, payload, err := ReadFrame(conn)
+	if err != nil || cmd != CltocsFuseWrite || len(payload) < 13 {
+		return
+	}
+	chunkID, _, _ := ReadUint64(payload, 1) // payload[0]=protocolid, [1:9]=chunkId
+
+	// Immediately send CSTOCL_WRITE_STATUS(CANTCONNECT) — no WRITE_DATA received.
+	var resp []byte
+	resp = PutUint64(resp, chunkID)
+	resp = PutUint32(resp, 0) // writeId = 0 (no WRITE_DATA received)
+	resp = PutUint8(resp, StatusCSCANTCONNECT)
+	_ = WriteFrame(conn, CstoclFuseWriteStatus, resp)
+	// Server closes after sending — simulates chain establishment failure.
+}
+
 // ─── Bad-CRC fake server ──────────────────────────────────────────────────────
 
 // badCRCServer listens on a random port and serves a single ReadChunk response
@@ -407,6 +463,81 @@ func TestWriteChunk_withChain(t *testing.T) {
 	// The fake CS read chunkId at payload[1:9] — verify data stored under correct key.
 	stored := cs.GetChunkData(chunkID)
 	assert.Equal(t, payload, stored, "stored chunk data must match written payload")
+}
+
+// TestWriteChunk_earlyCANTCONNECT verifies that WriteChunk detects an immediate
+// CSTOCL_WRITE_STATUS(CANTCONNECT) sent by the CS after CLTOCS_WRITE but before
+// any WRITE_DATA — the fast-failure path when a chain CS is unreachable.
+// The pre-flight read in WriteChunk must catch this early error.
+func TestWriteChunk_earlyCANTCONNECT(t *testing.T) {
+	srv := newEarlyCANTCONNECTServer()
+	ip, port := srv.Start()
+	defer srv.Stop()
+
+	conn, err := DialCS(ip, port)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	err = WriteChunk(conn, uint64(5005), 1, 0, []byte("chain-fail-test"), nil)
+	require.Error(t, err, "WriteChunk must return error when CS sends early CANTCONNECT")
+	assert.Contains(t, err.Error(), "CANTCONNECT",
+		"error must identify CANTCONNECT status")
+}
+
+// TestWriteChunk_chainEOF verifies that WriteChunk returns a diagnostic error
+// when the CS closes the connection (EOF) without sending WRITE_STATUS —
+// the behaviour observed with MooseFS 4.58.8 when the chain CS times out.
+func TestWriteChunk_chainEOF(t *testing.T) {
+	// Server that accepts CLTOCS_WRITE, sends 2 NOPs, then closes — simulating
+	// a chain-CS TCP timeout without a final WRITE_STATUS frame.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Consume CLTOCS_WRITE.
+		cmd, initPayload, err := ReadFrame(conn)
+		if err != nil || cmd != CltocsFuseWrite || len(initPayload) < 13 {
+			return
+		}
+
+		// Consume any WRITE_DATA and WRITE_FINISH frames (drain until error or FINISH).
+		for {
+			c, _, e := ReadFrame(conn)
+			if e != nil || c == CltocsFuseWriteEnd {
+				break
+			}
+		}
+
+		// Send 2 NOP keepalives (like MooseFS does while waiting for chain), then close
+		// WITHOUT sending WRITE_STATUS — the observed MooseFS 4.58.8 EOF behaviour.
+		_ = WriteFrame(conn, ANTOAN_NOP, nil)
+		_ = WriteFrame(conn, ANTOAN_NOP, nil)
+		// conn.Close() via defer — sends EOF to the client.
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	csIP := binary.BigEndian.Uint32(addr.IP.To4())
+	csPort := uint16(addr.Port)
+
+	conn, err := DialCS(csIP, csPort)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	err = WriteChunk(conn, uint64(6006), 1, 0, []byte("eof-chain-test"), nil)
+	require.Error(t, err, "WriteChunk must return error on CS EOF without WRITE_STATUS")
+	assert.Contains(t, err.Error(), "chain CS",
+		"error must mention chain CS connectivity as likely cause")
+
+	<-done
 }
 
 // TestWriteChunk_NOPskip verifies that WriteChunk silently ignores ANTOAN_NOP
