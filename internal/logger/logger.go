@@ -73,6 +73,7 @@ func SetExtraWriter(w io.Writer) {
 // setupLoggers (re-)creates the four level-prefixed loggers.
 // Must be called either before any goroutine starts (init) or with mu held.
 func setupLoggers() {
+	// Main writer: logFile + stderr (when debug or no file) + extraWriter.
 	var writers []io.Writer
 	if logFile != nil {
 		writers = append(writers, logFile)
@@ -83,22 +84,36 @@ func setupLoggers() {
 	if extraWriter != nil {
 		writers = append(writers, extraWriter)
 	}
+	w := buildWriter(writers)
 
-	var w io.Writer
-	switch len(writers) {
-	case 0:
-		w = io.Discard
-	case 1:
-		w = writers[0]
-	default:
-		w = io.MultiWriter(writers...)
+	// Debug writer: same as main when debugEnabled; otherwise extraWriter only
+	// so DEBUG messages always appear in the UI log page without polluting
+	// the log file or stderr.
+	var dw io.Writer
+	if debugEnabled {
+		dw = w
+	} else if extraWriter != nil {
+		dw = extraWriter
+	} else {
+		dw = io.Discard
 	}
 
 	flags := log.LstdFlags
-	infoLog = log.New(w, "[INFO]  ", flags)
-	debugLog = log.New(w, "[DEBUG] ", flags)
-	warnLog = log.New(w, "[WARN]  ", flags)
-	errLog = log.New(w, "[ERROR] ", flags)
+	infoLog  = log.New(w,  "[INFO]  ", flags)
+	debugLog = log.New(dw, "[DEBUG] ", flags)
+	warnLog  = log.New(w,  "[WARN]  ", flags)
+	errLog   = log.New(w,  "[ERROR] ", flags)
+}
+
+func buildWriter(writers []io.Writer) io.Writer {
+	switch len(writers) {
+	case 0:
+		return io.Discard
+	case 1:
+		return writers[0]
+	default:
+		return io.MultiWriter(writers...)
+	}
 }
 
 // rotate rotates the log file when it exceeds maxLogSize.
@@ -139,11 +154,10 @@ func Info(format string, args ...interface{}) {
 	infoLog.Printf(format, args...)
 }
 
-// Debug logs a message at DEBUG level. No-op unless GHOSTDRIVE_DEBUG=1.
+// Debug logs a message at DEBUG level.
+// Always visible in the UI log page (extraWriter); also written to logFile and
+// stderr when GHOSTDRIVE_DEBUG=1.
 func Debug(format string, args ...interface{}) {
-	if !debugEnabled {
-		return
-	}
 	mu.Lock()
 	defer mu.Unlock()
 	rotate()
