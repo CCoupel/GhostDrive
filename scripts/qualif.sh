@@ -4,9 +4,9 @@
 # Usage:
 #   bash scripts/qualif.sh [--platform windows/amd64|linux/amd64]
 #
-# Outputs to build/qualif/<version>/
-#   ghostdrive-v<version>-<platform>.exe      — main Wails app
-#   ghostdrive-<plugin>-v<version>-<platform>.exe — each plugin binary
+# Outputs to build/qualif/<version>/   (all files at the same level — required by the loader)
+#   ghostdrive-v<version>-<platform>.exe            — main Wails app
+#   ghostdrive-<plugin>-v<version>-<platform>.ghdp  — each plugin binary (.ghdp on all platforms)
 #
 # Requirements:
 #   - wails.exe (Windows side via WSL) or wails (native Linux)
@@ -27,8 +27,9 @@ VERSION=$(grep '"version"' config.json | head -1 | sed 's/.*"version": *"\([^"]*
 echo "▶ GhostDrive v${VERSION} — ${PLATFORM}"
 
 OUT="build/qualif/${VERSION}"
-PLUGINS_OUT="$OUT/plugins"
-mkdir -p "$OUT" "$PLUGINS_OUT"
+# Plugins sit next to the exe — the loader does filepath.Dir(appExe) + *.ghdp glob.
+# No subdirectory: using a plugins/ subdir would prevent runtime discovery.
+mkdir -p "$OUT"
 
 # ── Step 1 : Tests ────────────────────────────────────────────────────────────
 echo ""
@@ -70,7 +71,9 @@ for cmd_dir in plugins/*/cmd; do
     plugin_name=$(basename "$(dirname "$cmd_dir")")
     pkg=$(GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go list "./$cmd_dir/" 2>/dev/null) || continue
     [ -z "$pkg" ] && continue
-    PLUGIN_OUT="${PLUGINS_OUT}/ghostdrive-${plugin_name}-v${VERSION}-${SUFFIX}"
+    # Always use .ghdp extension — the loader globs *.ghdp regardless of platform.
+    PLUGIN_SUFFIX="${GOOS}-${GOARCH}.ghdp"
+    PLUGIN_OUT="${OUT}/ghostdrive-${plugin_name}-v${VERSION}-${PLUGIN_SUFFIX}"
     PKG_PATH="github.com/CCoupel/GhostDrive/plugins/${plugin_name}"
     GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 \
         go build -ldflags="-s -w -X '${PKG_PATH}.Version=${VERSION}'" -o "$PLUGIN_OUT" "./$cmd_dir/"
