@@ -41,6 +41,12 @@ type GhostFileSystem struct {
 	fuse.FileSystemBase
 	backends []MountedBackend
 
+	// host is the WinFsp FileSystemHost that owns this filesystem instance.
+	// Set once by WinFspDrive.Mount() immediately after fuse.NewFileSystemHost()
+	// and before host.Mount() starts FUSE dispatch — safe to read without a lock.
+	// Used to call host.Notify() after uploads so Explorer refreshes automatically.
+	host *fuse.FileSystemHost
+
 	mu            gosync.Mutex
 	fhSeq         atomic.Uint64
 	handles       map[uint64]*openEntry
@@ -389,6 +395,29 @@ func (fs *GhostFileSystem) Write(path string, buff []byte, ofst int64, fh uint64
 	return n
 }
 
+// notifyUpload sends WinFsp file-change notifications so Windows Explorer
+// refreshes the file's size and timestamp automatically after an upload,
+// without requiring a manual F5.
+//
+// NOTIFY_TRUNCATE signals that the file length has changed (maps to
+// FILE_NOTIFY_CHANGE_SIZE in the Windows ReadDirectoryChanges API).
+// NOTIFY_UTIME signals that the modification time has changed.
+// Together they cause Explorer to re-query Getattr and display the correct size.
+//
+// Non-fatal: if the WinFsp host is not available or Notify fails the upload
+// is still considered successful; the user can press F5 to refresh.
+func (fs *GhostFileSystem) notifyUpload(path string) {
+	if fs.host == nil {
+		return
+	}
+	ok := fs.host.Notify(path, fuse.NOTIFY_TRUNCATE|fuse.NOTIFY_UTIME)
+	if ok {
+		logger.Debug("placeholder: notifyUpload: Notify(%s) sent", path)
+	} else {
+		logger.Warn("placeholder: notifyUpload: Notify(%s) failed (WinFsp notify unavailable)", path)
+	}
+}
+
 func (fs *GhostFileSystem) Release(path string, fh uint64) int {
 	fs.mu.Lock()
 	entry, ok := fs.handles[fh]
@@ -445,6 +474,9 @@ func (fs *GhostFileSystem) Release(path string, fh uint64) int {
 				} else {
 					logger.Warn("placeholder: Release post-upload stat failed %s: %v", path, statErr)
 				}
+				// Notify WinFsp/Explorer that the file size changed so Explorer
+				// refreshes its view without requiring a manual F5 (issue #103).
+				fs.notifyUpload(path)
 			}
 		}
 		_ = os.Remove(entry.tempPath)
