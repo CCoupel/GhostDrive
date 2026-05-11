@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.16] — 2026-05-11
+
+### Fixed
+
+- MooseFS plugin : format `CLTOMA_FUSE_WRITE_CHUNK_END` corrigé — suppression du champ `version:32` spurieux qui décalait tous les champs suivants (le master recevait inode=1 et ne mettait jamais à jour la taille du fichier) ; ajout des champs `offset:32` et `size:32` conformément au source officiel MooseFS >= 4.40.0 (`fs_writeend`) (#101)
+
+---
+
 ## [1.5.15] — 2026-05-11
 
 ### Fixed
