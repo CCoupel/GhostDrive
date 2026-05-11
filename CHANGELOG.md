@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.15] — 2026-05-11
+
+### Fixed
+
+- MooseFS plugin : logs diagnostic `parseChunkInfo` — affiche `trailing=N proto=P nCS=N` avec `GHOSTDRIVE_DEBUG=1` pour confirmer la présence/absence du lockid dans les réponses WRITE_CHUNK (#101)
+- Placeholder : retry Stat jusqu'à 3× avec 100 ms de délai après upload si `size=0` — corrige l'affichage 0 octet dû à la propagation asynchrone des métadonnées MooseFS (#101)
+
+---
+
 ## [1.5.14] — 2026-05-10
 
 ### Fixed
