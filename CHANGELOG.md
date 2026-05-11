@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.17] — 2026-05-11
+
+### Fixed
+
+- Placeholder : notification automatique de Windows Explorer après upload — `fuse.FileSystemHost.Notify(NOTIFY_TRUNCATE|NOTIFY_UTIME)` déclenche un refresh de la taille sans F5 manuel (#103)
+
+---
+
 ## [1.5.16] — 2026-05-11
 
 ### Fixed
