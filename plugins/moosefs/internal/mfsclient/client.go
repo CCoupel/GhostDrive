@@ -710,32 +710,43 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	logger.Debug("[mfsclient] Write: sending WRITE_CHUNK_END lockid=%d", info.LockID)
-	// CLTOMA_FUSE_WRITE_CHUNK_END (436) — MooseFS >= 3.0.74 payload (37 bytes):
-	//   [msgid:32][chunkid:64][version:32][inode:32][chunkindx:32][length:64][chunkopflags:8][lockid:32]
-	// chunkindx: chunk index within the file (= offset / ChunkSize, same as used in WRITE_CHUNK).
-	// chunkopflags: operation flags (0 = no special flags).
-	// lockid: token returned by the master in WRITE_CHUNK (435); must be echoed verbatim.
-	endReq := PutUint32(nil, 0)          // msgid
-	endReq = PutUint64(endReq, info.ChunkID)
-	endReq = PutUint32(endReq, info.Version)
-	endReq = PutUint32(endReq, nodeID)   // inode
-	endReq = PutUint32(endReq, index)    // chunkindx — chunk index within file
-	endReq = PutUint64(endReq, newLength) // total file length after write
-	endReq = PutUint8(endReq, 0)         // chunkopflags = 0
-	endReq = PutUint32(endReq, info.LockID) // lockid — echo master's token
+	logger.Debug("[mfsclient] Write: sending WRITE_CHUNK_END newLength=%d chunkOffset=%d dataLen=%d",
+		newLength, chunkOffset, len(data))
+	// CLTOMA_FUSE_WRITE_CHUNK_END (436) — format depends on master version:
+	//
+	//   >= 3.0.74 (29 bytes):
+	//     [msgid:32][chunkid:64][inode:32][chunkindx:32][length:64][chunkopflags:8]
+	//   >= 4.40.0 (37 bytes, extended):
+	//     [msgid:32][chunkid:64][inode:32][chunkindx:32][length:64][chunkopflags:8][offset:32][size:32]
+	//
+	// We declare ourselves as mfsClientVersion 4.58.4 (>= 4.40.0), so the master
+	// expects the extended 37-byte format.
+	//
+	// length  : new total file size after this write (NOT chunk size).
+	// offset  : byte offset within the chunk where the write started.
+	// size    : number of bytes written in this chunk.
+	// NO version field. NO lockid field.
+	endReq := PutUint32(nil, 0)               // msgid
+	endReq = PutUint64(endReq, info.ChunkID)  // chunkid:64
+	endReq = PutUint32(endReq, nodeID)         // inode:32
+	endReq = PutUint32(endReq, index)          // chunkindx:32 — chunk index within file
+	endReq = PutUint64(endReq, newLength)      // length:64 — new total file size
+	endReq = PutUint8(endReq, 0)              // chunkopflags:8 = 0
+	endReq = PutUint32(endReq, chunkOffset)   // offset:32 — write start within chunk (>= 4.40.0)
+	endReq = PutUint32(endReq, uint32(len(data))) // size:32 — bytes written (>= 4.40.0)
 
 	endAns, err := c.roundtrip(CltomFuseWriteChunkEnd, MatoclFuseWriteChunkEnd, endReq)
 	if err != nil {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END: %w", nodeID, offset, err)
 	}
+	logger.Debug("[mfsclient] Write: WRITE_CHUNK_END resp len=%d bytes=%x", len(endAns), endAns)
 	if len(endAns) < 5 {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END response too short (%d)", nodeID, offset, len(endAns))
 	}
 	if endAns[4] != StatusOK {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END status 0x%02x", nodeID, offset, endAns[4])
 	}
-	logger.Debug("[mfsclient] Write: WRITE_CHUNK_END acked")
+	logger.Debug("[mfsclient] Write: WRITE_CHUNK_END acked status=OK")
 	return nil
 }
 

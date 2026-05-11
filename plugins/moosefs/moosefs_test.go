@@ -810,18 +810,25 @@ func (s *integFakeServer) svrWriteChunk(conn net.Conn, payload []byte) {
 // svrWriteChunkEnd handles CLTOMA_FUSE_WRITE_CHUNK_END (436).
 // Copies CS data back into node.content and updates the node's size.
 //
-// MooseFS >= 3.0.74 request payload: [msgid:32][chunkid:64][version:32][inode:32][chunkindx:32][length:64][chunkopflags:8][lockid:32] = 37 bytes.
+// MooseFS >= 3.0.74 payload:
+//
+//	[msgid:32][chunkid:64][inode:32][chunkindx:32][length:64][chunkopflags:8] = 29 bytes
+//
+// MooseFS >= 4.40.0 (extended):
+//
+//	[msgid:32][chunkid:64][inode:32][chunkindx:32][length:64][chunkopflags:8][offset:32][size:32] = 37 bytes
+//
+// No version field. No lockid field.
 func (s *integFakeServer) svrWriteChunkEnd(conn net.Conn, payload []byte) {
-	if len(payload) < 37 {
+	if len(payload) < 29 { // minimum without 4.40.0 extension
 		return
 	}
 	msgid, off, _ := mfsclient.ReadUint32(payload, 0)
 	chunkID, off, _ := mfsclient.ReadUint64(payload, off)
-	_, off, _ = mfsclient.ReadUint32(payload, off)       // version (skip)
 	_, off, _ = mfsclient.ReadUint32(payload, off)       // inode (skip — already known via chunkID)
 	_, off, _ = mfsclient.ReadUint32(payload, off)       // chunkindx (skip)
 	length, _, _ := mfsclient.ReadUint64(payload, off)   // new total file length
-	// chunkopflags:8 then lockid:32 follow (skip — unused by fake server)
+	// chunkopflags:8 [offset:32 size:32] follow (skip — unused by fake server)
 
 	nodeID := uint32(chunkID) // reverse of fake mapping
 
