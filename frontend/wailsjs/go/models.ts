@@ -21,7 +21,6 @@ export namespace app {
 	export class PluginBuildInfo {
 	    name: string;
 	    version: string;
-	    commit: string;
 	    path: string;
 	
 	    static createFrom(source: any = {}) {
@@ -32,7 +31,6 @@ export namespace app {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
 	        this.version = source["version"];
-	        this.commit = source["commit"];
 	        this.path = source["path"];
 	    }
 	}
@@ -251,6 +249,7 @@ export namespace plugins {
 	    type: string;
 	    displayName: string;
 	    description: string;
+	    version: string;
 	    params: ParamSpec[];
 	
 	    static createFrom(source: any = {}) {
@@ -262,6 +261,7 @@ export namespace plugins {
 	        this.type = source["type"];
 	        this.displayName = source["displayName"];
 	        this.description = source["description"];
+	        this.version = source["version"];
 	        this.params = this.convertValues(source["params"], ParamSpec);
 	    }
 	
