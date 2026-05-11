@@ -17,8 +17,18 @@ import (
 	"net"
 	"sync"
 
+	"github.com/CCoupel/GhostDrive/internal/logger"
 	"github.com/CCoupel/GhostDrive/plugins"
 )
+
+// mfsClientVersion is the MooseFS client version we declare during REGISTER.
+// Encoding: VERSION2INT(maj, mid, min) = (maj<<16) | (mid<<8) | (min*2) when maj>1.
+// The *2 multiplier on the patch component is required by the official MooseFS
+// VERSION2INT macro; omitting it produces an off-by-one version that the master
+// logs as 4.58.2 instead of 4.58.4.
+// Must be >= the server's minimum supported client version.
+// Keep in sync with the master version deployed on the cluster.
+const mfsClientVersion = (4 << 16) | (58 << 8) | (4 * 2) // VERSION2INT(4,58,4) = 277000
 
 // Client is a synchronous MooseFS TCP client.
 // All methods are safe to call from multiple goroutines; they are protected
@@ -147,10 +157,9 @@ func (c *Client) Register() error {
 	req = append(req, []byte(FuseRegisterBlobACL)...) // 64 bytes blob
 	req = PutUint8(req, RegisterNewSession)            // rcode = 2
 
-	// Version: 4.56.0 = (4<<16)|(56<<8)|0 = 276480.
-	// Must be >= the server's minimum supported client version.
-	// MooseFS 4.x masters reject older clients (e.g. 4.4.0 = 263168) with EPERM.
-	req = PutUint32(req, 276480)
+	// Declare our client version — see mfsClientVersion constant above.
+	// MooseFS 4.x masters reject older clients with EPERM.
+	req = PutUint32(req, mfsClientVersion)
 
 	// ileng=0 (empty instance name — accepted by all MooseFS 4.x masters).
 	req = PutUint32(req, 0)
@@ -640,10 +649,13 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
+		// CLTOMA_FUSE_WRITE_CHUNK (434) — MooseFS 4.x (>= 3.0.4) payload:
+		//   [msgid:32][inode:32][chunkindx:32][chunkopflags:8]  = 13 bytes
+		// chunkopflags: 0x01=CANMODTIME 0x02=CONTINUEOP 0x04=CANUSERESERVESPACE
 		req := PutUint32(nil, 0) // msgid
 		req = PutUint32(req, nodeID)
 		req = PutUint32(req, index)
-		req = PutUint32(req, 0) // lockid
+		req = PutUint8(req, 0) // chunkopflags = 0
 
 		ans, err := c.roundtrip(CltomFuseWriteChunk, MatoclFuseWriteChunk, req)
 		if err != nil {
@@ -655,11 +667,17 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 		}
 		info, err := parseChunkInfo(ans)
 		if err != nil {
-			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): parse chunk info: %w", nodeID, offset, err)
+			limit := len(ans)
+			if limit > 64 {
+				limit = 64
+			}
+			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): parse chunk info: %w [raw %d bytes: % x]",
+				nodeID, offset, err, len(ans), ans[:limit])
 		}
 		if len(info.Servers) == 0 {
 			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): no chunk servers available", nodeID, offset)
 		}
+		logger.Debug("[mfsclient] Write: chunk %d — %d servers found: %v lockid=%d", index, len(info.Servers), info.Servers, info.LockID)
 		return info, nil
 	}()
 	if err != nil {
@@ -668,13 +686,22 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 
 	// Phase 2: I/O chunk server hors mutex — c.conn n'est pas utilisé ici.
 	srv := info.Servers[0]
+	csIP := net.IP([]byte{byte(srv.IP >> 24), byte(srv.IP >> 16), byte(srv.IP >> 8), byte(srv.IP)})
+	logger.Debug("[mfsclient] Write: dialing CS %s:%d", csIP, srv.Port)
 	cs, err := DialCS(srv.IP, srv.Port)
 	if err != nil {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): dial CS: %w", nodeID, offset, err)
 	}
+	logger.Debug("[mfsclient] Write: CS %s:%d connected", csIP, srv.Port)
 	defer cs.Close()
 
-	if err := WriteChunk(cs, info.ChunkID, info.Version, chunkOffset, data); err != nil {
+	// Pass nil chain: write to CS1 only. The MooseFS master handles async
+	// replication to other CSes after WRITE_CHUNK_END is committed.
+	// Passing Servers[1:] as a chain causes CS1 to synchronously forward data
+	// to CS2..CSN before returning the write-init ACK; when a chain CS is
+	// unreachable this produces a ~5 s TCP timeout followed by CANTCONNECT or EOF,
+	// blocking the entire write. Nil chain is a valid mode for FUSE clients.
+	if err := WriteChunk(cs, info.ChunkID, info.Version, chunkOffset, data, nil); err != nil {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): write chunk: %w", nodeID, offset, err)
 	}
 
@@ -683,22 +710,43 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	endReq := PutUint32(nil, 0) // msgid
-	endReq = PutUint64(endReq, info.ChunkID)
-	endReq = PutUint32(endReq, info.Version)
-	endReq = PutUint64(endReq, newLength)
-	endReq = PutUint32(endReq, 0) // lockid
+	logger.Debug("[mfsclient] Write: sending WRITE_CHUNK_END newLength=%d chunkOffset=%d dataLen=%d",
+		newLength, chunkOffset, len(data))
+	// CLTOMA_FUSE_WRITE_CHUNK_END (436) — format depends on master version:
+	//
+	//   >= 3.0.74 (29 bytes):
+	//     [msgid:32][chunkid:64][inode:32][chunkindx:32][length:64][chunkopflags:8]
+	//   >= 4.40.0 (37 bytes, extended):
+	//     [msgid:32][chunkid:64][inode:32][chunkindx:32][length:64][chunkopflags:8][offset:32][size:32]
+	//
+	// We declare ourselves as mfsClientVersion 4.58.4 (>= 4.40.0), so the master
+	// expects the extended 37-byte format.
+	//
+	// length  : new total file size after this write (NOT chunk size).
+	// offset  : byte offset within the chunk where the write started.
+	// size    : number of bytes written in this chunk.
+	// NO version field. NO lockid field.
+	endReq := PutUint32(nil, 0)               // msgid
+	endReq = PutUint64(endReq, info.ChunkID)  // chunkid:64
+	endReq = PutUint32(endReq, nodeID)         // inode:32
+	endReq = PutUint32(endReq, index)          // chunkindx:32 — chunk index within file
+	endReq = PutUint64(endReq, newLength)      // length:64 — new total file size
+	endReq = PutUint8(endReq, 0)              // chunkopflags:8 = 0
+	endReq = PutUint32(endReq, chunkOffset)   // offset:32 — write start within chunk (>= 4.40.0)
+	endReq = PutUint32(endReq, uint32(len(data))) // size:32 — bytes written (>= 4.40.0)
 
 	endAns, err := c.roundtrip(CltomFuseWriteChunkEnd, MatoclFuseWriteChunkEnd, endReq)
 	if err != nil {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END: %w", nodeID, offset, err)
 	}
+	logger.Debug("[mfsclient] Write: WRITE_CHUNK_END resp len=%d bytes=%x", len(endAns), endAns)
 	if len(endAns) < 5 {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END response too short (%d)", nodeID, offset, len(endAns))
 	}
 	if endAns[4] != StatusOK {
 		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END status 0x%02x", nodeID, offset, endAns[4])
 	}
+	logger.Debug("[mfsclient] Write: WRITE_CHUNK_END acked status=OK")
 	return nil
 }
 
@@ -773,62 +821,147 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 
 // ─── Internal: chunk info parsing ────────────────────────────────────────────
 
-// parseChunkInfo decodes the common master response format for READ_CHUNK and
-// WRITE_CHUNK answers:
+// parseChunkInfo decodes the master response for READ_CHUNK (433) and
+// WRITE_CHUNK (435). Three protocol variants are supported, detected from the
+// byte at offset 4 (immediately after msgid):
 //
-//	[msgid:32][chunkID:64][version:32][N:8][N × (ip:32 + port:16 + version:32)]
+//	Proto 2 (MooseFS >= 3.0.10, incl. all 4.x) — protocolid byte = 2:
+//	  [msgid:32][protocolid:8=2][length:64][chunkid:64][version:32]
+//	  N × [ip:32 port:16 cs_ver:32 labelmask:32]  (14 bytes/entry, N implicit)
+//	  [lockid:32]  (optional trailing field — present when server uses chunk locking)
+//
+//	Proto 1 (MooseFS >= 1.7.32, < 3.0.10) — protocolid byte = 1:
+//	  [msgid:32][protocolid:8=1][length:64][chunkid:64][version:32]
+//	  N × [ip:32 port:16 cs_ver:32]  (10 bytes/entry, N implicit)
+//	  [lockid:32]  (optional trailing field)
+//
+//	Proto 0 (MooseFS < 1.7.32) — no protocolid byte:
+//	  [msgid:32][length:64][chunkid:64][version:32]
+//	  N × [ip:32 port:16]  (6 bytes/entry, N implicit)
+//
+// N is never transmitted explicitly; it is derived from the remaining payload
+// bytes divided by the per-entry size.  Any trailing 4 bytes that do not form
+// a complete CS entry are interpreted as a lockid token that must be echoed
+// back in the WRITE_CHUNK_END request.
 func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
-	const minLen = 4 + 8 + 4 + 1 // msgid + chunkID + version + N
-	if len(ans) < minLen {
-		return nil, fmt.Errorf("response too short (%d bytes, need ≥%d)", len(ans), minLen)
+	if len(ans) < 5 {
+		return nil, fmt.Errorf("response too short (%d bytes)", len(ans))
 	}
 
 	off := 4 // skip msgid
 
-	chunkID, newOff, err := ReadUint64(ans, off)
-	if err != nil {
-		return nil, fmt.Errorf("chunkID: %w", err)
-	}
-	off = newOff
+	// Detect protocol version from the byte immediately following msgid.
+	// Proto 1/2: this byte is explicitly protocolid (1 or 2).
+	// Proto 0: this byte is the MSB of the file length (always 0 for files < 72 PiB).
+	protocolID := ans[off]
 
-	version, newOff, err := ReadUint32(ans, off)
-	if err != nil {
-		return nil, fmt.Errorf("version: %w", err)
-	}
-	off = newOff
+	var (
+		err       error
+		chunkID   uint64
+		version   uint32
+		entrySize int
+	)
 
-	n, newOff, err := ReadUint8(ans, off)
-	if err != nil {
-		return nil, fmt.Errorf("server count: %w", err)
+	switch protocolID {
+	case 1, 2:
+		// Proto 1/2: consume protocolid, then [length:64][chunkid:64][version:32].
+		off++ // consume protocolid byte
+		_, off, err = ReadUint64(ans, off) // file length — not needed in ChunkInfo
+		if err != nil {
+			return nil, fmt.Errorf("length: %w", err)
+		}
+		chunkID, off, err = ReadUint64(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("chunkID: %w", err)
+		}
+		version, off, err = ReadUint32(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("version: %w", err)
+		}
+		switch protocolID {
+		case 1:
+			entrySize = 10 // ip:32 + port:16 + cs_ver:32
+		case 2:
+			entrySize = 14 // ip:32 + port:16 + cs_ver:32 + labelmask:32
+		}
+
+	case 0:
+		// Proto 0: no protocolid byte; off is still at 4 (start of [length:64]).
+		// The byte at offset 4 is the MSB of the 64-bit file length (always 0
+		// for files < 72 PiB), not a separate protocol identifier.
+		_, off, err = ReadUint64(ans, off) // file length
+		if err != nil {
+			return nil, fmt.Errorf("length (proto0): %w", err)
+		}
+		chunkID, off, err = ReadUint64(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("chunkID (proto0): %w", err)
+		}
+		version, off, err = ReadUint32(ans, off)
+		if err != nil {
+			return nil, fmt.Errorf("version (proto0): %w", err)
+		}
+		entrySize = 6 // ip:32 + port:16 (no cs_ver in proto 0)
+
+	default:
+		// Unknown protocolid — likely a newer MooseFS protocol version (>= proto 3)
+		// that GhostDrive does not yet support.  Falling back to proto 0 would
+		// silently misparse the response and produce incorrect chunk server lists.
+		// Return an explicit error so the caller can surface a diagnostic.
+		limit := len(ans)
+		if limit > 32 {
+			limit = 32
+		}
+		logger.Warn("mfsclient: parseChunkInfo: unknown protocolid=%d — MooseFS may have introduced a new chunk-info format. Raw (first %d bytes): %x", protocolID, limit, ans[:limit])
+		return nil, fmt.Errorf("parseChunkInfo: unknown protocolid %d (raw: %x) — upgrade GhostDrive or report this to the project", protocolID, ans[:limit])
 	}
-	off = newOff
+
+	remaining := len(ans) - off
+	n := 0
+	if entrySize > 0 && remaining > 0 {
+		n = remaining / entrySize
+	}
 
 	info := &ChunkInfo{
 		ChunkID: chunkID,
 		Version: version,
 		Servers: make([]ChunkServer, 0, n),
 	}
-	for i := 0; i < int(n); i++ {
+
+	for i := 0; i < n; i++ {
 		var srv ChunkServer
-		srv.IP, newOff, err = ReadUint32(ans, off)
+		srv.IP, off, err = ReadUint32(ans, off)
 		if err != nil {
 			return nil, fmt.Errorf("server[%d] IP: %w", i, err)
 		}
-		off = newOff
-
-		srv.Port, newOff, err = ReadUint16(ans, off)
+		srv.Port, off, err = ReadUint16(ans, off)
 		if err != nil {
 			return nil, fmt.Errorf("server[%d] port: %w", i, err)
 		}
-		off = newOff
-
-		srv.Version, newOff, err = ReadUint32(ans, off)
-		if err != nil {
-			return nil, fmt.Errorf("server[%d] version: %w", i, err)
+		if entrySize >= 10 { // proto 1 or 2: cs_ver field present
+			srv.Version, off, err = ReadUint32(ans, off)
+			if err != nil {
+				return nil, fmt.Errorf("server[%d] cs_ver: %w", i, err)
+			}
 		}
-		off = newOff
-
+		if entrySize == 14 { // proto 2 only: labelmask field present
+			_, off, err = ReadUint32(ans, off) // labelmask — not used by GhostDrive
+			if err != nil {
+				return nil, fmt.Errorf("server[%d] labelmask: %w", i, err)
+			}
+		}
 		info.Servers = append(info.Servers, srv)
 	}
+
+	// MooseFS 4.x may append a lockid:32 token after the CS entries.
+	// Any trailing 4 bytes that don't form a complete CS entry are the lockid;
+	// it must be echoed verbatim in the subsequent WRITE_CHUNK_END request.
+	// Diagnostic: trailing=4 → lockid present; trailing=0 → omitted by master.
+	logger.Debug("mfsclient: parseChunkInfo: len=%d off=%d trailing=%d proto=%d nCS=%d",
+		len(ans), off, len(ans)-off, protocolID, len(info.Servers))
+	if len(ans)-off == 4 {
+		info.LockID, _, _ = ReadUint32(ans, off)
+	}
+
 	return info, nil
 }

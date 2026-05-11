@@ -5,6 +5,115 @@ All notable changes to GhostDrive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+---
+
+## [1.5.17] — 2026-05-11
+
+### Fixed
+
+- Placeholder : notification automatique de Windows Explorer après upload — `fuse.FileSystemHost.Notify(NOTIFY_TRUNCATE|NOTIFY_UTIME)` déclenche un refresh de la taille sans F5 manuel (#103)
+
+---
+
+## [1.5.16] — 2026-05-11
+
+### Fixed
+
+- MooseFS plugin : format `CLTOMA_FUSE_WRITE_CHUNK_END` corrigé — suppression du champ `version:32` spurieux qui décalait tous les champs suivants (le master recevait inode=1 et ne mettait jamais à jour la taille du fichier) ; ajout des champs `offset:32` et `size:32` conformément au source officiel MooseFS >= 4.40.0 (`fs_writeend`) (#101)
+
+---
+
+## [1.5.15] — 2026-05-11
+
+### Fixed
+
+- MooseFS plugin : logs diagnostic `parseChunkInfo` — affiche `trailing=N proto=P nCS=N` avec `GHOSTDRIVE_DEBUG=1` pour confirmer la présence/absence du lockid dans les réponses WRITE_CHUNK (#101)
+- Placeholder : retry Stat jusqu'à 3× avec 100 ms de délai après upload si `size=0` — corrige l'affichage 0 octet dû à la propagation asynchrone des métadonnées MooseFS (#101)
+
+---
+
+## [1.5.14] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : écriture directe sur CS1 sans chain replication client-side — le master MooseFS gère la réplication asynchrone ; élimine les timeouts EOF quand le CS de réplication est injoignable (#101)
+
+---
+
+## [1.5.13] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : lecture obligatoire de l'ACK WRITE_STATUS(writeid=0) après CLTOCS_WRITE — le CS confirme que la chaîne de réplication est établie avant d'accepter les WRITE_DATA ; CANTCONNECT détecté proprement à cette étape (#101)
+- MooseFS plugin : version client corrigée — VERSION2INT(4,58,4)=277000 (formule min×2), le master voyait incorrectement le client en v4.58.2 (#101)
+
+---
+
+## [1.5.12] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : lecture preflight non-bloquante après CLTOCS_WRITE — détecte les CANTCONNECT immédiats du chain CS avant d'envoyer les WRITE_DATA ; limite à 10 NOPs max ; message d'erreur explicite si le CS ferme sans envoyer WRITE_STATUS (#101)
+
+---
+
+## [1.5.11] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : reconnexions concurrentes au master sérialisées (singleflight mutex) — une seule session TCP créée lors d'une reconnexion, même avec N goroutines concurrentes (#101)
+
+---
+
+## [1.5.10] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : WRITE_CHUNK_END format corrigé (37B) — ajout des champs `chunkindx:32` et `chunkopflags:8` conformément au protocole MooseFS >= 3.0.74 (#101)
+- MooseFS plugin : ignore les trames NOP (cmd=0) dans la lecture de WRITE_STATUS — évite l'erreur "expected WRITE_STATUS got 0" sur les CS qui envoient des keepalives (#101)
+
+---
+
+## [1.5.9] — 2026-05-10
+
+### Fixed
+
+- MooseFS plugin : ajout du byte `protocolid:8=1` en premier octet de `CLTOCS_WRITE` (opcode 210) — corrige CANTCONNECT (0x1a) sur MooseFS 4.x quand chunkId MSB ≠ 0 (#101)
+- MooseFS plugin : encodage de la chaîne CS (CS2..CSN) dans `CLTOCS_WRITE` — corrige la réplication multi-CS (#101)
+- MooseFS plugin : opcode `CSTOCL_WRITE_STATUS` corrigé 213→211 pour MooseFS 4.x, fallback 213 pour ≤3.x (#101)
+- MooseFS plugin : opcodes `CLTOCS_WRITE_DATA` (211→212) et `CLTOCS_WRITE_FINISH` (212→213) corrigés (#101)
+- MooseFS plugin : ajout du champ `writeId:32` dans les frames `CLTOCS_WRITE_DATA` (#101)
+- MooseFS plugin : logs plugin subprocess toujours visibles (GHOSTDRIVE_DEBUG=1 forcé dans le subprocess) (#101)
+
+---
+
+## [1.5.8] — 2026-05-10
+
+### Fixed
+
+- **#101** — MooseFS 4.x : corrige les opcodes CLTOCS_WRITE_DATA (211→212) et CLTOCS_WRITE_FINISH (212→213) — les mauvais opcodes amenaient le CS à rejeter les écritures avec MFS_ERROR_CANTCONNECT (0x1a)
+- **#101** — MooseFS 4.x : ajoute le champ writeId:32 manquant dans les frames CLTOCS_WRITE_DATA requis par MooseFS 4.x
+
+### Changed
+
+- Suppression des logs DEBUG Getattr (ENTER/OK) trop verbeux — seuls les cas d'erreur (ENOENT/EIO) sont conservés
+
+---
+
+## [1.5.7] — 2026-05-10
+
+### Fixed
+
+- **#101** — MooseFS 4.x : corrige l'opcode CSTOCL_WRITE_STATUS (213→211) — WriteChunk accepte désormais l'opcode 211 (MooseFS 4.x) avec fallback 213 (≤3.x)
+- **#101** — Copie de fichier vers MooseFS restait à 0 octet — 3 bugs protocole MooseFS 4.x corrigés : format WRITE_CHUNK request (16B→13B, chunkopflags), parsing réponse WRITE_CHUNK (proto 0/1/2), champ inode manquant dans WRITE_CHUNK_END
+- **#101** — Dirty flag WinFsp : la phase Create (0 octet) ne déclenche plus d'upload, seul le Release après Write réel upload le fichier
+- **#101** — Logs DEBUG toujours visibles dans l'UI (routés vers le store in-process indépendamment de GHOSTDRIVE_DEBUG)
+- **#101** — Version client MooseFS déclarée : bump 4.56.0 → 4.58.4 pour correspondre au master ; erreur explicite + hexdump WARN sur protocolID inconnu dans parseChunkInfo
+
+---
+
 ## [1.5.2] — 2026-05-09
 
 ### Fixed

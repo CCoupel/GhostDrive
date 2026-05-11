@@ -94,18 +94,93 @@ const (
 // above and must NOT be sent to the master server.
 
 const (
-	CltocsFuseRead        uint32 = 200
-	CstoclFuseReadStatus  uint32 = 201
-	CstoclFuseReadData    uint32 = 202
-	CltocsFuseWrite       uint32 = 210
-	CltocsFuseWriteData   uint32 = 211
-	CltocsFuseWriteEnd    uint32 = 212
-	CstoclFuseWriteStatus uint32 = 213
+	CltocsFuseRead       uint32 = 200
+	CstoclFuseReadStatus uint32 = 201
+	CstoclFuseReadData   uint32 = 202
+
+	// Write-path opcodes per MooseFS protocol (MFSCommunication.h):
+	//
+	//   210 CLTOCS_WRITE       client→CS  [chunkId:64][version:32][N*(ip:32+port:16)]
+	//   211 CSTOCL_WRITE_STATUS  CS→client  [chunkId:64][writeId:32][status:8]
+	//   212 CLTOCS_WRITE_DATA  client→CS  [chunkId:64][writeId:32][blockNum:16][offset:16][size:32][crc:32][data]
+	//   213 CLTOCS_WRITE_FINISH client→CS [chunkId:64][version:32]
+	//
+	// Opcode 211 is shared between CSTOCL_WRITE_STATUS (CS→client direction) and is
+	// unambiguous because the directions are opposite.
+	// Confirmed against MooseFS 4.58.4.
+	CltocsFuseWrite        uint32 = 210
+	CstoclFuseWriteStatus  uint32 = 211 // CS→client write status (confirmed 4.58.4)
+	CltocsFuseWriteData    uint32 = 212 // client→CS write data (includes writeId:32)
+	CltocsFuseWriteEnd     uint32 = 213 // client→CS write finish (= CLTOCS_WRITE_FINISH)
+
+	// CstoclFuseWriteStatusLegacy was a historically incorrect value used by older
+	// GhostDrive builds that confused CSTOCL_WRITE_STATUS with CLTOCS_WRITE_FINISH.
+	// It is no longer accepted as a valid write-status opcode.
+	// Kept as a named constant only to document the prior bug.
+	//
+	// Deprecated: do not use in new code.
+	CstoclFuseWriteStatusLegacy uint32 = 211 // same as CstoclFuseWriteStatus (was erroneously 213)
 )
 
 // ChunkSize is the MooseFS chunk size (64 MiB).
 // All chunk index calculations use this constant: index = fileOffset / ChunkSize.
 const ChunkSize uint64 = 64 * 1024 * 1024
+
+// ─── Chunk-server status codes ───────────────────────────────────────────────
+//
+// These codes appear in CSTOCL_WRITE_STATUS and CSTOCL_READ_STATUS payloads.
+// They are a superset of the master status codes (same base table, MFSCommunication.h).
+// Values below are the MFS_ERROR_* constants confirmed from MooseFS 4.x source.
+
+const (
+	// StatusCSWRONGOFFSET is returned when the write offset falls outside the chunk.
+	StatusCSWRONGOFFSET uint8 = 25 // MFS_ERROR_WRONGOFFSET (0x19)
+
+	// StatusCSCANTCONNECT is returned when the chunk server cannot connect to the
+	// next server in the write chain.  Also observed when the write protocol is
+	// malformed (e.g., wrong opcodes or missing fields in WRITE_DATA frames).
+	StatusCSCANTCONNECT uint8 = 26 // MFS_ERROR_CANTCONNECT (0x1a)
+
+	// StatusCSWRONGCHUNKID is returned when the chunkId does not match any known chunk.
+	StatusCSWRONGCHUNKID uint8 = 27 // MFS_ERROR_WRONGCHUNKID (0x1b)
+
+	// StatusCSDISCONNECTED is returned when the chunk server lost a chain connection.
+	StatusCSDISCONNECTED uint8 = 28 // MFS_ERROR_DISCONNECTED (0x1c)
+
+	// StatusCSCRC is returned on CRC-32 mismatch in a WRITE_DATA or READ_DATA frame.
+	StatusCSCRC uint8 = 29 // MFS_ERROR_CRC (0x1d)
+)
+
+// CSStatusName returns a human-readable name for a chunk-server status code.
+// Used to improve diagnostic error messages.
+func CSStatusName(s uint8) string {
+	switch s {
+	case StatusOK:
+		return "OK"
+	case StatusENOENT:
+		return "ENOENT"
+	case StatusEACCES:
+		return "EACCES"
+	case StatusEEXIST:
+		return "EEXIST"
+	case StatusENOTEMPTY:
+		return "ENOTEMPTY"
+	case StatusCSWRONGOFFSET:
+		return "WRONGOFFSET"
+	case StatusCSCANTCONNECT:
+		return "CANTCONNECT"
+	case StatusCSWRONGCHUNKID:
+		return "WRONGCHUNKID"
+	case StatusCSDISCONNECTED:
+		return "DISCONNECTED"
+	case StatusCSCRC:
+		return "CRC"
+	case StatusERROR:
+		return "ERROR"
+	default:
+		return "UNKNOWN"
+	}
+}
 
 // ─── Stub opcodes (test-only, Phase 1) ───────────────────────────────────────
 //
@@ -179,6 +254,7 @@ type ChunkInfo struct {
 	ChunkID  uint64
 	Version  uint32
 	Servers  []ChunkServer
+	LockID   uint32 // lock token from WRITE_CHUNK response; must be echoed in WRITE_CHUNK_END
 }
 
 // ─── Frame I/O helpers ────────────────────────────────────────────────────────

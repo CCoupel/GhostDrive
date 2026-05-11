@@ -114,6 +114,10 @@ func (d *WinFspDrive) Mount(mountPoint string, backends []MountedBackend) error 
 
 	fs := newGhostFileSystem(backends)
 	host := fuse.NewFileSystemHost(fs)
+	// Give the filesystem a back-reference to its host so Release() can call
+	// host.Notify() after uploads (issue #103 — Explorer auto-refresh).
+	// Safe: written once here before host.Mount() starts FUSE dispatch.
+	fs.host = host
 
 	d.host = host
 	d.mountPoint = mountPoint

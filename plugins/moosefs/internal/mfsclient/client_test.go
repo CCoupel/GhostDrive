@@ -568,8 +568,11 @@ func (s *fakeMFSServer) handleRead(conn net.Conn, payload []byte) {
 
 // handleReadChunk handles CLTOMA_FUSE_READ_CHUNK (432).
 //
-// Payload: [msgid:32][nodeID:32][index:32]
-// Response: [msgid:32][chunkID:64][version:32][N:8=1][ip:32][port:16][csVersion:32]
+// Payload: [msgid:32][nodeID:32][index:32] (chunkopflags:8 optional, accepted if present)
+// Response proto 2:
+//
+//	[msgid:32][protocolid:8=2][length:64][chunkID:64][version:32]
+//	1×[ip:32 port:16 cs_ver:32 labelmask:32]
 //
 // Before responding, the handler pre-loads the node's content into the
 // embedded fakeCSServer so that the subsequent ReadChunk call against the CS
@@ -594,30 +597,42 @@ func (s *fakeMFSServer) handleReadChunk(conn net.Conn, payload []byte) {
 		return
 	}
 
+	// Build proto 2 response: protocolid=2, file length, chunkid, version, 1 server.
+	fileLen := uint64(0)
+	if n != nil {
+		fileLen = uint64(len(n.content))
+	}
 	var resp []byte
 	resp = PutUint32(resp, msgid)
-	resp = PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
-	resp = PutUint32(resp, 1)              // chunk version
-	resp = PutUint8(resp, 1)              // N = 1 server
+	resp = PutUint8(resp, 2)               // protocolid = 2
+	resp = PutUint64(resp, fileLen)         // current file length
+	resp = PutUint64(resp, uint64(nodeID))  // chunkID = nodeID (fake mapping)
+	resp = PutUint32(resp, 1)               // chunk version
 	resp = PutUint32(resp, s.csIP)
 	resp = PutUint16(resp, s.csPort)
-	resp = PutUint32(resp, 0) // CS version (unused in fake)
+	resp = PutUint32(resp, 0) // cs_ver (unused in fake)
+	resp = PutUint32(resp, 0) // labelmask (unused in fake)
 	_ = WriteFrame(conn, MatoclFuseReadChunk, resp)
 }
 
 // handleWriteChunk handles CLTOMA_FUSE_WRITE_CHUNK (434).
 //
-// Payload: [msgid:32][nodeID:32][index:32][lockid:32]
-// Response: [msgid:32][chunkID:64][version:32][N:8=1][ip:32][port:16][csVersion:32]
+// Payload (MooseFS 4.x / >= 3.0.4): [msgid:32][nodeID:32][index:32][chunkopflags:8]
+// Response proto 2:
+//
+//	[msgid:32][protocolid:8=2][length:64][chunkID:64][version:32]
+//	1×[ip:32 port:16 cs_ver:32 labelmask:32]
 func (s *fakeMFSServer) handleWriteChunk(conn net.Conn, payload []byte) {
-	if len(payload) < 16 {
+	// Minimum 13 bytes: msgid(4)+nodeID(4)+index(4)+chunkopflags(1).
+	// Accept 16 bytes too for backward compat with old test callers.
+	if len(payload) < 13 {
 		return
 	}
 	msgid, off, _ := ReadUint32(payload, 0)
 	nodeID, _, _ := ReadUint32(payload, off)
 
 	s.mu.Lock()
-	_, ok := s.nodes[nodeID]
+	node, ok := s.nodes[nodeID]
 	s.mu.Unlock()
 
 	if !ok {
@@ -625,32 +640,49 @@ func (s *fakeMFSServer) handleWriteChunk(conn net.Conn, payload []byte) {
 		return
 	}
 
+	// Build proto 2 response: protocolid=2, file length, chunkid, version, 1 server entry.
+	fileLen := uint64(0)
+	if node != nil {
+		fileLen = uint64(len(node.content))
+	}
 	var resp []byte
 	resp = PutUint32(resp, msgid)
-	resp = PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
-	resp = PutUint32(resp, 1)              // chunk version
-	resp = PutUint8(resp, 1)              // N = 1 server
+	resp = PutUint8(resp, 2)               // protocolid = 2
+	resp = PutUint64(resp, fileLen)         // current file length
+	resp = PutUint64(resp, uint64(nodeID))  // chunkID = nodeID (fake mapping)
+	resp = PutUint32(resp, 1)               // chunk version
 	resp = PutUint32(resp, s.csIP)
 	resp = PutUint16(resp, s.csPort)
-	resp = PutUint32(resp, 0) // CS version (unused in fake)
+	resp = PutUint32(resp, 0) // cs_ver (unused in fake)
+	resp = PutUint32(resp, 0) // labelmask (unused in fake)
 	_ = WriteFrame(conn, MatoclFuseWriteChunk, resp)
 }
 
 // handleWriteChunkEnd handles CLTOMA_FUSE_WRITE_CHUNK_END (436).
 //
-// Payload: [msgid:32][chunkID:64][version:32][length:64][lockid:32]
+// Payload (MooseFS >= 3.0.74):
+//
+//	[msgid:32][chunkID:64][inode:32][chunkindx:32][length:64][chunkopflags:8] = 29 bytes
+//
+// Payload (MooseFS >= 4.40.0, extended):
+//
+//	[msgid:32][chunkID:64][inode:32][chunkindx:32][length:64][chunkopflags:8][offset:32][size:32] = 37 bytes
+//
+// No version field. No lockid field.
 //
 // Copies the data written to the fakeCSServer back into node.content and
 // sets the node's size to `length` (total bytes written so far).
 // Response: [msgid:32][status:8]
 func (s *fakeMFSServer) handleWriteChunkEnd(conn net.Conn, payload []byte) {
-	if len(payload) < 28 {
+	if len(payload) < 29 { // minimum without 4.40.0 extension
 		return
 	}
 	msgid, off, _ := ReadUint32(payload, 0)
 	chunkID, off, _ := ReadUint64(payload, off)
-	_, off, _ = ReadUint32(payload, off)   // version (skip)
-	length, _, _ := ReadUint64(payload, off) // new total file length
+	_, off, _ = ReadUint32(payload, off)       // inode (skip — we recover nodeID from chunkID)
+	_, off, _ = ReadUint32(payload, off)       // chunkindx (skip — unused by fake server)
+	length, off, _ := ReadUint64(payload, off) // new total file length
+	_ = off                                    // chunkopflags:8 [offset:32 size:32] follow (skip)
 
 	nodeID := uint32(chunkID) // reverse of fake mapping: chunkID = nodeID
 
@@ -1139,4 +1171,86 @@ func TestMkdir_createDir(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, nodeID, attr.NodeID)
 	assert.True(t, attr.IsDir())
+}
+
+// ─── parseChunkInfo / lockid tests ───────────────────────────────────────────
+
+// TestWrite_lockIDParsing verifies that parseChunkInfo correctly extracts the
+// optional lockid:32 token appended after the CS entries in a proto 2 response,
+// and that a zero-initialised LockID is returned when the master omits it.
+//
+// This reproduces the diagnostic path for bug #101 (post-upload stat size=0):
+// if the master sends a non-zero lockid and we fail to extract it, WRITE_CHUNK_END
+// is sent with lockid=0 which may prevent the master from committing the file length.
+func TestWrite_lockIDParsing(t *testing.T) {
+	const (
+		wantChunkID = uint64(0xCAFEBABEDEAD1234)
+		wantVersion = uint32(7)
+		wantLockID  = uint32(0xDEADBEEF)
+	)
+
+	t.Run("proto2_with_lockid", func(t *testing.T) {
+		// Build a proto 2 WRITE_CHUNK response (MATOCL_FUSE_WRITE_CHUNK=435)
+		// with 1 CS entry followed by a lockid:32 token.
+		//   [msgid:32][protocolid:8=2][length:64][chunkid:64][version:32]
+		//   [ip:32][port:16][cs_ver:32][labelmask:32]   (14 bytes, proto 2 entry)
+		//   [lockid:32]
+		var resp []byte
+		resp = PutUint32(resp, 0)           // msgid
+		resp = PutUint8(resp, 2)            // protocolid = 2
+		resp = PutUint64(resp, 0)           // file length
+		resp = PutUint64(resp, wantChunkID) // chunkID
+		resp = PutUint32(resp, wantVersion) // version
+		resp = PutUint32(resp, 0x7F000001)  // ip = 127.0.0.1
+		resp = PutUint16(resp, 9422)        // port
+		resp = PutUint32(resp, 0)           // cs_ver
+		resp = PutUint32(resp, 0)           // labelmask
+		resp = PutUint32(resp, wantLockID)  // lockid — trailing 4 bytes
+
+		info, err := parseChunkInfo(resp)
+		require.NoError(t, err)
+		assert.Equal(t, wantChunkID, info.ChunkID, "chunkID must be decoded correctly")
+		assert.Equal(t, wantVersion, info.Version, "version must be decoded correctly")
+		assert.Len(t, info.Servers, 1, "exactly 1 CS entry expected")
+		assert.Equal(t, wantLockID, info.LockID,
+			"lockid must be extracted from the trailing 4 bytes of a proto 2 response")
+	})
+
+	t.Run("proto2_no_lockid", func(t *testing.T) {
+		// Same response but without the trailing lockid bytes — master did not send one.
+		var resp []byte
+		resp = PutUint32(resp, 0)
+		resp = PutUint8(resp, 2)
+		resp = PutUint64(resp, 0)
+		resp = PutUint64(resp, wantChunkID)
+		resp = PutUint32(resp, wantVersion)
+		resp = PutUint32(resp, 0x7F000001)
+		resp = PutUint16(resp, 9422)
+		resp = PutUint32(resp, 0)
+		resp = PutUint32(resp, 0)
+		// No lockid appended.
+
+		info, err := parseChunkInfo(resp)
+		require.NoError(t, err)
+		assert.Equal(t, uint32(0), info.LockID,
+			"LockID must be 0 when master omits the trailing lockid field")
+	})
+
+	t.Run("proto2_no_cs_with_lockid", func(t *testing.T) {
+		// Edge case: 0 CS entries + lockid (master metadata available, CS unreachable).
+		// remaining = 4 bytes → n = 4/14 = 0 → lockid is still extracted.
+		var resp []byte
+		resp = PutUint32(resp, 0)
+		resp = PutUint8(resp, 2)
+		resp = PutUint64(resp, 0)
+		resp = PutUint64(resp, wantChunkID)
+		resp = PutUint32(resp, wantVersion)
+		resp = PutUint32(resp, wantLockID) // trailing 4 bytes — interpreted as lockid
+
+		info, err := parseChunkInfo(resp)
+		require.NoError(t, err)
+		assert.Empty(t, info.Servers, "no CS entries expected")
+		assert.Equal(t, wantLockID, info.LockID,
+			"lockid must be extracted even when there are 0 CS entries")
+	})
 }

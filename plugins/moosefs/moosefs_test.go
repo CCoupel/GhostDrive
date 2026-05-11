@@ -180,10 +180,25 @@ func (s *integFakeCSServer) serveRead(conn net.Conn, payload []byte) {
 }
 
 func (s *integFakeCSServer) serveWrite(conn net.Conn, payload []byte) {
+	// CLTOCS_WRITE payload (MooseFS >= 1.7.32):
+	// [protocolid:8=1][chunkId:64][version:32][N*(ip:32+port:16)]
+	// Minimum 13 bytes (protocolid + chunkId + version, N=0).
 	if len(payload) < 13 {
 		return
 	}
-	chunkID, _, _ := mfsclient.ReadUint64(payload, 0)
+	// payload[0] = protocolid (must be 1); chunkId starts at offset 1.
+	chunkID, _, _ := mfsclient.ReadUint64(payload, 1)
+
+	// Send mandatory write-init ACK: CSTOCL_WRITE_STATUS(writeid=0, OK).
+	// Per writedata.c, the CS must send this before the client sends WRITE_DATA.
+	var ack []byte
+	ack = mfsclient.PutUint64(ack, chunkID)
+	ack = mfsclient.PutUint32(ack, 0) // writeId = 0 (chain ACK, no data yet)
+	ack = mfsclient.PutUint8(ack, mfsclient.StatusOK)
+	if err := mfsclient.WriteFrame(conn, mfsclient.CstoclFuseWriteStatus, ack); err != nil {
+		return
+	}
+
 	for {
 		cmd, data, err := mfsclient.ReadFrame(conn)
 		if err != nil {
@@ -191,20 +206,24 @@ func (s *integFakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 		}
 		switch cmd {
 		case mfsclient.CltocsFuseWriteData:
-			if len(data) < 20 {
+			// MooseFS 4.x CLTOCS_WRITE_DATA (212):
+			// [chunkId:64][writeId:32][blockNum:16][blockOff:16][size:32][crc:32][data]
+			if len(data) < 24 { // minimum: 8+4+2+2+4+4 = 24 bytes
 				return
 			}
-			blockNum, off, _ := mfsclient.ReadUint16(data, 8)
-			blockOff, off, _ := mfsclient.ReadUint16(data, off)
-			size, off, _ := mfsclient.ReadUint32(data, off)
-			off += 4 // skip CRC
+			var off int
+			_, off, _ = mfsclient.ReadUint32(data, 8)        // skip writeId:32
+			blockNum, off, _ := mfsclient.ReadUint16(data, off) // blockNum at offset 12
+			blockOff, off, _ := mfsclient.ReadUint16(data, off) // blockOff at offset 14
+			size, off, _ := mfsclient.ReadUint32(data, off)     // size at offset 16
+			off += 4                                             // skip CRC
 			if off+int(size) > len(data) {
 				return
 			}
 			block := data[off : off+int(size)]
 			dataOffset := uint32(blockNum)*65536 + uint32(blockOff)
 			s.storeBlock(chunkID, dataOffset, block)
-		case mfsclient.CltocsFuseWriteEnd:
+		case mfsclient.CltocsFuseWriteEnd: // CLTOCS_WRITE_FINISH (213)
 			var resp []byte
 			resp = mfsclient.PutUint64(resp, chunkID)
 			resp = mfsclient.PutUint32(resp, 0)
@@ -221,14 +240,15 @@ func (s *integFakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 
 // integFakeServer is a minimal in-memory MooseFS TCP server.
 type integFakeServer struct {
-	ln     net.Listener
-	mu     sync.Mutex
-	nodes  map[uint32]*integNode
-	nextID atomic.Uint32
-	done   chan struct{}
-	cs     *integFakeCSServer // embedded chunk server
-	csIP   uint32             // CS listen IP (uint32 big-endian)
-	csPort uint16             // CS listen port
+	ln            net.Listener
+	mu            sync.Mutex
+	nodes         map[uint32]*integNode
+	nextID        atomic.Uint32
+	done          chan struct{}
+	cs            *integFakeCSServer // embedded chunk server
+	csIP          uint32             // CS listen IP (uint32 big-endian)
+	csPort        uint16             // CS listen port
+	registerCount atomic.Int32       // counts successful NewSession REGISTER calls
 }
 
 // newIntegFakeServer creates a fake server seeded with the root node only.
@@ -375,6 +395,7 @@ func (s *integFakeServer) svrRegister(conn net.Conn, payload []byte) {
 	}
 	rcode := payload[64]
 	if rcode == mfsclient.RegisterNewSession {
+		s.registerCount.Add(1)
 		var resp []byte
 		resp = mfsclient.PutUint32(resp, 263168) // version
 		resp = mfsclient.PutUint32(resp, 42)     // sessionId
@@ -714,7 +735,7 @@ func (s *integFakeServer) svrRead(conn net.Conn, payload []byte) {
 // ─── Chunk server coordination handlers ───────────────────────────────────────
 
 // svrReadChunk handles CLTOMA_FUSE_READ_CHUNK (432).
-// Pre-loads node content into the CS, then replies with ChunkInfo.
+// Pre-loads node content into the CS, then replies with ChunkInfo (proto 2).
 func (s *integFakeServer) svrReadChunk(conn net.Conn, payload []byte) {
 	if len(payload) < 12 {
 		return
@@ -724,7 +745,9 @@ func (s *integFakeServer) svrReadChunk(conn net.Conn, payload []byte) {
 
 	s.mu.Lock()
 	n, ok := s.nodes[nodeID]
+	var fileLen uint64
 	if ok {
+		fileLen = uint64(len(n.content))
 		s.cs.setChunkData(uint64(nodeID), n.content)
 	}
 	s.mu.Unlock()
@@ -734,21 +757,27 @@ func (s *integFakeServer) svrReadChunk(conn net.Conn, payload []byte) {
 		return
 	}
 
+	// Proto 2 response: [msgid:32][protocolid:8=2][fileLen:64][chunkID:64][version:32]
+	//                   N × [ip:32 port:16 cs_ver:32 labelmask:32]  (N=1 implicit)
 	var resp []byte
 	resp = mfsclient.PutUint32(resp, msgid)
-	resp = mfsclient.PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
-	resp = mfsclient.PutUint32(resp, 1)              // version
-	resp = mfsclient.PutUint8(resp, 1)               // N = 1 server
+	resp = mfsclient.PutUint8(resp, 2)               // protocolid = 2
+	resp = mfsclient.PutUint64(resp, fileLen)         // current file length
+	resp = mfsclient.PutUint64(resp, uint64(nodeID))  // chunkID = nodeID (fake mapping)
+	resp = mfsclient.PutUint32(resp, 1)               // version
 	resp = mfsclient.PutUint32(resp, s.csIP)
 	resp = mfsclient.PutUint16(resp, s.csPort)
-	resp = mfsclient.PutUint32(resp, 0) // CS version
+	resp = mfsclient.PutUint32(resp, 0) // cs_ver
+	resp = mfsclient.PutUint32(resp, 0) // labelmask
 	_ = mfsclient.WriteFrame(conn, mfsclient.MatoclFuseReadChunk, resp)
 }
 
 // svrWriteChunk handles CLTOMA_FUSE_WRITE_CHUNK (434).
-// Returns ChunkInfo pointing to the embedded CS.
+// Returns ChunkInfo pointing to the embedded CS (proto 2).
+//
+// MooseFS 4.x request payload: [msgid:32][inode:32][chunkindx:32][chunkopflags:8] = 13 bytes.
 func (s *integFakeServer) svrWriteChunk(conn net.Conn, payload []byte) {
-	if len(payload) < 16 {
+	if len(payload) < 13 {
 		return
 	}
 	msgid, off, _ := mfsclient.ReadUint32(payload, 0)
@@ -763,27 +792,43 @@ func (s *integFakeServer) svrWriteChunk(conn net.Conn, payload []byte) {
 		return
 	}
 
+	// Proto 2 response: [msgid:32][protocolid:8=2][fileLen:64][chunkID:64][version:32]
+	//                   N × [ip:32 port:16 cs_ver:32 labelmask:32]  (N=1 implicit)
 	var resp []byte
 	resp = mfsclient.PutUint32(resp, msgid)
-	resp = mfsclient.PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
-	resp = mfsclient.PutUint32(resp, 1)              // version
-	resp = mfsclient.PutUint8(resp, 1)               // N = 1 server
+	resp = mfsclient.PutUint8(resp, 2)               // protocolid = 2
+	resp = mfsclient.PutUint64(resp, 0)               // fileLen (pre-write, 0 for new file)
+	resp = mfsclient.PutUint64(resp, uint64(nodeID))  // chunkID = nodeID (fake mapping)
+	resp = mfsclient.PutUint32(resp, 1)               // version
 	resp = mfsclient.PutUint32(resp, s.csIP)
 	resp = mfsclient.PutUint16(resp, s.csPort)
-	resp = mfsclient.PutUint32(resp, 0) // CS version
+	resp = mfsclient.PutUint32(resp, 0) // cs_ver
+	resp = mfsclient.PutUint32(resp, 0) // labelmask
 	_ = mfsclient.WriteFrame(conn, mfsclient.MatoclFuseWriteChunk, resp)
 }
 
 // svrWriteChunkEnd handles CLTOMA_FUSE_WRITE_CHUNK_END (436).
 // Copies CS data back into node.content and updates the node's size.
+//
+// MooseFS >= 3.0.74 payload:
+//
+//	[msgid:32][chunkid:64][inode:32][chunkindx:32][length:64][chunkopflags:8] = 29 bytes
+//
+// MooseFS >= 4.40.0 (extended):
+//
+//	[msgid:32][chunkid:64][inode:32][chunkindx:32][length:64][chunkopflags:8][offset:32][size:32] = 37 bytes
+//
+// No version field. No lockid field.
 func (s *integFakeServer) svrWriteChunkEnd(conn net.Conn, payload []byte) {
-	if len(payload) < 28 {
+	if len(payload) < 29 { // minimum without 4.40.0 extension
 		return
 	}
 	msgid, off, _ := mfsclient.ReadUint32(payload, 0)
 	chunkID, off, _ := mfsclient.ReadUint64(payload, off)
-	_, off, _ = mfsclient.ReadUint32(payload, off)    // version (skip)
-	length, _, _ := mfsclient.ReadUint64(payload, off) // new total file length
+	_, off, _ = mfsclient.ReadUint32(payload, off)       // inode (skip — already known via chunkID)
+	_, off, _ = mfsclient.ReadUint32(payload, off)       // chunkindx (skip)
+	length, _, _ := mfsclient.ReadUint64(payload, off)   // new total file length
+	// chunkopflags:8 [offset:32 size:32] follow (skip — unused by fake server)
 
 	nodeID := uint32(chunkID) // reverse of fake mapping
 
@@ -1297,3 +1342,49 @@ func TestDescribe(t *testing.T) {
 
 // Ensure unused fmt import compiles.
 var _ = fmt.Sprintf
+
+// TestReconnect_singleflight verifies that concurrent reconnect() calls produce
+// exactly ONE new MooseFS session (RegisterNewSession) even when N goroutines
+// detect a connection error simultaneously.
+//
+// The test runs reconnect() from 8 goroutines at once against the integFakeServer.
+// reconnect() internally sets b.connected=false and then acquires reconnMu, so
+// only the first goroutine through the lock will actually dial; the others will
+// see b.connected==true after waiting and return nil immediately.
+func TestReconnect_singleflight(t *testing.T) {
+	srv := newIntegFakeServer()
+	addr := srv.start(t)
+
+	b := newTestBackend(t, addr)
+
+	// Snapshot register count after initial Connect (exactly 1 session open).
+	initial := srv.registerCount.Load()
+	require.Equal(t, int32(1), initial, "precondition: exactly 1 RegisterNewSession on Connect")
+
+	// Fire N goroutines simultaneously.  Each calls reconnect() as it would after
+	// detecting a connection error.  Only one must actually dial the master.
+	const N = 8
+	var wg sync.WaitGroup
+	wg.Add(N)
+	errs := make([]error, N)
+	for i := 0; i < N; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = b.reconnect()
+		}(i)
+	}
+	wg.Wait()
+
+	// All goroutines must succeed.
+	for i, err := range errs {
+		assert.NoError(t, err, "goroutine %d must not return an error", i)
+	}
+
+	// Exactly one new RegisterNewSession must have been sent.
+	got := srv.registerCount.Load() - initial
+	assert.Equal(t, int32(1), got,
+		"singleflight: expected exactly 1 new RegisterNewSession, got %d", got)
+
+	// Backend must be connected after all goroutines finish.
+	assert.True(t, b.IsConnected(), "backend must be connected after singleflight reconnect")
+}
