@@ -158,7 +158,7 @@ export function BackendConfigCard({
               </p>
               <p className="text-xs text-gray-400 truncate">
                 <span className="font-medium text-gray-500">Distant :</span>{' '}
-                {config.params?.basePath || config.remotePath || '—'}
+                {config.params?.basePath || config.params?.subDir || config.remotePath || '—'}
               </p>
               <p className="text-xs text-gray-400 truncate">
                 {config.params?.url ?? config.params?.mountPath ?? ''}

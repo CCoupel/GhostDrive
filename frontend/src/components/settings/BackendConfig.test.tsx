@@ -106,6 +106,83 @@ describe('BackendConfigCard — champ "Distant" (#84)', () => {
     expect(p.textContent).toContain('—');
   });
 
+  // ── Non-régression #107 — MooseFS subDir ──────────────────────────────────
+  // Avant le fix : MooseFS affichait "/" (remotePath par défaut) au lieu de
+  // la valeur de params.subDir configurée par l'utilisateur.
+  // Après le fix : `config.params?.basePath || config.params?.subDir || config.remotePath || '—'`
+
+  it('affiche params.subDir pour un backend MooseFS (#107)', () => {
+    const config = makeConfig({
+      type:       'moosefs',
+      params:     { masterHost: '192.168.1.10', subDir: '/MEDIA' },
+      remotePath: '/',   // valeur par défaut — NE doit PAS être affichée
+    });
+
+    const p = renderCard(config);
+
+    expect(p.textContent).toContain('/MEDIA');
+    // Régression : NE doit PAS afficher uniquement "/" (remotePath par défaut)
+    // Note : 'Distant : /MEDIA' contiendrait 'Distant : /' en tant que préfixe,
+    // donc on vérifie l'égalité exacte plutôt qu'une inclusion.
+    expect(p.textContent?.replace(/\s+/g, ' ').trim()).toBe('Distant : /MEDIA');
+  });
+
+  it('affiche remotePath quand params.subDir est absent (MooseFS sans subDir configuré)', () => {
+    const config = makeConfig({
+      type:       'moosefs',
+      params:     { masterHost: '192.168.1.10' },   // pas de subDir
+      remotePath: '/fallback',
+    });
+
+    const p = renderCard(config);
+
+    expect(p.textContent).toContain('/fallback');
+  });
+
+  it('affiche "—" quand params.subDir est vide et remotePath absent (MooseFS full-fallback)', () => {
+    // subDir="" est falsy → tombe sur remotePath → aussi falsy → '—'.
+    // Vérifie que la chaîne basePath || subDir || remotePath || '—' atteint bien '—'.
+    const config = makeConfig({
+      type:       'moosefs',
+      params:     { masterHost: '192.168.1.10', subDir: '' },
+      remotePath: '',
+    });
+
+    const p = renderCard(config);
+
+    expect(p.textContent).toContain('—');
+    expect(p.textContent).not.toContain('/');
+  });
+
+  it('affiche "—" quand subDir et remotePath sont tous deux absents (MooseFS no-config)', () => {
+    // Cas MooseFS configuré sans subDir ni remotePath : doit afficher '—'.
+    const config = makeConfig({
+      type:       'moosefs',
+      params:     { masterHost: '192.168.1.10' },
+      remotePath: '',
+    });
+
+    const p = renderCard(config);
+
+    expect(p.textContent).toContain('—');
+  });
+
+  it('non impacté par le fix — backend local affiche remotePath (pas de basePath ni subDir)', () => {
+    // Le fix ajoute params.subDir dans la chaîne ; pour un backend local (rootPath),
+    // ni basePath ni subDir ne sont définis → remotePath doit continuer à s'afficher.
+    const config = makeConfig({
+      type:       'local',
+      params:     { rootPath: 'C:\\Users\\user\\Documents' },   // pas de basePath, pas de subDir
+      remotePath: '/local/mirror',
+    });
+
+    const p = renderCard(config);
+
+    expect(p.textContent).toContain('/local/mirror');
+    // Régression : la présence de params.rootPath ne doit pas perturber l'affichage.
+    expect(p.textContent).not.toContain('rootPath');
+  });
+
 });
 
 // ── Tests quota display (#87) ──────────────────────────────────────────────────

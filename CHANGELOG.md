@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.1] — 2026-05-13
+
+### Fixed
+
+- Page de synthèse backends : chemin distant MooseFS affichait "/" au lieu de la valeur configurée (ex: "/MEDIA") — `params.subDir` ajouté dans la chaîne de fallback de `BackendConfig.tsx`. (#107)
+
+---
+
 ## [1.6.0] — 2026-05-11
 
 ### Added
