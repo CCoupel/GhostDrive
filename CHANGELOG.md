@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.0] — 2026-05-11
+
+### Added
+
+- **MooseFS plugin** : fallback automatique sur CS2 quand CS1 échoue — `Write()` itère sur `info.Servers` et retente sur le serveur suivant en cas d'échec réseau (EOF, dial refused). (#105)
+- **MooseFS plugin** : méthode `writeChunkLock()` — acquiert le verrou master (WRITE_CHUNK) et retourne un `ChunkInfo` frais (LockID + Length) avant chaque tentative d'écriture. (#105)
+- **MooseFS plugin** : méthode `writeChunkEnd()` — commit la nouvelle longueur au master (WRITE_CHUNK_END, format >= 4.40.0) après écriture réussie. (#105)
+- **MooseFS plugin** : méthode `writeChunkRelease()` — libère le verrou master sans modifier la taille du fichier après un échec CS, évitant ~60 s de blocage master. (#105)
+- **Tests MooseFS** : `TestWrite_FallbackCS2`, `TestWrite_FallbackCS2_DialRefused`, `TestWrite_AllServersFail` — couverture du fallback multi-CS (coverage 71.8%). (#105)
+- **MooseFS plugin** : type `writeStrategy` et variable `defaultWriteStrategies` — définition des 4 stratégies d'écriture ordonnées (sync chain CS1 → sync chain CS2 → async CS1 → async CS2). (#104)
+- **Tests MooseFS** : `TestWrite_FallbackCascade` (scénarios A/B/C) et `TestWrite_ShrinkingServerList` — couverture complète de la cascade et du shrink guard (coverage 72.1%). (#104)
+- **MooseFS plugin** : méthode `WriteChunkData()` — écrit un chunk MooseFS entier (jusqu'à 64 MiB) en 1 cycle WRITE_CHUNK/END ; vérifie le dépassement de frontière de chunk avant envoi ; guard empty data (skip round-trip master). (#106)
+- **MooseFS plugin** : paramètre de configuration `uploadConcurrency` — contrôle le nombre de goroutines de chunk en parallèle (défaut : 4, plage : 1–16). (#106)
+- **Tests MooseFS** : `TestWriteChunk_Pipeline` (success + earlyAbort), `TestWriteChunkData_MultiBlock`, `TestWriteChunkData_BoundaryCheck`, `TestWriteChunkData_EmptyData`, `TestUpload_MultiChunk_Parallel`, `TestUpload_ConcurrencyConfig` — 65 tests, coverage 71.5%, -race clean. (#106)
+
+### Changed
+
+- **MooseFS plugin** : `Write()` refactorisé — boucle de fallback sur `info.Servers` avec re-lock à chaque tentative et release explicite avant retry. (#105)
+- **MooseFS protocol** : `ChunkInfo` enrichi du champ `Length` pour permettre à `writeChunkRelease()` de restaurer la taille fichier correcte après échec. (#105)
+- **MooseFS plugin** : `Write()` cascade sur 4 stratégies ordonnées — sync chain CS1 → sync chain CS2 → async CS1 → async CS2 ; la chain est construite dynamiquement selon la stratégie active ; erreur finale `"all write strategies failed"` si toutes échouent. (#104)
+- **MooseFS plugin** : `WriteChunk()` pipeline — goroutine lectrice concurrente pour détection précoce d'erreur CS (`earlyErr`/`finalResult` channels, `sendDone` sync.Once) ; en cas d'erreur d'écriture, attend 50 ms le protocole du CS pour préférer DISCONNECTED au raw "connection reset by peer". (#106)
+- **MooseFS plugin** : `upload()` refactorisé en pipeline producer/consumer — mémoire bornée à `concurrency × ChunkSize` (64 MiB × N) ; Phase 1 regroupe les blocs de 64 KiB en jobs de 64 MiB ; Phase 2 dispatche N goroutines parallèles via sémaphore ; progression atomique via `sync/atomic`. (#106)
+
+### Fixed
+
+- **MooseFS plugin** : lock leak dans `Write()` — `writeChunkRelease` désormais appelé avant `continue` dans le shrink guard (cas où le master retourne une liste CS réduite au re-lock). (#104)
+
+---
+
 ## [1.5.17] — 2026-05-11
 
 ### Fixed

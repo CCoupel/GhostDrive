@@ -630,124 +630,290 @@ func (c *Client) Rename(srcParentID uint32, srcName string, dstParentID uint32, 
 
 // ─── Read / Write (Phase 2 — real chunk server I/O) ──────────────────────────
 
-// Write writes data to file node nodeID at offset using the real MooseFS
-// chunk-server protocol.
+// writeStrategy describes a single attempt in the Write() cascade.
+// csIdx selects the target CS from ChunkInfo.Servers; syncChain controls whether
+// the remaining servers are passed as a replication chain.
+type writeStrategy struct {
+	csIdx     int  // index into info.Servers to select the target CS
+	syncChain bool // pass info.Servers[csIdx+1:] as chain (sync); false = nil chain (async)
+}
+
+// defaultWriteStrategies defines the ordered fallback cascade for Write().
+// Each strategy is attempted in order; the first to succeed wins.
 //
-// Steps:
-//  1. CLTOMA_FUSE_WRITE_CHUNK (434) → master returns ChunkInfo (CS location).
-//     c.mu is held only during this master roundtrip.
-//  2. DialCS + WriteChunk: data is sent to the chunk server (no lock held —
-//     CS I/O does not touch c.conn).
-//  3. CLTOMA_FUSE_WRITE_CHUNK_END (436) → master commits the new file length.
-//     c.mu is re-acquired for this second master roundtrip.
+//  1. Sync chain CS1 — write to Servers[0] with Servers[1:] as replication chain.
+//     Preferred path when the cluster topology is fully healthy.
+//  2. Sync chain CS2 — write to Servers[1] with Servers[2:] as chain.
+//     Used when CS1 is unreachable but CS2 is available.
+//  3. Async CS1 — write to Servers[0] with nil chain; master replicates post-commit.
+//     Used when the sync chain breaks (CANTCONNECT on chain peer) but CS1 is up.
+//  4. Async CS2 — write to Servers[1] with nil chain. Last resort.
+//
+// Strategies with csIdx >= len(info.Servers) are silently skipped.
+// DO NOT mutate in tests — construct a local []writeStrategy for custom cascades.
+var defaultWriteStrategies = []writeStrategy{
+	{csIdx: 0, syncChain: true},  // 1. sync chain CS1
+	{csIdx: 1, syncChain: true},  // 2. sync chain CS2
+	{csIdx: 0, syncChain: false}, // 3. async CS1
+	{csIdx: 1, syncChain: false}, // 4. async CS2
+}
+
+// writeChunkLock acquires a write lock on the chunk at (nodeID, index) by
+// sending CLTOMA_FUSE_WRITE_CHUNK to the master. It holds c.mu only during the
+// master roundtrip and returns the ChunkInfo (server list + LockID + file length).
+//
+// This is Phase 1 of the write protocol, extracted so it can be called once per
+// fallback attempt (each attempt needs a fresh LockID).
+func (c *Client) writeChunkLock(nodeID uint32, index uint32) (*ChunkInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// CLTOMA_FUSE_WRITE_CHUNK (434) — MooseFS 4.x (>= 3.0.4) payload:
+	//   [msgid:32][inode:32][chunkindx:32][chunkopflags:8]  = 13 bytes
+	// chunkopflags: 0x01=CANMODTIME 0x02=CONTINUEOP 0x04=CANUSERESERVESPACE
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, nodeID)
+	req = PutUint32(req, index)
+	req = PutUint8(req, 0) // chunkopflags = 0
+
+	ans, err := c.roundtrip(CltomFuseWriteChunk, MatoclFuseWriteChunk, req)
+	if err != nil {
+		return nil, fmt.Errorf("mfsclient: writeChunkLock(node=%d, idx=%d): WRITE_CHUNK: %w", nodeID, index, err)
+	}
+	// A 5-byte response is an error: [msgid:32][status:8].
+	if len(ans) == 5 {
+		return nil, fmt.Errorf("mfsclient: writeChunkLock(node=%d, idx=%d): WRITE_CHUNK status 0x%02x", nodeID, index, ans[4])
+	}
+	info, err := parseChunkInfo(ans)
+	if err != nil {
+		limit := len(ans)
+		if limit > 64 {
+			limit = 64
+		}
+		return nil, fmt.Errorf("mfsclient: writeChunkLock(node=%d, idx=%d): parse chunk info: %w [raw %d bytes: % x]",
+			nodeID, index, err, len(ans), ans[:limit])
+	}
+	if len(info.Servers) == 0 {
+		return nil, fmt.Errorf("mfsclient: writeChunkLock(node=%d, idx=%d): no chunk servers available", nodeID, index)
+	}
+	logger.Debug("[mfsclient] writeChunkLock: chunk %d — %d servers, lockid=%d, fileLen=%d",
+		index, len(info.Servers), info.LockID, info.Length)
+	return info, nil
+}
+
+// writeChunkEnd commits the write to the master by sending CLTOMA_FUSE_WRITE_CHUNK_END
+// with the new file length (offset + dataLen). It holds c.mu only during the master
+// roundtrip.
+//
+// This is Phase 3 of the write protocol, extracted for reuse across fallback attempts.
+func (c *Client) writeChunkEnd(info *ChunkInfo, nodeID, index uint32, offset uint64, dataLen int) error {
+	newLength := offset + uint64(dataLen)
+	chunkOffset := uint32(offset % ChunkSize)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	logger.Debug("[mfsclient] writeChunkEnd: WRITE_CHUNK_END newLength=%d chunkOffset=%d dataLen=%d",
+		newLength, chunkOffset, dataLen)
+
+	// CLTOMA_FUSE_WRITE_CHUNK_END (436) — extended format (>= 4.40.0, 37 bytes):
+	//   [msgid:32][chunkid:64][inode:32][chunkindx:32][length:64][chunkopflags:8][offset:32][size:32]
+	//
+	// length  : new total file size after this write.
+	// offset  : byte offset within the chunk where the write started.
+	// size    : number of bytes written in this chunk.
+	endReq := PutUint32(nil, 0)                       // msgid
+	endReq = PutUint64(endReq, info.ChunkID)           // chunkid:64
+	endReq = PutUint32(endReq, nodeID)                  // inode:32
+	endReq = PutUint32(endReq, index)                   // chunkindx:32
+	endReq = PutUint64(endReq, newLength)               // length:64 — new total file size
+	endReq = PutUint8(endReq, 0)                       // chunkopflags:8 = 0
+	endReq = PutUint32(endReq, chunkOffset)             // offset:32 — write start within chunk
+	endReq = PutUint32(endReq, uint32(dataLen))         // size:32 — bytes written
+
+	endAns, err := c.roundtrip(CltomFuseWriteChunkEnd, MatoclFuseWriteChunkEnd, endReq)
+	if err != nil {
+		return fmt.Errorf("mfsclient: writeChunkEnd(%d, idx=%d): WRITE_CHUNK_END: %w", nodeID, index, err)
+	}
+	logger.Debug("[mfsclient] writeChunkEnd: resp len=%d bytes=%x", len(endAns), endAns)
+	if len(endAns) < 5 {
+		return fmt.Errorf("mfsclient: writeChunkEnd(%d, idx=%d): WRITE_CHUNK_END response too short (%d)",
+			nodeID, index, len(endAns))
+	}
+	if endAns[4] != StatusOK {
+		return fmt.Errorf("mfsclient: writeChunkEnd(%d, idx=%d): WRITE_CHUNK_END status 0x%02x",
+			nodeID, index, endAns[4])
+	}
+	logger.Debug("[mfsclient] writeChunkEnd: WRITE_CHUNK_END acked status=OK")
+	return nil
+}
+
+// writeChunkRelease releases the master write lock for a chunk WITHOUT modifying
+// the file size. It sends CLTOMA_FUSE_WRITE_CHUNK_END with length = currentLength
+// (the file length BEFORE the failed write attempt) and size = 0, signalling to the
+// master that no data was committed.
+//
+// This must be called when CS I/O fails after writeChunkLock() to avoid leaving
+// the master holding the lock for ~60 seconds until timeout.
+func (c *Client) writeChunkRelease(info *ChunkInfo, nodeID, index uint32, currentLength uint64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	logger.Debug("[mfsclient] writeChunkRelease: releasing lock chunk %d, fileLen=%d (no write committed)",
+		index, currentLength)
+
+	// WRITE_CHUNK_END with length = currentLength (unchanged) and size = 0:
+	// the master sees no new data → does not update the file size.
+	endReq := PutUint32(nil, 0)                  // msgid
+	endReq = PutUint64(endReq, info.ChunkID)      // chunkid:64
+	endReq = PutUint32(endReq, nodeID)             // inode:32
+	endReq = PutUint32(endReq, index)              // chunkindx:32
+	endReq = PutUint64(endReq, currentLength)      // length:64 — UNCHANGED (release only)
+	endReq = PutUint8(endReq, 0)                  // chunkopflags:8 = 0
+	endReq = PutUint32(endReq, 0)                 // offset:32 = 0 (no data written)
+	endReq = PutUint32(endReq, 0)                 // size:32 = 0 (no data written)
+
+	endAns, err := c.roundtrip(CltomFuseWriteChunkEnd, MatoclFuseWriteChunkEnd, endReq)
+	if err != nil {
+		return fmt.Errorf("mfsclient: writeChunkRelease(%d, idx=%d): WRITE_CHUNK_END: %w", nodeID, index, err)
+	}
+	if len(endAns) < 5 {
+		return fmt.Errorf("mfsclient: writeChunkRelease(%d, idx=%d): response too short (%d)",
+			nodeID, index, len(endAns))
+	}
+	if endAns[4] != StatusOK {
+		return fmt.Errorf("mfsclient: writeChunkRelease(%d, idx=%d): status 0x%02x",
+			nodeID, index, endAns[4])
+	}
+	return nil
+}
+
+// Write writes data to file node nodeID at offset using the real MooseFS
+// chunk-server protocol with a 4-strategy cascade fallback.
+//
+// The cascade iterates over defaultWriteStrategies in order:
+//  1. Sync chain CS1 — preferred; CS1 replicates synchronously to CS2+.
+//  2. Sync chain CS2 — CS1 unreachable; CS2 is the replication head.
+//  3. Async CS1 — sync chain broken (CANTCONNECT); CS1 writes locally, master replicates.
+//  4. Async CS2 — last resort; CS1 down, async write to CS2.
+//
+// For each strategy:
+//  1. Acquire a fresh write lock via writeChunkLock() (new LockID per attempt).
+//  2. DialCS → WriteChunk with the appropriate chain (nil = async, Servers[csIdx+1:] = sync).
+//  3. On success: writeChunkEnd() to commit the new file length → return nil.
+//  4. On failure: writeChunkRelease() to free the master lock, try the next strategy.
+//
+// Returns an error only if all strategies are exhausted.
 func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 	index := uint32(offset / ChunkSize)
 	chunkOffset := uint32(offset % ChunkSize)
 
-	// Phase 1: roundtrip master sous mutex — obtenir la localisation du chunk.
-	info, err := func() (*ChunkInfo, error) {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-
-		// CLTOMA_FUSE_WRITE_CHUNK (434) — MooseFS 4.x (>= 3.0.4) payload:
-		//   [msgid:32][inode:32][chunkindx:32][chunkopflags:8]  = 13 bytes
-		// chunkopflags: 0x01=CANMODTIME 0x02=CONTINUEOP 0x04=CANUSERESERVESPACE
-		req := PutUint32(nil, 0) // msgid
-		req = PutUint32(req, nodeID)
-		req = PutUint32(req, index)
-		req = PutUint8(req, 0) // chunkopflags = 0
-
-		ans, err := c.roundtrip(CltomFuseWriteChunk, MatoclFuseWriteChunk, req)
-		if err != nil {
-			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK: %w", nodeID, offset, err)
-		}
-		// A 5-byte response is an error: [msgid:32][status:8].
-		if len(ans) == 5 {
-			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK status 0x%02x", nodeID, offset, ans[4])
-		}
-		info, err := parseChunkInfo(ans)
-		if err != nil {
-			limit := len(ans)
-			if limit > 64 {
-				limit = 64
-			}
-			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): parse chunk info: %w [raw %d bytes: % x]",
-				nodeID, offset, err, len(ans), ans[:limit])
-		}
-		if len(info.Servers) == 0 {
-			return nil, fmt.Errorf("mfsclient: Write(%d, off=%d): no chunk servers available", nodeID, offset)
-		}
-		logger.Debug("[mfsclient] Write: chunk %d — %d servers found: %v lockid=%d", index, len(info.Servers), info.Servers, info.LockID)
-		return info, nil
-	}()
+	// Phase 1: acquire the initial write lock to get the server list.
+	info, err := c.writeChunkLock(nodeID, index)
 	if err != nil {
 		return err
 	}
 
-	// Phase 2: I/O chunk server hors mutex — c.conn n'est pas utilisé ici.
-	srv := info.Servers[0]
-	csIP := net.IP([]byte{byte(srv.IP >> 24), byte(srv.IP >> 16), byte(srv.IP >> 8), byte(srv.IP)})
-	logger.Debug("[mfsclient] Write: dialing CS %s:%d", csIP, srv.Port)
-	cs, err := DialCS(srv.IP, srv.Port)
-	if err != nil {
-		return fmt.Errorf("mfsclient: Write(%d, off=%d): dial CS: %w", nodeID, offset, err)
-	}
-	logger.Debug("[mfsclient] Write: CS %s:%d connected", csIP, srv.Port)
-	defer cs.Close()
+	var lastErr error
+	firstActive := true // the initial lock (info) has not been consumed yet
 
-	// Pass nil chain: write to CS1 only. The MooseFS master handles async
-	// replication to other CSes after WRITE_CHUNK_END is committed.
-	// Passing Servers[1:] as a chain causes CS1 to synchronously forward data
-	// to CS2..CSN before returning the write-init ACK; when a chain CS is
-	// unreachable this produces a ~5 s TCP timeout followed by CANTCONNECT or EOF,
-	// blocking the entire write. Nil chain is a valid mode for FUSE clients.
-	if err := WriteChunk(cs, info.ChunkID, info.Version, chunkOffset, data, nil); err != nil {
-		return fmt.Errorf("mfsclient: Write(%d, off=%d): write chunk: %w", nodeID, offset, err)
+	for si, strat := range defaultWriteStrategies {
+		// Skip strategies that require a server index beyond what the master returned.
+		if strat.csIdx >= len(info.Servers) {
+			continue
+		}
+
+		// Re-acquire the lock for every strategy after the first applicable one.
+		// Each attempt needs a fresh LockID from the master.
+		if !firstActive {
+			info, err = c.writeChunkLock(nodeID, index)
+			if err != nil {
+				return fmt.Errorf("mfsclient: Write(%d, off=%d): re-lock strategy %d: %w",
+					nodeID, offset, si+1, err)
+			}
+			// Guard: master may return fewer servers on a subsequent lock.
+			// Release the fresh lock before skipping to avoid a ~60 s master timeout.
+			if strat.csIdx >= len(info.Servers) {
+				if releaseErr := c.writeChunkRelease(info, nodeID, index, info.Length); releaseErr != nil {
+					logger.Warn("[mfsclient] Write: writeChunkRelease after shrink guard (chunk %d, strategy %d): %v",
+						index, si+1, releaseErr)
+				}
+				continue
+			}
+		}
+		firstActive = false
+
+		srv := info.Servers[strat.csIdx]
+		csIP := net.IP([]byte{byte(srv.IP >> 24), byte(srv.IP >> 16), byte(srv.IP >> 8), byte(srv.IP)})
+		logger.Debug("[mfsclient] Write: strategy %d/%d: dialing CS %s:%d (csIdx=%d syncChain=%v)",
+			si+1, len(defaultWriteStrategies), csIP, srv.Port, strat.csIdx, strat.syncChain)
+
+		// Phase 2: CS I/O — no master lock held here.
+		cs, dialErr := DialCS(srv.IP, srv.Port)
+		if dialErr != nil {
+			lastErr = dialErr
+			logger.Warn("[mfsclient] Write: strategy %d/%d CS %s:%d dial failed, trying next: %v",
+				si+1, len(defaultWriteStrategies), csIP, srv.Port, dialErr)
+			if releaseErr := c.writeChunkRelease(info, nodeID, index, info.Length); releaseErr != nil {
+				logger.Warn("[mfsclient] Write: writeChunkRelease after dial failure (chunk %d, strategy %d): %v",
+					index, si+1, releaseErr)
+			}
+			continue
+		}
+
+		// Build the replication chain for this strategy.
+		// syncChain=true and more servers available → pass remaining servers as peers.
+		// syncChain=false or no more servers         → nil chain (async: master replicates).
+		var chain []ChunkServer
+		if strat.syncChain && strat.csIdx+1 < len(info.Servers) {
+			chain = info.Servers[strat.csIdx+1:]
+		}
+
+		writeErr := WriteChunk(cs, info.ChunkID, info.Version, chunkOffset, data, chain)
+		cs.Close()
+
+		if writeErr != nil {
+			lastErr = writeErr
+			logger.Warn("[mfsclient] Write: strategy %d/%d CS %s:%d write failed, trying next: %v",
+				si+1, len(defaultWriteStrategies), csIP, srv.Port, writeErr)
+			if releaseErr := c.writeChunkRelease(info, nodeID, index, info.Length); releaseErr != nil {
+				logger.Warn("[mfsclient] Write: writeChunkRelease after write failure (chunk %d, strategy %d): %v",
+					index, si+1, releaseErr)
+			}
+			continue
+		}
+
+		// Phase 3: CS write succeeded — commit the new file length to the master.
+		return c.writeChunkEnd(info, nodeID, index, offset, len(data))
 	}
 
-	// Phase 3: roundtrip master sous mutex — commiter la nouvelle longueur.
-	newLength := offset + uint64(len(data))
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if lastErr != nil {
+		return fmt.Errorf("mfsclient: Write(%d, off=%d): all write strategies failed, last error: %w",
+			nodeID, offset, lastErr)
+	}
+	return fmt.Errorf("mfsclient: Write(%d, off=%d): no applicable write strategies (no servers available)",
+		nodeID, offset)
+}
 
-	logger.Debug("[mfsclient] Write: sending WRITE_CHUNK_END newLength=%d chunkOffset=%d dataLen=%d",
-		newLength, chunkOffset, len(data))
-	// CLTOMA_FUSE_WRITE_CHUNK_END (436) — format depends on master version:
-	//
-	//   >= 3.0.74 (29 bytes):
-	//     [msgid:32][chunkid:64][inode:32][chunkindx:32][length:64][chunkopflags:8]
-	//   >= 4.40.0 (37 bytes, extended):
-	//     [msgid:32][chunkid:64][inode:32][chunkindx:32][length:64][chunkopflags:8][offset:32][size:32]
-	//
-	// We declare ourselves as mfsClientVersion 4.58.4 (>= 4.40.0), so the master
-	// expects the extended 37-byte format.
-	//
-	// length  : new total file size after this write (NOT chunk size).
-	// offset  : byte offset within the chunk where the write started.
-	// size    : number of bytes written in this chunk.
-	// NO version field. NO lockid field.
-	endReq := PutUint32(nil, 0)               // msgid
-	endReq = PutUint64(endReq, info.ChunkID)  // chunkid:64
-	endReq = PutUint32(endReq, nodeID)         // inode:32
-	endReq = PutUint32(endReq, index)          // chunkindx:32 — chunk index within file
-	endReq = PutUint64(endReq, newLength)      // length:64 — new total file size
-	endReq = PutUint8(endReq, 0)              // chunkopflags:8 = 0
-	endReq = PutUint32(endReq, chunkOffset)   // offset:32 — write start within chunk (>= 4.40.0)
-	endReq = PutUint32(endReq, uint32(len(data))) // size:32 — bytes written (>= 4.40.0)
-
-	endAns, err := c.roundtrip(CltomFuseWriteChunkEnd, MatoclFuseWriteChunkEnd, endReq)
-	if err != nil {
-		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END: %w", nodeID, offset, err)
+// WriteChunkData writes data for a single MooseFS chunk.  It is a thin wrapper
+// around Write() that enforces the single-chunk boundary constraint: both
+// offset and offset+len(data) must fall within the same 64 MiB chunk.
+//
+// This is the preferred entry point for the upload pipeline: callers group
+// their I/O buffers by MooseFS chunk index (fileOffset / ChunkSize) and call
+// WriteChunkData once per chunk, enabling parallel chunk uploads.
+//
+// Returns an error if the write would cross a chunk boundary.
+func (c *Client) WriteChunkData(nodeID uint32, offset uint64, data []byte) error {
+	if len(data) == 0 {
+		return nil // no-op: nothing to write, skip master round-trip
 	}
-	logger.Debug("[mfsclient] Write: WRITE_CHUNK_END resp len=%d bytes=%x", len(endAns), endAns)
-	if len(endAns) < 5 {
-		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END response too short (%d)", nodeID, offset, len(endAns))
+	chunkOffset := offset % ChunkSize
+	if chunkOffset+uint64(len(data)) > ChunkSize {
+		return fmt.Errorf("mfsclient: WriteChunkData(node=%d, off=%d, len=%d): data crosses chunk boundary (ChunkSize=%d)",
+			nodeID, offset, len(data), ChunkSize)
 	}
-	if endAns[4] != StatusOK {
-		return fmt.Errorf("mfsclient: Write(%d, off=%d): WRITE_CHUNK_END status 0x%02x", nodeID, offset, endAns[4])
-	}
-	logger.Debug("[mfsclient] Write: WRITE_CHUNK_END acked status=OK")
-	return nil
+	return c.Write(nodeID, offset, data)
 }
 
 // Read reads up to size bytes from file node nodeID starting at offset using
@@ -856,17 +1022,18 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 	protocolID := ans[off]
 
 	var (
-		err       error
-		chunkID   uint64
-		version   uint32
-		entrySize int
+		err        error
+		chunkID    uint64
+		version    uint32
+		fileLength uint64 // current file length before write — stored in ChunkInfo.Length
+		entrySize  int
 	)
 
 	switch protocolID {
 	case 1, 2:
 		// Proto 1/2: consume protocolid, then [length:64][chunkid:64][version:32].
 		off++ // consume protocolid byte
-		_, off, err = ReadUint64(ans, off) // file length — not needed in ChunkInfo
+		fileLength, off, err = ReadUint64(ans, off) // file length — stored in ChunkInfo.Length
 		if err != nil {
 			return nil, fmt.Errorf("length: %w", err)
 		}
@@ -889,7 +1056,7 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 		// Proto 0: no protocolid byte; off is still at 4 (start of [length:64]).
 		// The byte at offset 4 is the MSB of the 64-bit file length (always 0
 		// for files < 72 PiB), not a separate protocol identifier.
-		_, off, err = ReadUint64(ans, off) // file length
+		fileLength, off, err = ReadUint64(ans, off) // file length — stored in ChunkInfo.Length
 		if err != nil {
 			return nil, fmt.Errorf("length (proto0): %w", err)
 		}
@@ -925,6 +1092,7 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 	info := &ChunkInfo{
 		ChunkID: chunkID,
 		Version: version,
+		Length:  fileLength,
 		Servers: make([]ChunkServer, 0, n),
 	}
 
@@ -954,8 +1122,10 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 	}
 
 	// MooseFS 4.x may append a lockid:32 token after the CS entries.
-	// Any trailing 4 bytes that don't form a complete CS entry are the lockid;
-	// it must be echoed verbatim in the subsequent WRITE_CHUNK_END request.
+	// Any trailing 4 bytes that don't form a complete CS entry are parsed as a
+	// lockid and stored in ChunkInfo.LockID for diagnostics.
+	// NOTE: this client does NOT echo the lockid back in WRITE_CHUNK_END — confirmed
+	// against MooseFS 4.58.4 (all QUALIF tests pass on real cluster without it).
 	// Diagnostic: trailing=4 → lockid present; trailing=0 → omitted by master.
 	logger.Debug("mfsclient: parseChunkInfo: len=%d off=%d trailing=%d proto=%d nCS=%d",
 		len(ans), off, len(ans)-off, protocolID, len(info.Servers))

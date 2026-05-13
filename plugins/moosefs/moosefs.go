@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/CCoupel/GhostDrive/internal/logger"
@@ -123,6 +124,14 @@ func (b *Backend) Describe() plugins.PluginDescriptor {
 				Type:     plugins.ParamTypeNumber,
 				Required: false,
 				Default:  "30000",
+			},
+			{
+				Key:         "uploadConcurrency",
+				Label:       "Concurrence upload",
+				Type:        plugins.ParamTypeNumber,
+				Required:    false,
+				Default:     "4",
+				Placeholder: "1–16",
 			},
 		},
 	}
@@ -346,6 +355,16 @@ func (b *Backend) upload(ctx context.Context, local, remote string, progress plu
 		return fmt.Errorf("moosefs: upload %s: %w", remote, err)
 	}
 
+	// Parse uploadConcurrency (default 4, max 16).
+	uploadConcurrency := 4
+	b.mu.RLock()
+	if s := b.lastCfg.Params["uploadConcurrency"]; s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 16 {
+			uploadConcurrency = n
+		}
+	}
+	b.mu.RUnlock()
+
 	// Open local file.
 	f, err := os.Open(local)
 	if err != nil {
@@ -353,12 +372,12 @@ func (b *Backend) upload(ctx context.Context, local, remote string, progress plu
 	}
 	defer f.Close()
 
-	info, err := f.Stat()
+	fi, err := f.Stat()
 	if err != nil {
 		return fmt.Errorf("moosefs: upload %s: stat local: %w", remote, err)
 	}
-	totalSize := info.Size()
-	logger.Debug("upload %s: local size=%d", remote, totalSize)
+	totalSize := fi.Size()
+	logger.Debug("upload %s: local size=%d concurrency=%d", remote, totalSize, uploadConcurrency)
 
 	// Resolve parent and base name.
 	parentID, baseName, err := resolveParent(ctx, c, subDir, remote)
@@ -372,7 +391,7 @@ func (b *Backend) upload(ctx context.Context, local, remote string, progress plu
 	// does not truncate on Mknod when the node already exists.
 	if _, statErr := resolvePath(ctx, c, subDir, remote); statErr == nil {
 		// Best-effort: ignore the error — if Unlink fails the subsequent Mknod
-		// returns the existing nodeID, which Write will overwrite from offset 0.
+		// returns the existing nodeID, which WriteChunkData will overwrite from offset 0.
 		_ = c.Unlink(parentID, baseName)
 	}
 
@@ -382,38 +401,146 @@ func (b *Backend) upload(ctx context.Context, local, remote string, progress plu
 		return fmt.Errorf("moosefs: upload %s: mknod: %w", remote, err)
 	}
 
-	// Write content in chunks.
-	buf := make([]byte, chunkSize)
-	var offset uint64
-	var done int64
+	// ── Producer / consumer pipeline ─────────────────────────────────────────
+	// The producer goroutine reads the file sequentially in 64 KiB blocks and
+	// groups consecutive blocks into per-MooseFS-chunk jobs (64 MiB boundary).
+	// Jobs are sent on a buffered channel (capacity = uploadConcurrency).
+	//
+	// The consumer loop (main goroutine) reads from the channel and spawns up to
+	// uploadConcurrency goroutines (semaphore) that call WriteChunkData in
+	// parallel.
+	//
+	// Memory upper bound: uploadConcurrency × ChunkSize (e.g. 4 × 64 MiB = 256 MiB)
+	// rather than the full file size — O(fileSize) heap allocation is avoided.
+	type chunkJob struct {
+		offset uint64 // file offset where this chunk starts
+		data   []byte // accumulated data for this chunk (≤ mfsclient.ChunkSize)
+	}
 
-	for {
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("moosefs: upload %s: context cancelled: %w", remote, err)
+	jobs := make(chan chunkJob, uploadConcurrency)
+
+	// producerErr carries the terminal result of the producer goroutine:
+	// nil on clean EOF, non-nil on I/O error or context cancellation.
+	producerErr := make(chan error, 1)
+
+	go func() {
+		defer close(jobs)
+
+		readBuf := make([]byte, chunkSize) // 64 KiB I/O buffer (reused across reads)
+		var fileOffset uint64
+		var cur *chunkJob // chunk currently being accumulated
+
+		// flushCur sends the current pending job on the channel.
+		// Returns false if ctx was cancelled while blocked.
+		flushCur := func() bool {
+			if cur == nil {
+				return true
+			}
+			select {
+			case jobs <- *cur:
+				cur = nil
+				return true
+			case <-ctx.Done():
+				return false
+			}
 		}
 
-		n, readErr := f.Read(buf)
-		if n > 0 {
-			logger.Debug("[moosefs] upload: writing chunk offset=%d size=%d", offset, n)
-			if writeErr := c.Write(nodeID, offset, buf[:n]); writeErr != nil {
-				logger.Error("upload %s: write at offset %d: %v", remote, offset, writeErr)
-				return fmt.Errorf("moosefs: upload %s: write at offset %d: %w", remote, offset, writeErr)
+		for {
+			if err := ctx.Err(); err != nil {
+				producerErr <- fmt.Errorf("moosefs: upload %s: context cancelled: %w", remote, err)
+				return
 			}
-			logger.Debug("[moosefs] upload: chunk offset=%d done", offset)
-			offset += uint64(n)
-			done += int64(n)
+			n, readErr := f.Read(readBuf)
+			if n > 0 {
+				chunkIdx := uint32(fileOffset / mfsclient.ChunkSize)
+				if cur != nil && uint32(cur.offset/mfsclient.ChunkSize) == chunkIdx {
+					// Same MooseFS chunk: append to current job.
+					cur.data = append(cur.data, readBuf[:n]...)
+				} else {
+					// New MooseFS chunk: flush current job (if any) then start new.
+					if !flushCur() {
+						producerErr <- fmt.Errorf("moosefs: upload %s: context cancelled", remote)
+						return
+					}
+					dataCopy := make([]byte, n)
+					copy(dataCopy, readBuf[:n])
+					cur = &chunkJob{offset: fileOffset, data: dataCopy}
+				}
+				fileOffset += uint64(n)
+			}
+			if readErr == io.EOF {
+				if !flushCur() {
+					producerErr <- fmt.Errorf("moosefs: upload %s: context cancelled", remote)
+					return
+				}
+				producerErr <- nil
+				return
+			}
+			if readErr != nil {
+				producerErr <- fmt.Errorf("moosefs: upload %s: read local: %w", remote, readErr)
+				return
+			}
+		}
+	}()
+
+	// Consumer: drain the jobs channel and dispatch write goroutines.
+	sem := make(chan struct{}, uploadConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var uploadErr error
+	var atomicDone int64
+
+	for job := range jobs {
+		job := job
+		// Acquire semaphore (blocks when uploadConcurrency goroutines are busy).
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }() // release semaphore slot
+
+			// Abort if context cancelled or an earlier chunk failed.
+			// Still drains `jobs` implicitly: main loop keeps receiving.
+			mu.Lock()
+			prevErr := uploadErr
+			mu.Unlock()
+			if prevErr != nil || ctx.Err() != nil {
+				return
+			}
+
+			logger.Debug("[moosefs] upload: chunk offset=%d size=%d", job.offset, len(job.data))
+			if writeErr := c.WriteChunkData(nodeID, job.offset, job.data); writeErr != nil {
+				logger.Error("upload %s: chunk offset=%d: %v", remote, job.offset, writeErr)
+				mu.Lock()
+				if uploadErr == nil {
+					uploadErr = fmt.Errorf("moosefs: upload %s: write at offset %d: %w",
+						remote, job.offset, writeErr)
+				}
+				mu.Unlock()
+				return
+			}
+
+			done := atomic.AddInt64(&atomicDone, int64(len(job.data)))
 			if progress != nil {
 				progress(done, totalSize)
 			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return fmt.Errorf("moosefs: upload %s: read local: %w", remote, readErr)
-		}
+		}()
 	}
-	logger.Debug("[moosefs] upload: all chunks sent, closing")
+
+	wg.Wait()
+
+	// Check producer result (read error or context cancellation).
+	if pErr := <-producerErr; pErr != nil {
+		return pErr
+	}
+
+	mu.Lock()
+	err = uploadErr
+	mu.Unlock()
+	if err != nil {
+		return err
+	}
+	logger.Debug("[moosefs] upload: all chunks sent, total=%d", atomicDone)
 	return nil
 }
 

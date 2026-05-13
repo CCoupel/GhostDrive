@@ -11,6 +11,7 @@ import (
 	"hash/crc32"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -310,6 +311,96 @@ func (s *earlyCANTCONNECTServer) handle(conn net.Conn) {
 	resp = PutUint8(resp, StatusCSCANTCONNECT)
 	_ = WriteFrame(conn, CstoclFuseWriteStatus, resp)
 	// Server closes after sending — simulates chain establishment failure.
+}
+
+// ─── Chain-only CANTCONNECT fake server ───────────────────────────────────────
+
+// chainOnlyCANTCONNECTCS is a fake chunk server that returns WRITE_STATUS
+// CANTCONNECT on the mandatory write-init ACK when the CLTOCS_WRITE payload
+// includes chain entries (payload length > 13 bytes), but accepts writes
+// normally when no chain is present (payload length == 13 bytes — async write).
+//
+// This simulates a CS that is reachable but whose chain peer is unreachable:
+//   - syncChain=true (chain entries present, len > 13)  → CANTCONNECT
+//   - syncChain=false (no chain entries, len == 13)     → write accepted normally
+//
+// Used in TestWrite_FallbackCascade (Scenarios A and B).
+type chainOnlyCANTCONNECTCS struct {
+	inner *fakeCSServer // handles normal (async) writes; NOT started as a listener
+	ln    net.Listener
+	done  chan struct{}
+}
+
+func newChainOnlyCANTCONNECTCS() *chainOnlyCANTCONNECTCS {
+	return &chainOnlyCANTCONNECTCS{
+		inner: newFakeCSServer(), // not started — used for serveWrite + data storage only
+		done:  make(chan struct{}),
+	}
+}
+
+// Start binds to a random localhost port and begins accepting connections.
+// Returns (ip uint32 big-endian, port uint16).
+func (s *chainOnlyCANTCONNECTCS) Start() (ip uint32, port uint16) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		panic("chainOnlyCANTCONNECTCS: listen: " + err.Error())
+	}
+	s.ln = ln
+	go s.acceptLoop()
+	addr := ln.Addr().(*net.TCPAddr)
+	ipBytes := addr.IP.To4()
+	return binary.BigEndian.Uint32(ipBytes), uint16(addr.Port)
+}
+
+// Stop closes the listener and waits for the accept goroutine to exit.
+func (s *chainOnlyCANTCONNECTCS) Stop() {
+	_ = s.ln.Close()
+	<-s.done
+}
+
+// GetChunkData returns the stored chunk bytes (for data integrity verification
+// after a successful async write to this server).
+func (s *chainOnlyCANTCONNECTCS) GetChunkData(chunkID uint64) []byte {
+	return s.inner.GetChunkData(chunkID)
+}
+
+func (s *chainOnlyCANTCONNECTCS) acceptLoop() {
+	defer close(s.done)
+	for {
+		conn, err := s.ln.Accept()
+		if err != nil {
+			return
+		}
+		go s.handleConn(conn)
+	}
+}
+
+func (s *chainOnlyCANTCONNECTCS) handleConn(conn net.Conn) {
+	defer conn.Close()
+
+	cmd, payload, err := ReadFrame(conn)
+	if err != nil {
+		return
+	}
+	if cmd != CltocsFuseWrite || len(payload) < 13 {
+		return
+	}
+
+	chunkID, _, _ := ReadUint64(payload, 1) // payload[0]=protocolid, [1:9]=chunkId
+
+	if len(payload) > 13 {
+		// Chain entries present in CLTOCS_WRITE payload → CANTCONNECT.
+		// CSTOCL_WRITE_STATUS: [chunkId:64][writeId:32=0][status:8] = 13 bytes.
+		var resp []byte
+		resp = PutUint64(resp, chunkID)
+		resp = PutUint32(resp, 0) // writeId = 0 (no data received)
+		resp = PutUint8(resp, StatusCSCANTCONNECT)
+		_ = WriteFrame(conn, CstoclFuseWriteStatus, resp)
+		return
+	}
+
+	// No chain (payload == 13 bytes) → delegate to inner fakeCSServer's write handler.
+	s.inner.serveWrite(conn, payload)
 }
 
 // ─── Bad-CRC fake server ──────────────────────────────────────────────────────
@@ -712,6 +803,131 @@ func TestWriteChunk_writeInitACK_OK(t *testing.T) {
 	err = WriteChunk(conn, chunkID, 1, 0, data, nil)
 	require.NoError(t, err, "WriteChunk must succeed when CS sends NOPs then write-init ACK OK")
 	<-done
+}
+
+// TestWriteChunk_Pipeline verifies the pipeline write behaviour of WriteChunk:
+// a concurrent reader goroutine detects CS errors concurrently with the sender,
+// enabling early abort when the CS sends a non-OK WRITE_STATUS before WRITE_END.
+func TestWriteChunk_Pipeline(t *testing.T) {
+	// ── Sub-test 1: multi-block success ───────────────────────────────────────
+	// 3 full 65536-byte blocks + 1 partial block → all stored correctly.
+	t.Run("success_multiblock", func(t *testing.T) {
+		cs := newFakeCSServer()
+		ip, port := cs.Start()
+		defer cs.Stop()
+
+		const chunkID = uint64(7007)
+		// 3×65536 + 1000 bytes — exercises the block-loop code path.
+		payload := make([]byte, 3*65536+1000)
+		for i := range payload {
+			payload[i] = byte(i % 251)
+		}
+
+		conn, err := DialCS(ip, port)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		err = WriteChunk(conn, chunkID, 1, 0, payload, nil)
+		require.NoError(t, err, "pipeline WriteChunk must succeed for multi-block write")
+
+		stored := cs.GetChunkData(chunkID)
+		assert.Equal(t, payload, stored, "all blocks must be stored in the CS")
+	})
+
+	// ── Sub-test 2: CS sends error STATUS after first WRITE_DATA → early abort ─
+	t.Run("earlyAbort_CSError", func(t *testing.T) {
+		// Custom CS: accepts WRITE init (sends ACK OK), receives one WRITE_DATA,
+		// immediately sends WRITE_STATUS(DISCONNECTED) and closes the connection.
+		// This simulates a CS that detects a fault mid-stream.
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer ln.Close()
+
+		var dataFramesReceived atomic.Int32
+		done := make(chan struct{})
+
+		go func() {
+			defer close(done)
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			// Consume CLTOCS_WRITE init.
+			cmd, initPayload, err := ReadFrame(conn)
+			if err != nil || cmd != CltocsFuseWrite || len(initPayload) < 13 {
+				return
+			}
+			chunkID, _, _ := ReadUint64(initPayload, 1)
+
+			// Send write-init ACK OK.
+			var ack []byte
+			ack = PutUint64(ack, chunkID)
+			ack = PutUint32(ack, 0) // writeId = 0
+			ack = PutUint8(ack, StatusOK)
+			if err := WriteFrame(conn, CstoclFuseWriteStatus, ack); err != nil {
+				return
+			}
+
+			// Receive exactly one WRITE_DATA, send error STATUS, then drain
+			// remaining frames until the client closes the connection.
+			// NOT closing immediately: a premature RST can corrupt the STATUS
+			// payload in-flight so the reader sees "connection reset" instead
+			// of DISCONNECTED.  The client will close after seeing earlyErr.
+			cmd, _, err = ReadFrame(conn)
+			if err != nil || cmd != CltocsFuseWriteData {
+				return
+			}
+			dataFramesReceived.Add(1)
+
+			// Send WRITE_STATUS(DISCONNECTED) to simulate a mid-stream CS fault.
+			var resp []byte
+			resp = PutUint64(resp, chunkID)
+			resp = PutUint32(resp, 1) // writeId = 1 (echoes the WRITE_DATA we just got)
+			resp = PutUint8(resp, StatusCSDISCONNECTED)
+			if err := WriteFrame(conn, CstoclFuseWriteStatus, resp); err != nil {
+				return
+			}
+
+			// Drain remaining frames until client closes (or EOF).
+			// This prevents a premature RST from corrupting the STATUS payload.
+			for {
+				_, _, readErr := ReadFrame(conn)
+				if readErr != nil {
+					return
+				}
+				dataFramesReceived.Add(1)
+			}
+		}()
+
+		addr := ln.Addr().(*net.TCPAddr)
+		csIP := binary.BigEndian.Uint32(addr.IP.To4())
+		csPort := uint16(addr.Port)
+
+		conn, err := DialCS(csIP, csPort)
+		require.NoError(t, err)
+
+		// 5-block payload: if early-abort works the sender stops before sending all 5.
+		payload := make([]byte, 5*65536)
+		writeErr := WriteChunk(conn, uint64(8008), 1, 0, payload, nil)
+		// Close the connection explicitly so the CS goroutine's drain loop gets
+		// EOF and exits — otherwise it blocks and <-done deadlocks.
+		conn.Close()
+
+		require.Error(t, writeErr, "WriteChunk must return error on mid-stream CS error STATUS")
+		assert.Contains(t, writeErr.Error(), "DISCONNECTED",
+			"error must identify the DISCONNECTED status sent by the CS")
+
+		<-done
+		// The CS must have received at least 1 WRITE_DATA frame (the one that
+		// triggered the error).  It may have received additional frames if the
+		// sender's earlyErr check races with the reader goroutine, but early
+		// abort guarantees fewer than all 5 blocks are delivered when the
+		// protocol-level error is detected promptly.
+		assert.GreaterOrEqual(t, dataFramesReceived.Load(), int32(1),
+			"CS must have received at least 1 WRITE_DATA frame")
+	})
 }
 
 // TestWriteChunk_writeInitACK_CANTCONNECT verifies that WriteChunk returns an

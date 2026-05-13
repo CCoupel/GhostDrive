@@ -43,6 +43,25 @@ type fakeMFSServer struct {
 	cs       *fakeCSServer // embedded chunk server for Read/Write operations
 	csIP     uint32        // CS listen IP (uint32 big-endian)
 	csPort   uint16        // CS listen port
+
+	// Optional primary CS (listed first in WRITE_CHUNK responses when cs1Port != 0).
+	// Used by TestWrite_FallbackCS2 to inject a "bad" CS1 before the working CS2.
+	cs1IP   uint32
+	cs1Port uint16
+
+	// If > 0, WRITE_CHUNK responses include only cs1 (cs2 "disappears") starting
+	// from this call number.  Call 1 is the first WRITE_CHUNK received.
+	// Used by TestWrite_ShrinkingServerList to test the shrink-guard lock-release path.
+	singleCSFrom int32
+
+	// Counters for verifying fallback behaviour in tests.
+	writeChunkCalls           atomic.Int32
+	writeChunkEndCalls        atomic.Int32
+	writeChunkEndReleaseCalls atomic.Int32 // subset of writeChunkEndCalls where size==0 (no data committed)
+
+	// Fault injection knobs (zero value = disabled).
+	writeChunkErrOnCall           atomic.Int32 // return StatusERROR on Nth WRITE_CHUNK call (1-based)
+	writeChunkEndReleaseErrOnCall atomic.Int32 // return StatusERROR for Nth release WRITE_CHUNK_END (1-based)
 }
 
 // newFakeMFSServer creates and initialises a fake server with only the root
@@ -621,7 +640,10 @@ func (s *fakeMFSServer) handleReadChunk(conn net.Conn, payload []byte) {
 // Response proto 2:
 //
 //	[msgid:32][protocolid:8=2][length:64][chunkID:64][version:32]
-//	1×[ip:32 port:16 cs_ver:32 labelmask:32]
+//	N×[ip:32 port:16 cs_ver:32 labelmask:32]
+//
+// When s.cs1Port != 0, two CS entries are returned: cs1 first (the "bad" server),
+// cs2 second (the working server). This enables fallback tests.
 func (s *fakeMFSServer) handleWriteChunk(conn net.Conn, payload []byte) {
 	// Minimum 13 bytes: msgid(4)+nodeID(4)+index(4)+chunkopflags(1).
 	// Accept 16 bytes too for backward compat with old test callers.
@@ -640,21 +662,51 @@ func (s *fakeMFSServer) handleWriteChunk(conn net.Conn, payload []byte) {
 		return
 	}
 
-	// Build proto 2 response: protocolid=2, file length, chunkid, version, 1 server entry.
+	// Track how many WRITE_CHUNK calls we receive (used by fallback tests).
+	s.writeChunkCalls.Add(1)
+	callNum := s.writeChunkCalls.Load() // 1-based call number
+
+	// Fault injection: return StatusERROR on the Nth call if configured.
+	if n := s.writeChunkErrOnCall.Load(); n > 0 && callNum == n {
+		writeStatusReply(conn, MatoclFuseWriteChunk, msgid, StatusERROR)
+		return
+	}
+
+	// Build proto 2 response: protocolid=2, file length, chunkid, version, N server entries.
 	fileLen := uint64(0)
 	if node != nil {
 		fileLen = uint64(len(node.content))
 	}
 	var resp []byte
 	resp = PutUint32(resp, msgid)
-	resp = PutUint8(resp, 2)               // protocolid = 2
-	resp = PutUint64(resp, fileLen)         // current file length
-	resp = PutUint64(resp, uint64(nodeID))  // chunkID = nodeID (fake mapping)
-	resp = PutUint32(resp, 1)               // chunk version
-	resp = PutUint32(resp, s.csIP)
-	resp = PutUint16(resp, s.csPort)
-	resp = PutUint32(resp, 0) // cs_ver (unused in fake)
-	resp = PutUint32(resp, 0) // labelmask (unused in fake)
+	resp = PutUint8(resp, 2)              // protocolid = 2
+	resp = PutUint64(resp, fileLen)        // current file length
+	resp = PutUint64(resp, uint64(nodeID)) // chunkID = nodeID (fake mapping)
+	resp = PutUint32(resp, 1)              // chunk version
+
+	// Determine which CSes to include in the response.
+	// singleCSFrom > 0: shrink to cs1-only starting from that call number.
+	shrunk := s.cs1Port != 0 && s.singleCSFrom > 0 && callNum >= s.singleCSFrom
+	if shrunk {
+		// Shrunk mode: return only cs1 (cs2 has "left the cluster").
+		resp = PutUint32(resp, s.cs1IP)
+		resp = PutUint16(resp, s.cs1Port)
+		resp = PutUint32(resp, 0) // cs_ver (unused in fake)
+		resp = PutUint32(resp, 0) // labelmask (unused in fake)
+	} else {
+		if s.cs1Port != 0 {
+			// Dual-CS mode: list cs1 first (bad), embedded cs2 second (working).
+			resp = PutUint32(resp, s.cs1IP)
+			resp = PutUint16(resp, s.cs1Port)
+			resp = PutUint32(resp, 0) // cs_ver (unused in fake)
+			resp = PutUint32(resp, 0) // labelmask (unused in fake)
+		}
+		// Include the normal embedded CS (cs2 in dual-CS mode, only CS in normal mode).
+		resp = PutUint32(resp, s.csIP)
+		resp = PutUint16(resp, s.csPort)
+		resp = PutUint32(resp, 0) // cs_ver (unused in fake)
+		resp = PutUint32(resp, 0) // labelmask (unused in fake)
+	}
 	_ = WriteFrame(conn, MatoclFuseWriteChunk, resp)
 }
 
@@ -683,6 +735,25 @@ func (s *fakeMFSServer) handleWriteChunkEnd(conn net.Conn, payload []byte) {
 	_, off, _ = ReadUint32(payload, off)       // chunkindx (skip — unused by fake server)
 	length, off, _ := ReadUint64(payload, off) // new total file length
 	_ = off                                    // chunkopflags:8 [offset:32 size:32] follow (skip)
+
+	// Track how many WRITE_CHUNK_END calls we receive (used by fallback tests).
+	s.writeChunkEndCalls.Add(1)
+
+	// In the extended format (≥37 bytes), detect release calls where size==0.
+	// Layout: [msgid:4][chunkID:8][inode:4][chunkindx:4][length:8][flags:1][offset:4][size:4]
+	// size field starts at byte 33 (4+8+4+4+8+1+4 = 33).
+	if len(payload) >= 37 {
+		var size uint32
+		size, _, _ = ReadUint32(payload, 33)
+		if size == 0 {
+			s.writeChunkEndReleaseCalls.Add(1)
+			// Fault injection: return StatusERROR on the Nth release if configured.
+			if n := s.writeChunkEndReleaseErrOnCall.Load(); n > 0 && s.writeChunkEndReleaseCalls.Load() == n {
+				writeStatusReply(conn, MatoclFuseWriteChunkEnd, msgid, StatusERROR)
+				return
+			}
+		}
+	}
 
 	nodeID := uint32(chunkID) // reverse of fake mapping: chunkID = nodeID
 
@@ -1253,4 +1324,848 @@ func TestWrite_lockIDParsing(t *testing.T) {
 		assert.Equal(t, wantLockID, info.LockID,
 			"lockid must be extracted even when there are 0 CS entries")
 	})
+}
+
+// ─── Fallback CS2 tests ───────────────────────────────────────────────────────
+
+// TestWrite_FallbackCS2 verifies that Write() automatically falls back to CS2
+// when CS1 is unreachable (closes the connection immediately after TCP accept).
+//
+// Scenario:
+//   - The fake master returns 2 chunk servers: cs1 (bad) first, cs2 (good) second.
+//   - cs1 accepts the TCP connection then immediately closes it (EOF on write-init ACK).
+//   - cs2 accepts and processes the write normally.
+//
+// Verifies:
+//   - Upload succeeds (no error returned by Write).
+//   - The master receives 2× WRITE_CHUNK (one per attempt: cs1 then cs2).
+//   - The master receives 2× WRITE_CHUNK_END: 1 release (after cs1 failure) + 1 commit (after cs2 success).
+//   - The final file content matches the written data.
+func TestWrite_FallbackCS2(t *testing.T) {
+	// ── CS1: accepts TCP connections and closes them immediately ──────────────
+	// This simulates a chunk server that is reachable at TCP level but rejects
+	// the write protocol (e.g., dead process, kernel accepts but app not running).
+	// WriteChunk will fail with EOF when reading the mandatory write-init ACK.
+	cs1Ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	cs1Done := make(chan struct{})
+	go func() {
+		defer close(cs1Done)
+		for {
+			conn, err := cs1Ln.Accept()
+			if err != nil {
+				return // listener closed
+			}
+			conn.Close() // close immediately — client gets EOF on write-init ACK
+		}
+	}()
+	t.Cleanup(func() {
+		_ = cs1Ln.Close()
+		<-cs1Done
+	})
+	cs1Addr := cs1Ln.Addr().(*net.TCPAddr)
+	cs1IPBytes := cs1Addr.IP.To4()
+	require.NotNil(t, cs1IPBytes, "cs1 must have IPv4 address")
+	cs1IPUint32 := uint32(cs1IPBytes[0])<<24 | uint32(cs1IPBytes[1])<<16 |
+		uint32(cs1IPBytes[2])<<8 | uint32(cs1IPBytes[3])
+	cs1Port := uint16(cs1Addr.Port)
+
+	// ── Fake master: returns [cs1, cs2] in WRITE_CHUNK response ──────────────
+	srv := newFakeMFSServer()
+	addr := srv.Start()
+	t.Cleanup(srv.Stop)
+
+	// Configure cs1 as the bad first entry (the embedded srv.cs remains cs2).
+	srv.cs1IP = cs1IPUint32
+	srv.cs1Port = cs1Port
+
+	// ── Connect client ────────────────────────────────────────────────────────
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	var portNum int
+	_, err = fmt.Sscanf(portStr, "%d", &portNum)
+	require.NoError(t, err)
+
+	c, err := Dial(host, portNum)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+
+	// ── Create a file node ────────────────────────────────────────────────────
+	nodeID, err := c.Mknod(RootNodeID, "fallback_test.bin", 0o644)
+	require.NoError(t, err)
+
+	// ── Write — must succeed via cs2 after cs1 fails ──────────────────────────
+	data := []byte("fallback-to-cs2-test-data")
+	writeErr := c.Write(nodeID, 0, data)
+	require.NoError(t, writeErr, "Write must succeed: cs1 fails, cs2 succeeds")
+
+	// ── Verify call counts on the fake master ─────────────────────────────────
+	// Each Write attempt calls WRITE_CHUNK once: 2 attempts → 2 WRITE_CHUNK calls.
+	assert.Equal(t, int32(2), srv.writeChunkCalls.Load(),
+		"master must receive 2 WRITE_CHUNK calls (one per CS attempt)")
+
+	// writeChunkRelease sends WRITE_CHUNK_END after cs1 failure (release, no size change).
+	// writeChunkEnd sends WRITE_CHUNK_END after cs2 success (commit, new length).
+	// Total: 2 WRITE_CHUNK_END calls.
+	assert.Equal(t, int32(2), srv.writeChunkEndCalls.Load(),
+		"master must receive 2 WRITE_CHUNK_END calls (1 release + 1 commit)")
+
+	// ── Verify file content ────────────────────────────────────────────────────
+	// Read back and verify data integrity.
+	got, err := c.Read(nodeID, 0, uint32(len(data)))
+	require.NoError(t, err)
+	assert.Equal(t, data, got, "data read back must match what was written via cs2 fallback")
+
+	// Verify size via GetAttr.
+	attr, err := c.GetAttr(nodeID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(len(data)), attr.Size,
+		"file size must reflect data written via cs2 after cs1 fallback")
+}
+
+// TestWrite_FallbackCS2_DialRefused verifies that Write() falls back to CS2 when
+// CS1 is completely unreachable at the TCP level (connection refused — no listener).
+//
+// This covers the `dialErr != nil` branch inside the Write() retry loop, which is
+// distinct from TestWrite_FallbackCS2 (where CS1 accepts the TCP connection but
+// then drops it, triggering a WriteChunk/EOF error instead of a dial error).
+//
+// Verifies:
+//   - Upload succeeds (Write returns nil).
+//   - The master receives 2× WRITE_CHUNK (one per CS attempt).
+//   - The master receives 2× WRITE_CHUNK_END: 1 release (dial failure) + 1 commit.
+//   - The final file content and size are correct.
+func TestWrite_FallbackCS2_DialRefused(t *testing.T) {
+	// ── CS1: bind a port then close the listener immediately ─────────────────
+	// After Close(), any DialCS to this port returns "connection refused".
+	cs1Ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	cs1Addr := cs1Ln.Addr().(*net.TCPAddr)
+	_ = cs1Ln.Close() // close immediately — no goroutine needed
+
+	cs1IPBytes := cs1Addr.IP.To4()
+	require.NotNil(t, cs1IPBytes, "cs1 must have IPv4 address")
+	cs1IPUint32 := uint32(cs1IPBytes[0])<<24 | uint32(cs1IPBytes[1])<<16 |
+		uint32(cs1IPBytes[2])<<8 | uint32(cs1IPBytes[3])
+	cs1Port := uint16(cs1Addr.Port)
+
+	// ── Fake master: returns [cs1 (refused), cs2 (good)] ─────────────────────
+	srv := newFakeMFSServer()
+	addr := srv.Start()
+	t.Cleanup(srv.Stop)
+
+	srv.cs1IP = cs1IPUint32
+	srv.cs1Port = cs1Port
+
+	// ── Connect client ────────────────────────────────────────────────────────
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	var portNum int
+	_, err = fmt.Sscanf(portStr, "%d", &portNum)
+	require.NoError(t, err)
+
+	c, err := Dial(host, portNum)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+
+	// ── Create a file node ────────────────────────────────────────────────────
+	nodeID, err := c.Mknod(RootNodeID, "dial_refused_fallback.bin", 0o644)
+	require.NoError(t, err)
+
+	// ── Write — must succeed via cs2 after cs1 dial is refused ────────────────
+	data := []byte("dial-refused-fallback-test-data")
+	writeErr := c.Write(nodeID, 0, data)
+	require.NoError(t, writeErr, "Write must succeed: cs1 dial refused, cs2 succeeds")
+
+	// ── Verify call counts ────────────────────────────────────────────────────
+	// 2 WRITE_CHUNK: one fresh lock per attempt (i=0 → cs1, i=1 → cs2).
+	assert.Equal(t, int32(2), srv.writeChunkCalls.Load(),
+		"master must receive 2 WRITE_CHUNK calls (one per CS attempt)")
+
+	// 2 WRITE_CHUNK_END: release after cs1 dial failure + commit after cs2 success.
+	assert.Equal(t, int32(2), srv.writeChunkEndCalls.Load(),
+		"master must receive 2 WRITE_CHUNK_END calls (1 release + 1 commit)")
+
+	// ── Verify data integrity ─────────────────────────────────────────────────
+	got, err := c.Read(nodeID, 0, uint32(len(data)))
+	require.NoError(t, err)
+	assert.Equal(t, data, got, "data read back must match what was written via cs2 after dial refusal")
+
+	attr, err := c.GetAttr(nodeID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(len(data)), attr.Size,
+		"file size must reflect data committed via cs2")
+}
+
+// TestWrite_AllServersFail verifies that Write() returns an error when every
+// available chunk server is unreachable across all 4 write strategies.
+//
+// With 2 chunk servers (cs1 = EOF, cs2 = refused) and 4 cascade strategies:
+//   - Strategy 0 (sync CS1, chain=[CS2]): cs1 EOF    → 1 WRITE_CHUNK + 1 release WRITE_CHUNK_END
+//   - Strategy 1 (sync CS2, chain=[]):   cs2 refused → 1 WRITE_CHUNK + 1 release WRITE_CHUNK_END
+//   - Strategy 2 (async CS1):            cs1 EOF    → 1 WRITE_CHUNK + 1 release WRITE_CHUNK_END
+//   - Strategy 3 (async CS2):            cs2 refused → 1 WRITE_CHUNK + 1 release WRITE_CHUNK_END
+//
+// Verifies:
+//   - Write returns a non-nil error containing "all write strategies failed".
+//   - The master receives 4× WRITE_CHUNK (one per strategy).
+//   - The master receives 4× WRITE_CHUNK_END: all are releases (no commit issued).
+func TestWrite_AllServersFail(t *testing.T) {
+	// ── CS1: accept TCP connections then close them immediately ───────────────
+	cs1Ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	cs1Done := make(chan struct{})
+	go func() {
+		defer close(cs1Done)
+		for {
+			conn, err := cs1Ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close() // drop immediately — WriteChunk gets EOF
+		}
+	}()
+	t.Cleanup(func() {
+		_ = cs1Ln.Close()
+		<-cs1Done
+	})
+	cs1Addr := cs1Ln.Addr().(*net.TCPAddr)
+	cs1IPBytes := cs1Addr.IP.To4()
+	require.NotNil(t, cs1IPBytes, "cs1 must have IPv4 address")
+	cs1IPUint32 := uint32(cs1IPBytes[0])<<24 | uint32(cs1IPBytes[1])<<16 |
+		uint32(cs1IPBytes[2])<<8 | uint32(cs1IPBytes[3])
+	cs1Port := uint16(cs1Addr.Port)
+
+	// ── Fake master: dual-CS mode — cs1 (bad) first, embedded cs2 second ─────
+	srv := newFakeMFSServer()
+	addr := srv.Start()
+	t.Cleanup(srv.Stop)
+
+	srv.cs1IP = cs1IPUint32
+	srv.cs1Port = cs1Port
+
+	// ── Connect client ────────────────────────────────────────────────────────
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	var portNum int
+	_, err = fmt.Sscanf(portStr, "%d", &portNum)
+	require.NoError(t, err)
+
+	c, err := Dial(host, portNum)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+
+	// ── Create a file node ────────────────────────────────────────────────────
+	nodeID, err := c.Mknod(RootNodeID, "all_fail_test.bin", 0o644)
+	require.NoError(t, err)
+
+	// ── Stop the embedded CS so cs2 is also unreachable ───────────────────────
+	// srv.Stop() (via t.Cleanup) will call srv.cs.Stop() again; that is safe:
+	// listener.Close() is idempotent and <-done on a closed channel returns immediately.
+	srv.cs.Stop()
+
+	// ── Write — must fail: all chunk servers are unreachable ─────────────────
+	data := []byte("this-write-should-fail-on-all-cs")
+	writeErr := c.Write(nodeID, 0, data)
+	require.Error(t, writeErr, "Write must return an error when all CSes are unreachable")
+	assert.Contains(t, writeErr.Error(), "all write strategies failed",
+		"error must indicate that all write strategies were exhausted")
+
+	// ── Verify call counts ────────────────────────────────────────────────────
+	// 4 WRITE_CHUNK: one lock acquisition per strategy (4 strategies × 2 servers = 4 tries).
+	assert.Equal(t, int32(4), srv.writeChunkCalls.Load(),
+		"master must receive 4 WRITE_CHUNK calls (one per strategy)")
+
+	// 4 WRITE_CHUNK_END: all are releases (size==0 — no commit issued for any strategy).
+	assert.Equal(t, int32(4), srv.writeChunkEndCalls.Load(),
+		"master must receive 4 WRITE_CHUNK_END releases — no commit when all strategies fail")
+	assert.Equal(t, int32(4), srv.writeChunkEndReleaseCalls.Load(),
+		"all 4 WRITE_CHUNK_END calls must be releases (size==0)")
+
+	// ── Verify the file was NOT modified ─────────────────────────────────────
+	// After a failed Write, the file size must remain 0 (no partial commit).
+	// Note: GetAttr after cs.Stop() still works because it is a master operation.
+	attr, err := c.GetAttr(nodeID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), attr.Size,
+		"file size must remain 0 after a completely failed Write (no partial commit)")
+}
+
+// ─── Cascade 4-strategy fallback tests ───────────────────────────────────────
+
+// TestWrite_FallbackCascade verifies the 4-strategy write cascade defined in
+// defaultWriteStrategies.  Three scenarios are covered:
+//
+//   A. CS1 returns CANTCONNECT on sync writes (chain present) but CS2 accepts
+//      the sync write with an empty chain → strategy 1 (sync CS2) succeeds.
+//
+//   B. CS1 returns CANTCONNECT on sync writes, CS2 is unreachable (DialCS fails)
+//      → strategies 0 and 1 fail → strategy 2 (async CS1) succeeds.
+//
+//   C. CS1 closes every connection immediately (EOF), CS2 is unreachable →
+//      all 4 strategies fail → Write() returns "all write strategies failed".
+func TestWrite_FallbackCascade(t *testing.T) {
+	// ── Scenario A: sync chain CS1 CANTCONNECT → sync CS2 succeeds ───────────
+
+	t.Run("ScenarioA_SyncChainCS1_CANTCONNECT_SyncCS2_Succeeds", func(t *testing.T) {
+		// CS1 = chainOnlyCANTCONNECTCS: CANTCONNECT when chain present, normal async write.
+		// CS2 = normal embedded fakeCSServer.
+		// Strategy 0 ({csIdx:0, sync}, chain=[CS2]): CS1 CANTCONNECT → fail, release.
+		// Strategy 1 ({csIdx:1, sync}, chain=[]):   CS2 with empty chain → success, commit.
+		cs1 := newChainOnlyCANTCONNECTCS()
+		cs1IP, cs1Port := cs1.Start()
+		t.Cleanup(cs1.Stop)
+
+		srv := newFakeMFSServer()
+		addr := srv.Start()
+		t.Cleanup(srv.Stop)
+
+		// cs1 listed first in WRITE_CHUNK response; embedded srv.cs is CS2.
+		srv.cs1IP = cs1IP
+		srv.cs1Port = cs1Port
+
+		host, portStr, err := net.SplitHostPort(addr)
+		require.NoError(t, err)
+		var portNum int
+		_, err = fmt.Sscanf(portStr, "%d", &portNum)
+		require.NoError(t, err)
+
+		c, err := Dial(host, portNum)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+		require.NoError(t, c.Register())
+
+		nodeID, err := c.Mknod(RootNodeID, "cascade_a.bin", 0o644)
+		require.NoError(t, err)
+
+		data := []byte("cascade-scenario-a-test-data")
+		writeErr := c.Write(nodeID, 0, data)
+		require.NoError(t, writeErr,
+			"Write must succeed: strategy 0 CANTCONNECT, strategy 1 (sync CS2) succeeds")
+
+		// Strategies 0 and 1 both try a fresh lock → 2 WRITE_CHUNK.
+		assert.Equal(t, int32(2), srv.writeChunkCalls.Load(),
+			"2 WRITE_CHUNK calls expected (strategy 0 + strategy 1)")
+		// Strategy 0 releases, strategy 1 commits → 2 WRITE_CHUNK_END (1 release + 1 commit).
+		assert.Equal(t, int32(2), srv.writeChunkEndCalls.Load(),
+			"2 WRITE_CHUNK_END calls expected (1 release + 1 commit)")
+		assert.Equal(t, int32(1), srv.writeChunkEndReleaseCalls.Load(),
+			"1 release WRITE_CHUNK_END expected (strategy 0 CANTCONNECT)")
+
+		// CS2 (embedded srv.cs) stored the data → full data integrity check.
+		got, err := c.Read(nodeID, 0, uint32(len(data)))
+		require.NoError(t, err)
+		assert.Equal(t, data, got, "data read back must match what was written via CS2 (strategy 1)")
+
+		attr, err := c.GetAttr(nodeID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(len(data)), attr.Size,
+			"file size must reflect data committed via strategy 1 (sync CS2)")
+	})
+
+	// ── Scenario B: both sync strategies fail → async CS1 succeeds ───────────
+
+	t.Run("ScenarioB_BothSyncFail_AsyncCS1_Succeeds", func(t *testing.T) {
+		// CS1 = chainOnlyCANTCONNECTCS: CANTCONNECT when chain present, normal async.
+		// CS2 = embedded srv.cs, stopped before Write() → DialCS fails.
+		// Strategy 0 ({csIdx:0, sync}, chain=[CS2]): CS1 CANTCONNECT → fail, release.
+		// Strategy 1 ({csIdx:1, sync}, chain=[]):   CS2 DialCS refused → fail, release.
+		// Strategy 2 ({csIdx:0, async}, chain=nil): CS1 async → success, commit.
+		cs1 := newChainOnlyCANTCONNECTCS()
+		cs1IP, cs1Port := cs1.Start()
+		t.Cleanup(cs1.Stop)
+
+		srv := newFakeMFSServer()
+		addr := srv.Start()
+		t.Cleanup(srv.Stop)
+
+		srv.cs1IP = cs1IP
+		srv.cs1Port = cs1Port
+
+		host, portStr, err := net.SplitHostPort(addr)
+		require.NoError(t, err)
+		var portNum int
+		_, err = fmt.Sscanf(portStr, "%d", &portNum)
+		require.NoError(t, err)
+
+		c, err := Dial(host, portNum)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+		require.NoError(t, c.Register())
+
+		nodeID, err := c.Mknod(RootNodeID, "cascade_b.bin", 0o644)
+		require.NoError(t, err)
+
+		// Stop CS2 (embedded) so DialCS to it fails.
+		srv.cs.Stop()
+
+		data := []byte("cascade-scenario-b-test-data")
+		writeErr := c.Write(nodeID, 0, data)
+		require.NoError(t, writeErr,
+			"Write must succeed: strategies 0+1 fail, strategy 2 (async CS1) succeeds")
+
+		// 3 strategies tried → 3 WRITE_CHUNK.
+		assert.Equal(t, int32(3), srv.writeChunkCalls.Load(),
+			"3 WRITE_CHUNK calls expected (strategies 0+1+2)")
+		// Strategies 0+1 release, strategy 2 commits → 3 WRITE_CHUNK_END (2 releases + 1 commit).
+		assert.Equal(t, int32(3), srv.writeChunkEndCalls.Load(),
+			"3 WRITE_CHUNK_END calls expected (2 releases + 1 commit)")
+		assert.Equal(t, int32(2), srv.writeChunkEndReleaseCalls.Load(),
+			"2 release WRITE_CHUNK_END expected (strategies 0 and 1 failed)")
+
+		// Data was written to cs1.inner (chainOnlyCANTCONNECTCS).
+		// The fake master pulls from srv.cs (stopped) on WRITE_CHUNK_END, so
+		// node.content is zeroed — but the data IS present in cs1.inner.chunks.
+		// Verify both the committed size (master view) and the raw bytes (CS view).
+		chunkData := cs1.GetChunkData(uint64(nodeID))
+		assert.Equal(t, data, chunkData,
+			"data must be physically stored in cs1.inner after async CS1 write (strategy 2)")
+
+		attr, err := c.GetAttr(nodeID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(len(data)), attr.Size,
+			"file size must reflect data committed via async CS1 (strategy 2)")
+	})
+
+	// ── Scenario C: all strategies fail → error ───────────────────────────────
+
+	t.Run("ScenarioC_AllStrategiesFail", func(t *testing.T) {
+		// CS1 = accepts TCP then closes immediately (EOF on write-init ACK).
+		// CS2 = embedded srv.cs, stopped before Write() → DialCS fails.
+		// All 4 strategies fail.
+		cs1Ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		cs1Done := make(chan struct{})
+		go func() {
+			defer close(cs1Done)
+			for {
+				conn, err := cs1Ln.Accept()
+				if err != nil {
+					return
+				}
+				conn.Close() // drop immediately — WriteChunk gets EOF on write-init ACK
+			}
+		}()
+		t.Cleanup(func() {
+			_ = cs1Ln.Close()
+			<-cs1Done
+		})
+		cs1Addr := cs1Ln.Addr().(*net.TCPAddr)
+		cs1IPBytes := cs1Addr.IP.To4()
+		require.NotNil(t, cs1IPBytes, "cs1 must have IPv4 address")
+		cs1IPUint32 := uint32(cs1IPBytes[0])<<24 | uint32(cs1IPBytes[1])<<16 |
+			uint32(cs1IPBytes[2])<<8 | uint32(cs1IPBytes[3])
+
+		srv := newFakeMFSServer()
+		addr := srv.Start()
+		t.Cleanup(srv.Stop)
+
+		srv.cs1IP = cs1IPUint32
+		srv.cs1Port = uint16(cs1Addr.Port)
+
+		host, portStr, err := net.SplitHostPort(addr)
+		require.NoError(t, err)
+		var portNum int
+		_, err = fmt.Sscanf(portStr, "%d", &portNum)
+		require.NoError(t, err)
+
+		c, err := Dial(host, portNum)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+		require.NoError(t, c.Register())
+
+		nodeID, err := c.Mknod(RootNodeID, "cascade_c.bin", 0o644)
+		require.NoError(t, err)
+
+		// Stop CS2 so all 4 strategies exhaust.
+		srv.cs.Stop()
+
+		data := []byte("cascade-scenario-c-test-data")
+		writeErr := c.Write(nodeID, 0, data)
+		require.Error(t, writeErr, "Write must fail when all 4 strategies are exhausted")
+		assert.Contains(t, writeErr.Error(), "all write strategies failed",
+			"error must indicate that all strategies were exhausted")
+
+		// All 4 strategies tried → 4 WRITE_CHUNK + 4 WRITE_CHUNK_END (all releases).
+		assert.Equal(t, int32(4), srv.writeChunkCalls.Load(),
+			"4 WRITE_CHUNK calls expected (all strategies tried)")
+		assert.Equal(t, int32(4), srv.writeChunkEndCalls.Load(),
+			"4 WRITE_CHUNK_END calls expected (all releases, no commit)")
+		assert.Equal(t, int32(4), srv.writeChunkEndReleaseCalls.Load(),
+			"all 4 WRITE_CHUNK_END calls must be releases (size==0)")
+
+		// File must not have been modified.
+		attr, err := c.GetAttr(nodeID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(0), attr.Size,
+			"file size must remain 0 when all strategies fail (no partial commit)")
+	})
+}
+
+// TestWrite_ShrinkingServerList verifies that Write() correctly releases the
+// master lock when a re-lock returns a shorter server list that makes the
+// current strategy's csIdx out of range (the "shrink guard" path in Write()).
+//
+// Scenario (2 servers initially, shrinks to 1 after call 1):
+//   - CS1 = chainOnlyCANTCONNECTCS: CANTCONNECT on sync writes, normal async writes.
+//   - CS2 = embedded srv.cs (always reachable, but excluded from WRITE_CHUNK responses
+//     starting from the 2nd call via singleCSFrom=2).
+//
+// Strategy trace:
+//   - Strategy 0 ({csIdx:0, sync}, call 1): [CS1, CS2] → CS1 CANTCONNECT → release. 1 WRITE_CHUNK.
+//   - Strategy 1 ({csIdx:1, sync}, call 2): [CS1] only → csIdx=1 >= 1 → shrink guard → release. 1 WRITE_CHUNK.
+//   - Strategy 2 ({csIdx:0, async}, call 3): [CS1] only → csIdx=0 < 1 → CS1 async → SUCCESS. 1 WRITE_CHUNK.
+//
+// Verifies:
+//   - Write() returns nil (upload succeeds via strategy 2).
+//   - Master receives 3× WRITE_CHUNK.
+//   - Master receives 3× WRITE_CHUNK_END: 2 releases (strategies 0 + 1) + 1 commit.
+//   - writeChunkEndReleaseCalls == 2 (both the CANTCONNECT release AND the shrink-guard release).
+func TestWrite_ShrinkingServerList(t *testing.T) {
+	// ── CS1: chainOnlyCANTCONNECTCS ──────────────────────────────────────────
+	cs1 := newChainOnlyCANTCONNECTCS()
+	cs1IP, cs1Port := cs1.Start()
+	t.Cleanup(cs1.Stop)
+
+	// ── Fake master ───────────────────────────────────────────────────────────
+	srv := newFakeMFSServer()
+	addr := srv.Start()
+	t.Cleanup(srv.Stop)
+
+	srv.cs1IP = cs1IP
+	srv.cs1Port = cs1Port
+	// From the 2nd WRITE_CHUNK call onward, return only cs1 (cs2 "leaves the cluster").
+	srv.singleCSFrom = 2
+
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	var portNum int
+	_, err = fmt.Sscanf(portStr, "%d", &portNum)
+	require.NoError(t, err)
+
+	c, err := Dial(host, portNum)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+
+	// ── Create a file node ────────────────────────────────────────────────────
+	nodeID, err := c.Mknod(RootNodeID, "shrink_test.bin", 0o644)
+	require.NoError(t, err)
+
+	// ── Write — must succeed via strategy 2 (async CS1) ──────────────────────
+	data := []byte("shrinking-server-list-test-data")
+	writeErr := c.Write(nodeID, 0, data)
+	require.NoError(t, writeErr,
+		"Write must succeed: strategy 0 CANTCONNECT, strategy 1 skipped (shrink guard), strategy 2 async CS1")
+
+	// ── Verify call counts ────────────────────────────────────────────────────
+	// 3 strategies reached a lock call → 3 WRITE_CHUNK.
+	assert.Equal(t, int32(3), srv.writeChunkCalls.Load(),
+		"3 WRITE_CHUNK calls expected (strategy 0, re-lock strategy 1, re-lock strategy 2)")
+
+	// Strategy 0 releases (CANTCONNECT), strategy 1 releases (shrink guard), strategy 2 commits.
+	assert.Equal(t, int32(3), srv.writeChunkEndCalls.Load(),
+		"3 WRITE_CHUNK_END calls expected (2 releases + 1 commit)")
+	assert.Equal(t, int32(2), srv.writeChunkEndReleaseCalls.Load(),
+		"2 release WRITE_CHUNK_END expected: CANTCONNECT release + shrink-guard release")
+
+	// ── Verify committed size ─────────────────────────────────────────────────
+	attr, err := c.GetAttr(nodeID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(len(data)), attr.Size,
+		"file size must reflect data committed via async CS1 (strategy 2)")
+}
+
+// TestWriteChunkData_MultiBlock verifies that WriteChunkData correctly writes
+// data larger than a single 65 536-byte block (multiple WRITE_DATA frames) using
+// exactly one WRITE_CHUNK master lock and one WRITE_CHUNK_END commit.
+//
+// Payload: 5 × 65 536 bytes = 327 680 bytes.
+//
+// Expected behaviour:
+//   - 1 WRITE_CHUNK  (writeChunkCalls == 1)
+//   - 1 WRITE_CHUNK_END commit (writeChunkEndCalls == 1, releases == 0)
+//   - All 327 680 bytes stored correctly in the fake CS.
+func TestWriteChunkData_MultiBlock(t *testing.T) {
+	srv := newFakeMFSServer()
+	addr := srv.Start()
+	t.Cleanup(srv.Stop)
+
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	var portNum int
+	_, err = fmt.Sscanf(portStr, "%d", &portNum)
+	require.NoError(t, err)
+
+	c, err := Dial(host, portNum)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+
+	nodeID, err := c.Mknod(RootNodeID, "multiblock.bin", 0o644)
+	require.NoError(t, err)
+
+	// Build 5 × 65 536-byte payload with distinctive fill.
+	const blocks = 5
+	payload := make([]byte, blocks*65536)
+	for i := range payload {
+		payload[i] = byte((i / 65536) + 1) // block 0→1, block 1→2, …
+	}
+
+	err = c.WriteChunkData(nodeID, 0, payload)
+	require.NoError(t, err, "WriteChunkData must succeed for multi-block write")
+
+	// ── Verify master call counts ─────────────────────────────────────────────
+	assert.Equal(t, int32(1), srv.writeChunkCalls.Load(),
+		"WriteChunkData must issue exactly 1 WRITE_CHUNK master call")
+	assert.Equal(t, int32(1), srv.writeChunkEndCalls.Load(),
+		"WriteChunkData must issue exactly 1 WRITE_CHUNK_END master call (commit)")
+	assert.Equal(t, int32(0), srv.writeChunkEndReleaseCalls.Load(),
+		"no release WRITE_CHUNK_END expected on success")
+
+	// ── Verify data stored in CS ──────────────────────────────────────────────
+	stored := srv.cs.GetChunkData(uint64(nodeID))
+	assert.Equal(t, payload, stored,
+		"all %d bytes must be stored correctly in the CS", len(payload))
+
+	// ── Verify committed size (master view) ───────────────────────────────────
+	attr, err := c.GetAttr(nodeID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(len(payload)), attr.Size,
+		"GetAttr must reflect the committed file size")
+}
+
+// TestWriteChunkData_BoundaryCheck verifies that WriteChunkData returns an
+// error (without performing any I/O) when the offset+len(data) combination
+// would span more than one MooseFS chunk boundary.
+func TestWriteChunkData_BoundaryCheck(t *testing.T) {
+	srv := newFakeMFSServer()
+	addr := srv.Start()
+	t.Cleanup(srv.Stop)
+
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	var portNum int
+	_, err = fmt.Sscanf(portStr, "%d", &portNum)
+	require.NoError(t, err)
+
+	c, err := Dial(host, portNum)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+
+	nodeID, err := c.Mknod(RootNodeID, "boundary.bin", 0o644)
+	require.NoError(t, err)
+
+	// Write that would cross the first 64 MiB chunk boundary.
+	// offset = ChunkSize - 1 byte before end; len(data) = 2 → spans boundary.
+	offset := ChunkSize - 1
+	data := make([]byte, 2)
+	err = c.WriteChunkData(nodeID, offset, data)
+	require.Error(t, err, "WriteChunkData must reject writes that cross a chunk boundary")
+	assert.Contains(t, err.Error(), "crosses chunk boundary",
+		"error must mention chunk boundary")
+
+	// No master calls should have been made (error is pre-flight).
+	assert.Equal(t, int32(0), srv.writeChunkCalls.Load(),
+		"no WRITE_CHUNK must be issued when boundary check fails")
+}
+
+// TestWriteChunkData_EmptyData verifies that WriteChunkData(data=nil/empty) is a
+// no-op: it returns nil and does NOT issue any master WRITE_CHUNK request.
+func TestWriteChunkData_EmptyData(t *testing.T) {
+	srv := newFakeMFSServer()
+	addr := srv.Start()
+	t.Cleanup(srv.Stop)
+
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	var portNum int
+	_, err = fmt.Sscanf(portStr, "%d", &portNum)
+	require.NoError(t, err)
+
+	c, err := Dial(host, portNum)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+
+	nodeID, err := c.Mknod(RootNodeID, "empty.bin", 0o644)
+	require.NoError(t, err)
+
+	// nil slice
+	require.NoError(t, c.WriteChunkData(nodeID, 0, nil),
+		"WriteChunkData(nil) must return nil")
+	// zero-length slice
+	require.NoError(t, c.WriteChunkData(nodeID, 1024, []byte{}),
+		"WriteChunkData([]byte{}) must return nil")
+
+	// No WRITE_CHUNK must have been issued to the master.
+	assert.Equal(t, int32(0), srv.writeChunkCalls.Load(),
+		"WriteChunkData with empty data must not issue any WRITE_CHUNK")
+}
+
+// ─── Re-lock error tests ──────────────────────────────────────────────────────
+
+// TestWrite_ChunkLockErrorOnRetry verifies that Write() returns an error
+// containing "re-lock strategy" when the master rejects the second WRITE_CHUNK
+// lock request (the re-lock issued before strategy 2, after strategies 0 and 1
+// have been processed).
+//
+// Setup (single-CS mode — embedded srv.cs stopped before Write()):
+//   - WRITE_CHUNK #1 (initial lock)    : OK — returns 1 server entry.
+//   - Strategy 0 ({csIdx:0, syncChain:true}) : firstActive=true — no re-lock.
+//     DialCS fails (CS stopped) → writeChunkRelease → WRITE_CHUNK_END #1 (release).
+//   - Strategy 1 ({csIdx:1, syncChain:true}) : csIdx=1 ≥ 1 server → skip (no re-lock).
+//   - Strategy 2 ({csIdx:0, syncChain:false}): !firstActive → re-lock.
+//     WRITE_CHUNK #2 → StatusERROR → Write() returns "re-lock strategy 3: …".
+//
+// Verifies:
+//   - Write() returns a non-nil error containing "re-lock strategy".
+//   - Master receives 2× WRITE_CHUNK (initial + 1 re-lock).
+//   - Master receives 1× WRITE_CHUNK_END (the release after strategy 0 dial failure).
+//   - File size remains 0 (no commit).
+func TestWrite_ChunkLockErrorOnRetry(t *testing.T) {
+	// ── Fake master (single-CS mode) ──────────────────────────────────────────
+	srv := newFakeMFSServer()
+	addr := srv.Start()
+	t.Cleanup(srv.Stop)
+
+	// Inject StatusERROR on the 2nd WRITE_CHUNK (the re-lock for strategy 2).
+	srv.writeChunkErrOnCall.Store(2)
+
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	var portNum int
+	_, err = fmt.Sscanf(portStr, "%d", &portNum)
+	require.NoError(t, err)
+
+	c, err := Dial(host, portNum)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+
+	nodeID, err := c.Mknod(RootNodeID, "relock_err_test.bin", 0o644)
+	require.NoError(t, err)
+
+	// Stop the embedded CS so that strategy 0's DialCS fails (forcing a release
+	// and clearing firstActive), which allows strategy 2 to issue the re-lock.
+	srv.cs.Stop()
+
+	// ── Write — must fail with "re-lock strategy" error ───────────────────────
+	data := []byte("this-write-must-fail-on-relock")
+	writeErr := c.Write(nodeID, 0, data)
+	require.Error(t, writeErr, "Write must return an error when re-lock fails")
+	assert.Contains(t, writeErr.Error(), "re-lock strategy",
+		"error must identify the re-lock strategy that failed")
+
+	// ── Verify call counts ────────────────────────────────────────────────────
+	// 2 WRITE_CHUNK: initial lock (call 1 OK) + re-lock for strategy 2 (call 2 ERROR).
+	assert.Equal(t, int32(2), srv.writeChunkCalls.Load(),
+		"master must receive 2 WRITE_CHUNK calls (initial + 1 re-lock)")
+
+	// 1 WRITE_CHUNK_END: the release sent after strategy 0's DialCS failure.
+	assert.Equal(t, int32(1), srv.writeChunkEndCalls.Load(),
+		"master must receive 1 WRITE_CHUNK_END call (release after strategy 0 dial failure)")
+
+	// The single WRITE_CHUNK_END is a release (size==0).
+	assert.Equal(t, int32(1), srv.writeChunkEndReleaseCalls.Load(),
+		"the WRITE_CHUNK_END must be a release (size==0)")
+
+	// ── Verify the file was NOT modified ─────────────────────────────────────
+	// GetAttr still works because the error was at master level, not CS level.
+	attr, err := c.GetAttr(nodeID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), attr.Size,
+		"file size must remain 0 after a failed re-lock (no commit issued)")
+}
+
+// TestWrite_ShrinkGuard_ReleaseFails verifies that Write() continues gracefully
+// when the writeChunkRelease call inside the shrink guard returns an error.
+//
+// The shrink guard is triggered when a re-lock returns fewer servers than the
+// current strategy's csIdx requires.  The release error must be logged as a
+// warning (non-fatal) and the cascade must continue to the next strategy.
+//
+// Setup (dual-CS mode, singleCSFrom=2):
+//   - WRITE_CHUNK #1 (call 1): returns [cs1, cs2].
+//     Strategy 0 ({csIdx:0, sync}): CS1 CANTCONNECT → release #1 → OK. firstActive=false.
+//   - WRITE_CHUNK #2 (re-lock, call 2): returns [cs1] only (singleCSFrom triggered).
+//     Strategy 1 ({csIdx:1, sync}): csIdx=1 ≥ 1 → shrink guard → release #2 → ERROR
+//     (writeChunkEndReleaseErrOnCall=2) → logged as Warn, non-fatal → continue.
+//   - WRITE_CHUNK #3 (re-lock, call 3): returns [cs1].
+//     Strategy 2 ({csIdx:0, async}): CS1 async write → SUCCESS → commit.
+//
+// Verifies:
+//   - Write() returns nil (upload succeeds despite release #2 error).
+//   - Master receives 3× WRITE_CHUNK.
+//   - Master receives 3× WRITE_CHUNK_END (2 releases + 1 commit).
+//   - writeChunkEndReleaseCalls == 2.
+//   - Data is physically stored in CS1 (byte-level integrity).
+//   - attr.Size matches len(data).
+func TestWrite_ShrinkGuard_ReleaseFails(t *testing.T) {
+	// ── CS1: chainOnlyCANTCONNECTCS ──────────────────────────────────────────
+	// CANTCONNECT on sync (chain present), accepts async writes normally.
+	cs1 := newChainOnlyCANTCONNECTCS()
+	cs1IP, cs1Port := cs1.Start()
+	t.Cleanup(cs1.Stop)
+
+	// ── Fake master (dual-CS mode) ────────────────────────────────────────────
+	srv := newFakeMFSServer()
+	addr := srv.Start()
+	t.Cleanup(srv.Stop)
+
+	srv.cs1IP = cs1IP
+	srv.cs1Port = cs1Port
+	// Shrink to [cs1] only starting from call 2.
+	srv.singleCSFrom = 2
+	// Inject StatusERROR on the 2nd release WRITE_CHUNK_END (the shrink-guard release).
+	srv.writeChunkEndReleaseErrOnCall.Store(2)
+
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	var portNum int
+	_, err = fmt.Sscanf(portStr, "%d", &portNum)
+	require.NoError(t, err)
+
+	c, err := Dial(host, portNum)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+
+	nodeID, err := c.Mknod(RootNodeID, "shrink_release_fail.bin", 0o644)
+	require.NoError(t, err)
+
+	// ── Write — must succeed via strategy 2 (async CS1) ──────────────────────
+	data := []byte("shrink-guard-release-fails-but-write-succeeds")
+	writeErr := c.Write(nodeID, 0, data)
+	require.NoError(t, writeErr,
+		"Write must succeed: shrink-guard release error is non-fatal, strategy 2 (async CS1) succeeds")
+
+	// ── Verify call counts ────────────────────────────────────────────────────
+	// 3 WRITE_CHUNK: strategy 0 (call 1) + re-lock strategy 1 (call 2) + re-lock strategy 2 (call 3).
+	assert.Equal(t, int32(3), srv.writeChunkCalls.Load(),
+		"master must receive 3 WRITE_CHUNK calls (strategies 0, 1, 2)")
+
+	// 3 WRITE_CHUNK_END: release #1 (CANTCONNECT) + release #2 (shrink guard, error) + commit (strategy 2).
+	assert.Equal(t, int32(3), srv.writeChunkEndCalls.Load(),
+		"master must receive 3 WRITE_CHUNK_END calls (2 releases + 1 commit)")
+
+	// Both releases increment the counter before the error check fires, so the
+	// count is 2 even though release #2 returns StatusERROR.
+	assert.Equal(t, int32(2), srv.writeChunkEndReleaseCalls.Load(),
+		"both releases increment the counter (error injection fires after Add, not before)")
+
+	// ── Verify data integrity ─────────────────────────────────────────────────
+	// Strategy 2 writes async to CS1; srv.cs (cs2) is not involved.
+	chunkData := cs1.GetChunkData(uint64(nodeID))
+	assert.Equal(t, data, chunkData,
+		"data must be physically stored in cs1 after async write (strategy 2)")
+
+	attr, err := c.GetAttr(nodeID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(len(data)), attr.Size,
+		"file size must reflect data committed via strategy 2 (async CS1)")
 }

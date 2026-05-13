@@ -253,8 +253,12 @@ type ChunkServer struct {
 type ChunkInfo struct {
 	ChunkID  uint64
 	Version  uint32
+	Length   uint64        // current file length BEFORE this write (from WRITE_CHUNK response)
 	Servers  []ChunkServer
-	LockID   uint32 // lock token from WRITE_CHUNK response; must be echoed in WRITE_CHUNK_END
+	LockID   uint32        // optional lock token returned by the master in WRITE_CHUNK responses.
+	                       // Present in some MooseFS deployments; NOT included in WRITE_CHUNK_END
+	                       // by this client (confirmed against MooseFS 4.58.4 — tests pass on real cluster).
+	                       // Retained for diagnostics and future protocol compatibility.
 }
 
 // ─── Frame I/O helpers ────────────────────────────────────────────────────────

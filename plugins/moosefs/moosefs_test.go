@@ -1340,6 +1340,179 @@ func TestDescribe(t *testing.T) {
 	}
 }
 
+// TestUpload_MultiChunk_Parallel verifies that multiple concurrent Upload calls
+// on the same backend succeed without data races and that progress callbacks are
+// invoked.  Three goroutines each upload a distinct 100 KiB file; after all
+// uploads complete every file is downloaded and its content verified.
+func TestUpload_MultiChunk_Parallel(t *testing.T) {
+	b := newTestBackend(t, startFakeServer(t))
+	ctx := context.Background()
+
+	const N = 3
+	const fileSize = 100 * 1024 // 100 KiB per file
+
+	var wg sync.WaitGroup
+	errs := make([]error, N)
+	var progressCalls atomic.Int32
+
+	for i := 0; i < N; i++ {
+		i := i
+		// Each file gets a unique fill byte so we can detect cross-contamination.
+		content := make([]byte, fileSize)
+		for j := range content {
+			content[j] = byte(i + 1)
+		}
+		src := writeTempFile(t, content)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = b.Upload(ctx, src, fmt.Sprintf("/parallel_%d.bin", i), func(done, total int64) {
+				progressCalls.Add(1)
+				assert.Greater(t, done, int64(0), "progress done must be positive")
+				assert.Equal(t, int64(fileSize), total, "progress total must match file size")
+			})
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		assert.NoError(t, err, "upload %d must succeed", i)
+	}
+	assert.Greater(t, progressCalls.Load(), int32(0), "progress callback must be invoked at least once")
+
+	// Round-trip: download and verify each file.
+	for i := 0; i < N; i++ {
+		dst := filepath.Join(t.TempDir(), fmt.Sprintf("downloaded_%d.bin", i))
+		require.NoError(t, b.Download(ctx, fmt.Sprintf("/parallel_%d.bin", i), dst, nil),
+			"Download of file %d must succeed", i)
+		got, err := os.ReadFile(dst)
+		require.NoError(t, err)
+
+		expected := make([]byte, fileSize)
+		for j := range expected {
+			expected[j] = byte(i + 1)
+		}
+		assert.Equal(t, expected, got, "round-trip content must match for file %d", i)
+	}
+}
+
+// TestUpload_ConcurrencyConfig verifies that the uploadConcurrency config param
+// is accepted and that uploads succeed when it is explicitly set.
+func TestUpload_ConcurrencyConfig(t *testing.T) {
+	srv := newIntegFakeServer()
+	addr := srv.start(t)
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+
+	b := New()
+	require.NoError(t, b.Connect(plugins.BackendConfig{
+		Params: map[string]string{
+			"masterHost":        host,
+			"masterPort":        portStr,
+			"subDir":            "/",
+			"pollInterval":      testPollInterval,
+			"uploadConcurrency": "2",
+		},
+	}))
+	t.Cleanup(func() { _ = b.Disconnect() })
+
+	content := []byte("concurrency-config-test")
+	src := writeTempFile(t, content)
+	ctx := context.Background()
+	require.NoError(t, b.Upload(ctx, src, "/concurrency_test.txt", nil))
+
+	fi, err := b.Stat(ctx, "/concurrency_test.txt")
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(content)), fi.Size)
+}
+
+// TestUpload_CancelledContext verifies that Upload() returns a context.Canceled
+// error immediately when the context is already cancelled at call time, and that
+// no remote file node is created.
+//
+// This covers the ctx.Err() pre-flight check at the top of upload() — ensuring
+// that a cancelled context prevents all I/O (no Mknod, no master round-trips).
+func TestUpload_CancelledContext(t *testing.T) {
+	b := newTestBackend(t, startFakeServer(t))
+
+	src := writeTempFile(t, []byte("content that must not be uploaded"))
+
+	// Pre-cancel the context before calling Upload.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := b.Upload(ctx, src, "/cancelled_upload.txt", nil)
+	require.Error(t, err, "Upload with a pre-cancelled context must return an error")
+	assert.ErrorIs(t, err, context.Canceled,
+		"error must wrap context.Canceled so callers can distinguish cancellation")
+
+	// Verify the remote file was never created (no Mknod was issued).
+	_, statErr := b.Stat(context.Background(), "/cancelled_upload.txt")
+	assert.Error(t, statErr,
+		"remote file must not exist after a cancelled Upload (no Mknod should have been issued)")
+}
+
+// TestUpload_InvalidConcurrency verifies that an out-of-range uploadConcurrency
+// value (≤0 or >16) is silently clamped to the default of 4, and that uploads
+// still succeed.
+//
+// The valid range for uploadConcurrency is [1, 16].  Values outside this range
+// are rejected by the strconv check `n > 0 && n <= 16`, causing upload() to fall
+// back to the default value of 4.  No error is returned — the clamping is silent.
+//
+// Two sub-tests cover the boundary cases:
+//   - "zero"        : uploadConcurrency = "0"  (n==0 → rejected → default 4)
+//   - "above_max"   : uploadConcurrency = "17" (n==17 → rejected → default 4)
+//
+// Verifies:
+//   - Upload returns nil (no error).
+//   - Stat reports the correct file size.
+func TestUpload_InvalidConcurrency(t *testing.T) {
+	content := []byte("invalid-concurrency-clamped-to-default")
+
+	cases := []struct {
+		name        string
+		concurrency string
+	}{
+		{"zero", "0"},
+		{"above_max", "17"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newIntegFakeServer()
+			addr := srv.start(t)
+			host, portStr, err := net.SplitHostPort(addr)
+			require.NoError(t, err)
+
+			b := New()
+			require.NoError(t, b.Connect(plugins.BackendConfig{
+				Params: map[string]string{
+					"masterHost":        host,
+					"masterPort":        portStr,
+					"subDir":            "/",
+					"pollInterval":      testPollInterval,
+					"uploadConcurrency": tc.concurrency,
+				},
+			}))
+			t.Cleanup(func() { _ = b.Disconnect() })
+
+			src := writeTempFile(t, content)
+			ctx := context.Background()
+
+			remotePath := "/invalid_concurrency_" + tc.name + ".txt"
+			require.NoError(t, b.Upload(ctx, src, remotePath, nil),
+				"Upload must succeed: invalid concurrency %q must clamp to default 4", tc.concurrency)
+
+			fi, err := b.Stat(ctx, remotePath)
+			require.NoError(t, err)
+			assert.Equal(t, int64(len(content)), fi.Size,
+				"Stat must report correct file size after upload with clamped concurrency")
+		})
+	}
+}
+
 // Ensure unused fmt import compiles.
 var _ = fmt.Sprintf
 

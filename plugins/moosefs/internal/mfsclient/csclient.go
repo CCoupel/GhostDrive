@@ -42,9 +42,17 @@ import (
 	"hash/crc32"
 	"io"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/CCoupel/GhostDrive/internal/logger"
 )
+
+// readerGracePeriod is the maximum time the WriteChunk sender goroutine waits
+// for the reader goroutine to surface a protocol-level error (e.g. DISCONNECTED
+// STATUS) when a transport-level write failure (e.g. "connection reset by peer")
+// occurs first.  This yields a more actionable error message to callers.
+const readerGracePeriod = 50 * time.Millisecond
 
 // DialCS opens a TCP connection to the MooseFS chunk server at the given IP
 // address (uint32 big-endian network byte order) and port.
@@ -212,20 +220,107 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 		break // ACK OK — CS ready, proceed to WRITE_DATA
 	}
 
-	// 3. Send CLTOCS_WRITE_DATA frames, one per 65536-byte block.
-	// Each frame includes a writeId:32 monotonic counter starting at 1.
-	// The CS echoes the last writeId in its CSTOCL_WRITE_STATUS response.
+	// 3–5. Pipeline: sender and reader run concurrently.
+	//
+	// The reader goroutine continuously reads WRITE_STATUS frames from the CS
+	// while the sender sends WRITE_DATA frames.  This allows early detection of
+	// non-OK statuses (e.g. DISCONNECTED) sent by the CS before WRITE_END is
+	// received, avoiding unnecessary data transmission.
+	//
+	// Channel semantics:
+	//   sendDone    — closed by sender after WRITE_END is sent (sync.Once, idempotent).
+	//   earlyErr    — buffered(1): reader → sender signal for a non-OK STATUS.
+	//   finalResult — buffered(1): reader → caller with the final STATUS result.
 	const blockSize = 65536
 	total := uint32(len(data))
-	written := uint32(0)
-	var writeID uint32 // incremented per frame; echoed back in WRITE_STATUS
+	var writeID uint32
 
+	sendDone    := make(chan struct{})
+	earlyErr    := make(chan error, 1)
+	finalResult := make(chan error, 1)
+
+	var closeOnce sync.Once
+	closeSendDone := func() {
+		closeOnce.Do(func() { close(sendDone) })
+	}
+	defer closeSendDone() // always close — prevents reader goroutine from blocking forever
+
+	// Reader goroutine: collects WRITE_STATUS frames from the CS concurrently
+	// with the sender.
+	go func() {
+		for {
+			cmd, resp, err := ReadFrame(cs)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					err = fmt.Errorf("csclient: WriteChunk %d: CS closed without final WRITE_STATUS"+
+						" (check CS logs for crash or OOM): %w", chunkID, err)
+				} else {
+					err = fmt.Errorf("csclient: WriteChunk %d: recv status: %w", chunkID, err)
+				}
+				select { case earlyErr <- err: default: }
+				finalResult <- err
+				return
+			}
+			logger.Debug("csclient: WriteChunk %d: reader cmd=%d resp_len=%d", chunkID, cmd, len(resp))
+			if cmd == ANTOAN_NOP {
+				continue // keepalive — skip
+			}
+			if cmd != CstoclFuseWriteStatus {
+				err = fmt.Errorf("csclient: WriteChunk %d: expected WRITE_STATUS (cmd=%d), got cmd=%d",
+					chunkID, CstoclFuseWriteStatus, cmd)
+				select { case earlyErr <- err: default: }
+				finalResult <- err
+				return
+			}
+			if len(resp) < 13 {
+				err = fmt.Errorf("csclient: WriteChunk %d: WRITE_STATUS too short (%d bytes)", chunkID, len(resp))
+				select { case earlyErr <- err: default: }
+				finalResult <- err
+				return
+			}
+			status := resp[12]
+
+			if status != StatusOK {
+				err = fmt.Errorf("csclient: WriteChunk %d: server write status 0x%02x (%s)",
+					chunkID, status, CSStatusName(status))
+				select { case earlyErr <- err: default: }
+				finalResult <- err
+				return
+			}
+
+			// OK STATUS: wait for sendDone (WRITE_END sent by sender).
+			// After sendDone is closed the protocol guarantees that the CS has
+			// received WRITE_END and this STATUS is the final one — MooseFS sends
+			// exactly one STATUS after WRITE_END.  On a closed channel <-sendDone
+			// returns instantly.
+			//
+			// Note: intermediate OK STATUSes (CS acking DATA blocks early) do not
+			// exist in the MooseFS write protocol.  The only STATUS frames are:
+			//   1. Write-init ACK (handled in phase 2, before this goroutine starts).
+			//   2. Final STATUS after WRITE_END (handled here).
+			// Mid-stream errors (e.g. DISCONNECTED) are handled by the non-OK branch above.
+			<-sendDone
+			finalResult <- nil
+			return
+		}
+	}()
+
+	// Sender: send WRITE_DATA frames.
+	written := uint32(0)
 	for written < total {
-		pos := offset + written          // absolute position within the chunk
+		// Non-blocking early-error check from reader.
+		select {
+		case err := <-earlyErr:
+			closeSendDone()
+			<-finalResult // drain; reader already wrote the error
+			return err
+		default:
+		}
+
+		pos := offset + written
 		blockNum := uint16(pos / blockSize)
 		blockOff := uint16(pos % blockSize)
 
-		// Fill the rest of the current block, capped by remaining data.
 		canFill := blockSize - uint32(blockOff)
 		end := written + canFill
 		if end > total {
@@ -235,9 +330,10 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 		checksum := crc32.ChecksumIEEE(block)
 
 		writeID++
+
 		var framePayload []byte
 		framePayload = PutUint64(framePayload, chunkID)
-		framePayload = PutUint32(framePayload, writeID) // writeId:32 — required by MooseFS 4.x
+		framePayload = PutUint32(framePayload, writeID)
 		framePayload = PutUint16(framePayload, blockNum)
 		framePayload = PutUint16(framePayload, blockOff)
 		framePayload = PutUint32(framePayload, uint32(len(block)))
@@ -245,9 +341,34 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 		framePayload = append(framePayload, block...)
 
 		if err := WriteFrame(cs, CltocsFuseWriteData, framePayload); err != nil {
-			return fmt.Errorf("csclient: WriteChunk %d: send data (block %d): %w", chunkID, blockNum, err)
+			closeSendDone()
+			// Prefer the reader's protocol-level error (e.g. DISCONNECTED STATUS)
+			// over the raw transport error — gives callers a more actionable message.
+			// The reader always writes to finalResult before exiting, so a short
+			// timeout is sufficient even on slow test schedulers.
+			writeErr := fmt.Errorf("csclient: WriteChunk %d: send data (block %d): %w", chunkID, blockNum, err)
+			timer := time.NewTimer(readerGracePeriod)
+			defer timer.Stop()
+			select {
+			case readerErr := <-finalResult:
+				if readerErr != nil {
+					return readerErr
+				}
+				return writeErr
+			case <-timer.C:
+				return writeErr
+			}
 		}
 		written = end
+	}
+
+	// Final early-error check before WRITE_END.
+	select {
+	case err := <-earlyErr:
+		closeSendDone()
+		<-finalResult
+		return err
+	default:
 	}
 
 	// 4. Send CLTOCS_WRITE_END.
@@ -256,45 +377,14 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 	endPayload = PutUint32(endPayload, version)
 
 	if err := WriteFrame(cs, CltocsFuseWriteEnd, endPayload); err != nil {
+		closeSendDone()
+		go func() { <-finalResult }()
 		return fmt.Errorf("csclient: WriteChunk %d: send end: %w", chunkID, err)
 	}
 
-	// 5. Read final CSTOCL_WRITE_STATUS: [chunkId:64][writeId:32][status:8] = 13 bytes.
-	// MooseFS 4.x sends opcode 211 (CstoclFuseWriteStatus), confirmed 4.58.4.
-	// The CS may send ANTOAN_NOP (cmd=0) keepalives before the real status frame;
-	// loop until we receive a non-NOP frame.
-	var cmd uint32
-	var resp []byte
-	for {
-		var err error
-		cmd, resp, err = ReadFrame(cs)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				// CS closed the connection without sending final WRITE_STATUS.
-				// Uncommon after the write-init ACK was received; may indicate
-				// a CS crash or network failure during the write.
-				return fmt.Errorf("csclient: WriteChunk %d: CS closed without final WRITE_STATUS"+
-					" (check CS logs for crash or OOM): %w", chunkID, err)
-			}
-			return fmt.Errorf("csclient: WriteChunk %d: recv status: %w", chunkID, err)
-		}
-		logger.Debug("csclient: WriteChunk %d: recv cmd=%d resp_len=%d", chunkID, cmd, len(resp))
-		if cmd == ANTOAN_NOP {
-			continue // keepalive — wait for real status
-		}
-		break
-	}
-	if cmd != CstoclFuseWriteStatus {
-		return fmt.Errorf("csclient: WriteChunk %d: expected WRITE_STATUS (opcode %d), got %d",
-			chunkID, CstoclFuseWriteStatus, cmd)
-	}
-	if len(resp) < 13 {
-		return fmt.Errorf("csclient: WriteChunk %d: WRITE_STATUS too short (%d bytes)", chunkID, len(resp))
-	}
-	status := resp[12]
-	if status != StatusOK {
-		return fmt.Errorf("csclient: WriteChunk %d: server write status 0x%02x (%s)",
-			chunkID, status, CSStatusName(status))
-	}
-	return nil
+	// Signal reader that WRITE_END was sent; the next STATUS it receives is final.
+	closeSendDone()
+
+	// 5. Wait for reader's final STATUS result.
+	return <-finalResult
 }
