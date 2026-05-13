@@ -32,10 +32,22 @@ jobs:
         with:
           version: '25.1'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # Charge les versions pinnées PROD depuis .ci-versions.env
+      - name: Load CI pinned versions
+        run: cat .ci-versions.env | grep -v '^#' | grep -v '^$' >> $GITHUB_ENV
       - name: Install protoc Go plugins
         run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          if [ "${{ github.event_name }}" = "workflow_call" ]; then
+            # PROD : versions pinnées (reproductible, zéro surprise au tag)
+            echo "Mode PROD — pins : protoc-gen-go=${PROTOC_GEN_GO_PIN}, protoc-gen-go-grpc=${PROTOC_GEN_GO_GRPC_PIN}"
+            go install google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_PIN}
+            go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${PROTOC_GEN_GO_GRPC_PIN}
+          else
+            # QUALIF : canary (@latest) — détecte les incompatibilités tôt
+            echo "Mode QUALIF — canary @latest"
+            go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+            go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          fi
       - name: Generate protobuf stubs
         run: protoc --go_out=. --go-grpc_out=. --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative plugins/proto/storage.proto
       - run: go vet ./...
