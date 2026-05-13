@@ -63,9 +63,10 @@ jobs:
       # Après chaque QUALIF réussie (@latest), capture les versions résolues et
       # met à jour .ci-versions.env sur la branche courante. Le prochain tag PROD
       # utilisera ces pins sans intervention manuelle.
-      # Exécuté uniquement sur push (pas pull_request, pas workflow_call/PROD).
+      # Exécuté uniquement sur push QUALIF direct : pas PROD (prod_mode=true),
+      # pas pull_request (git push interdit sur fork).
       - name: Sync PROD pins from QUALIF resolved versions
-        if: github.event_name == 'push'
+        if: inputs.prod_mode != true && github.event_name != 'pull_request'
         run: |
           # Capturer les versions résolues des binaires installés en @latest
           GRPC_VER=$(go version -m "$(which protoc-gen-go-grpc)" 2>/dev/null | awk '$1 == "mod" {print $3}')
