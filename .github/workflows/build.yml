@@ -20,6 +20,8 @@ jobs:
   ci:
     name: CI
     uses: ./.github/workflows/ci.yml
+    with:
+      prod_mode: true
 
   # ============================================
   # 2. Inject version from tag (source of truth)

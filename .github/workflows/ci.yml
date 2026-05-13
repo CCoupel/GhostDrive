@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_call:
+    inputs:
+      prod_mode:
+        type: boolean
+        default: false
+        description: 'Utiliser les versions pinnées PROD (true) ou @latest canary QUALIF (false)'
 
 # Nécessaire pour que le step "Sync PROD pins" puisse committer sur la branche QUALIF.
 # En PROD (workflow_call), ce step est ignoré — la permission est sans effet.
@@ -40,18 +45,17 @@ jobs:
       # Charge les versions pinnées PROD depuis .ci-versions.env
       - name: Load CI pinned versions
         run: cat .ci-versions.env | grep -v '^#' | grep -v '^$' >> $GITHUB_ENV
-      # PROD : workflow_call depuis build.yml — utilise les versions pinnées
-      # Note : ${{ github.event_name }} dans run: résout le contexte caller (push),
-      # pas le contexte reusable-workflow. On utilise donc if: au niveau step.
+      # PROD : appelé depuis build.yml avec prod_mode=true — versions pinnées
+      # inputs.prod_mode est un passage explicite — pas d'ambiguïté de contexte.
       - name: Install protoc Go plugins (PROD — pinned)
-        if: github.event_name == 'workflow_call'
+        if: inputs.prod_mode == true
         run: |
           echo "Mode PROD — pins : protoc-gen-go=${PROTOC_GEN_GO_PIN}, protoc-gen-go-grpc=${PROTOC_GEN_GO_GRPC_PIN}"
           go install google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_PIN}
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${PROTOC_GEN_GO_GRPC_PIN}
-      # QUALIF : push/pull_request — canary @latest pour détecter les incompatibilités tôt
+      # QUALIF : push/pull_request direct — canary @latest pour détecter les incompatibilités tôt
       - name: Install protoc Go plugins (QUALIF — @latest canary)
-        if: github.event_name != 'workflow_call'
+        if: inputs.prod_mode != true
         run: |
           echo "Mode QUALIF — canary @latest"
           go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
