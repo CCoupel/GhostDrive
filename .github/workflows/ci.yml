@@ -40,19 +40,22 @@ jobs:
       # Charge les versions pinnées PROD depuis .ci-versions.env
       - name: Load CI pinned versions
         run: cat .ci-versions.env | grep -v '^#' | grep -v '^$' >> $GITHUB_ENV
-      - name: Install protoc Go plugins
+      # PROD : workflow_call depuis build.yml — utilise les versions pinnées
+      # Note : ${{ github.event_name }} dans run: résout le contexte caller (push),
+      # pas le contexte reusable-workflow. On utilise donc if: au niveau step.
+      - name: Install protoc Go plugins (PROD — pinned)
+        if: github.event_name == 'workflow_call'
         run: |
-          if [ "${{ github.event_name }}" = "workflow_call" ]; then
-            # PROD : versions pinnées (reproductible, zéro surprise au tag)
-            echo "Mode PROD — pins : protoc-gen-go=${PROTOC_GEN_GO_PIN}, protoc-gen-go-grpc=${PROTOC_GEN_GO_GRPC_PIN}"
-            go install google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_PIN}
-            go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${PROTOC_GEN_GO_GRPC_PIN}
-          else
-            # QUALIF : canary (@latest) — détecte les incompatibilités tôt
-            echo "Mode QUALIF — canary @latest"
-            go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-            go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-          fi
+          echo "Mode PROD — pins : protoc-gen-go=${PROTOC_GEN_GO_PIN}, protoc-gen-go-grpc=${PROTOC_GEN_GO_GRPC_PIN}"
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_PIN}
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${PROTOC_GEN_GO_GRPC_PIN}
+      # QUALIF : push/pull_request — canary @latest pour détecter les incompatibilités tôt
+      - name: Install protoc Go plugins (QUALIF — @latest canary)
+        if: github.event_name != 'workflow_call'
+        run: |
+          echo "Mode QUALIF — canary @latest"
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
       # Après chaque QUALIF réussie (@latest), capture les versions résolues et
       # met à jour .ci-versions.env sur la branche courante. Le prochain tag PROD
       # utilisera ces pins sans intervention manuelle.
