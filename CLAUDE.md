@@ -364,17 +364,26 @@ Tu **coordonnes et dispatches**. Tu n'exécutes aucune tâche technique toi-mêm
 
 **`Read` autorisé uniquement pour** : `CLAUDE.md`, `MEMORY.md`, `project-config.json`, `workflow-state.json`, `_work/handoff/*.md`, `_work/reports/*.md`, `contracts/CHANGELOG.md`
 
-Si un agent ne répond pas au PING → spawn via `Task`. **Ne jamais** exécuter la tâche soi-même.
+Si un agent ne répond pas au PING → la boucle de supervision spawne via `Task` au cycle suivant (≤ 60s). **Ne jamais** exécuter la tâche soi-même.
 
-### Protocole PING — Obligatoire Avant Tout Dispatch
+### Protocole PING — Activation sans ScheduleWakeup
 
-> **Même pour la première activation** : commencer par PING. Un agent peut exister d'une session précédente. L'absence de réponse confirme qu'un `Task` est nécessaire.
+**Aucune attente, aucun ScheduleWakeup ad-hoc.** La boucle de supervision (60s) ramasse les non-répondants.
 
 ```
-Étape 1 : SendMessage({to: "<nom>", content: "PING"})
-Étape 2 : Attendre 30 secondes max
-  → Répond "<NOM> ACTIF"    → dispatcher via SendMessage
-  → Pas de réponse après 30s → Task({name: "<nom>", ...})
+Étape 1 — Envoyer tous les PINGs dans le même bloc de réponse :
+  SendMessage({to: "<agent1>", content: "PING"})
+  SendMessage({to: "<agent2>", content: "PING"})
+  … (tous les agents à activer)
+
+Étape 2 — Écrire immédiatement dans workflow-state.json pour chaque agent pingé :
+  status = "ping_pending", ping_sent_at = <ISO>, pending_order = "<ordre à dispatcher après activation>"
+
+Étape 3 — Sur chaque réponse "<NOM> ACTIF" reçue :
+  → workflow-state.json : status = "idle", ping_sent_at = null, pending_order = null
+  → Dispatcher l'ordre via SendMessage immédiatement
+
+(Pas de ScheduleWakeup — la boucle de supervision gère les ping_pending expirés à chaque cycle)
 ```
 
 ### Nommage des Agents — Règle Absolue
@@ -382,27 +391,23 @@ Si un agent ne répond pas au PING → spawn via `Task`. **Ne jamais** exécuter
 Le paramètre `name` dans `Task` est **toujours le nom canonique simple** : `qa`, `dev-backend`, `planner`…  
 **Jamais de suffixe** (`qa-1`, `qa-2`…). Un rôle = un nom = une adresse `SendMessage` permanente.
 
-Si le système impose un suffixe → l'agent précédent tourne encore → envoyer PING au nom simple d'abord.
+Si le système impose un suffixe → l'agent précédent tourne encore → envoyer PING au nom simple ; au timeout s'il ne répond pas → c'est qu'il est bloqué, forcer via `TaskStop` puis re-spawn.
 
 ### Restauration après compactage de contexte
 
-Après un compactage, un hook `UserPromptSubmit` ré-injecte automatiquement `workflow-state.json`. **À réception de ce bloc, lancer immédiatement un PING broadcast** :
+Après un compactage, un hook `UserPromptSubmit` ré-injecte automatiquement `workflow-state.json`. **À réception de ce bloc, re-vérifier tous les agents actifs via PING** :
 
-**Étape 1** — Envoyer un PING individuel à chaque agent listé, dans un seul bloc de réponse (SendMessage est point-à-point — pas de broadcast natif) :
+**Étape 1** — Pour chaque agent listé, écrire `ping_sent_at: <ISO>`, `status: "ping_pending"` et envoyer le PING dans le même bloc :
 ```
-SendMessage({to: "planner", content: "PING"})
-SendMessage({to: "dev-backend", content: "PING"})
-SendMessage({to: "qa", content: "PING"})
-… (tous les agents présents dans workflow-state.json)
+Pour chaque agent présent dans workflow-state.json :
+  → workflow-state.json : status = "ping_pending", ping_sent_at = <ISO>
+     (conserver pending_order = null si l'agent était idle, ou le dernier ordre connu si working)
+  → SendMessage({to: "<agent>", content: "PING"})
 ```
 
-**Étape 2** — Attendre 30 secondes les réponses `<NOM> ACTIF`
+**Étape 2** — Sur chaque réponse `<NOM> ACTIF` reçue : `status = "idle"`, `ping_sent_at = null`. Agent confirmé vivant.
 
-**Étape 3** — Mettre à jour `workflow-state.json` :
-- Réponse reçue → agent confirmé, conserver l'entrée
-- Pas de réponse → agent disparu, supprimer l'entrée
-
-**Étape 4** — Reprendre le travail avec les agents confirmés. Pour un agent disparu en cours de tâche → spawner via `Task` et lui retransmettre son ordre.
+**Étape 3** — La boucle de supervision (déjà active) traitera les non-répondants à son prochain cycle (≤ 60s) : agents toujours `ping_pending` avec `ping_sent_at` expiré → spawn ou retrait.
 
 ### Workflow-state.json — Source de Vérité
 
@@ -410,34 +415,36 @@ SendMessage({to: "qa", content: "PING"})
 
 | Événement | Mise à jour |
 |-----------|-------------|
+| Envoi PING | `status: "ping_pending"`, `ping_sent_at: <ISO>`, `pending_order: "<ordre>"` |
+| Réception ACTIF (réponse PING) | `status: "idle"`, `ping_sent_at: null`, `pending_order: null` |
+| Expiration PING (boucle, ≥ 60s) | spawn via Task + dispatch `pending_order`, `status: "working"`, `ping_sent_at: null` |
 | Dispatch (SendMessage de travail) | `status: "working"`, `last_order_sent_at: <ISO>`, `idle_since: null` |
 | Réception DONE | `status: "idle"`, `idle_since: <ISO>` |
+| Réception `PONG(WORKING\|IDLE)` | `status` correspondant, `last_pong_at: <ISO>` |
 | Envoi `shutdown_request` | `status: "pending_delete"` |
 | Réception `shutdown_response` | supprimer l'entrée agent |
-| `TaskStop` (cycle suivant sans réponse) | supprimer l'entrée agent |
+| `TaskStop` (boucle, non-répondant PING-STATUS) | supprimer l'entrée agent |
 
 Format minimal :
 ```json
 {
   "watchdog_active": false,
+  "ping_status_sent_at": null,
   "agents": {
-    "<nom>": { "status": "working|idle|pending_delete", "last_order_sent_at": "<ISO>", "idle_since": null }
+    "<nom>": { "status": "working|idle|ping_pending|pending_delete", "last_order_sent_at": "<ISO>", "idle_since": null, "ping_sent_at": null, "pending_order": null, "last_pong_at": null }
   }
 }
 ```
 
-### Boucle PING-STATUS — Singleton
+### Boucle de Supervision — Singleton
 
 - Prérequis : `project-config.json` absent → skip (pas de team)
-- Vérifier `watchdog_active` avant tout `ScheduleWakeup` — **une seule boucle à la fois**
-- Chaque cycle : `PING-STATUS` broadcast → `PONG(WORKING|IDLE|IDLE-2)` ou pas de réponse
-- `PONG(IDLE-2)` → `shutdown_request` → `pending_delete` ; cycle suivant si toujours présent → `TaskStop`
-- Pas de réponse au `PING-STATUS` → supprimer l'entrée immédiatement (agent mort)
-- Réception `shutdown_response` → supprimer l'entrée immédiatement
+- Une seule boucle (`watchdog_active` = garde), **60s par cycle**
+- Gère en un seul endroit : expirations PING, TTL idle, pending_delete, liveness PING-STATUS
 
 ### Activation des Agents (démarrage de workflow)
 
-**Temps 1** — Activer `planner` (PING → ACTIF → SendMessage | pas de réponse → Task)  
+**Temps 1** — Activer `planner` (PING → ping_pending dans JSON | ACTIF → dispatch immédiat | expiration → boucle spawne)  
 **Temps 2** — Après rapport planner, activer en parallèle les agents du scope détecté
 
 Scope → agents dev concernés + `test-writer` + `code-reviewer` + `qa` + `doc-updater` + `deployer`  

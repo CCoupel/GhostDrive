@@ -11,7 +11,7 @@
 
 **AVANT TOUT CHANGEMENT DE CODE**, vous DEVEZ :
 
-1. **Lire** la version actuelle depuis `config.json`
+1. **Lire** la version actuelle depuis `{VERSION_FILE}`
 2. **Incrementer** le numero z (patch) : `X.Y.Z` -> `X.Y.Z+1`
 3. **Committer** : `chore(version): Bump to X.Y.Z+1`
 

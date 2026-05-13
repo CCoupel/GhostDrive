@@ -687,7 +687,7 @@ et remplacer les placeholders :
 
 | Placeholder | Exemple |
 |-------------|---------|
-| `{PROJECT_NAME}` | `MyApp` |
+| `` | `MyApp` |
 | `{BINARY_NAME}` | `myapp` |
 | `{BACKEND_DIR}` | `backend` |
 | `{FRONTEND_DIR}` | `frontend` |
@@ -735,16 +735,16 @@ Appliquer la substitution sur les fichiers deployes (commandes + agents generiqu
 for f in .claude/commands/*.md .claude/agents/*.template.md; do
   name=$(basename "$f")
   sed -i \
-    -e "s|{PROJECT_NAME}|${PROJECT_NAME}|g" \
-    -e "s|{TEAM_NAME}|${TEAM_NAME}|g"       \
-    -e "s|{ORG}|${ORG}|g"                   \
-    -e "s|{PROJECT}|${PROJECT}|g"            \
-    -e "s|{BUILD_CMD}|${BUILD_CMD_ESC}|g"        \
-    -e "s|{TEST_CMD}|${TEST_CMD_ESC}|g"          \
-    -e "s|{LINT_CMD}|${LINT_CMD_ESC}|g"          \
-    -e "s|{AUDIT_CMD}|${AUDIT_CMD_ESC}|g"        \
-    -e "s|{TYPECHECK_CMD}|${TYPECHECK_CMD_ESC}|g" \
-    -e "s|{PLUGIN_PLATFORM}|${PLUGIN_PLATFORM}|g" \
+    -e "s||$|g" \
+    -e "s||$|g"       \
+    -e "s||$|g"                   \
+    -e "s||$|g"            \
+    -e "s||${BUILD_CMD_ESC}|g"        \
+    -e "s||${TEST_CMD_ESC}|g"          \
+    -e "s||${LINT_CMD_ESC}|g"          \
+    -e "s||${AUDIT_CMD_ESC}|g"        \
+    -e "s||${TYPECHECK_CMD_ESC}|g" \
+    -e "s||$|g" \
     "$f"
   echo "  ✓ placeholders appliques dans $name"
 done
@@ -755,15 +755,15 @@ done
 ```bash
 # CLAUDE.md depuis le template (remplacer les placeholders)
 sed \
-  -e "s|{PROJECT_NAME}|$PROJECT_NAME|g" \
-  -e "s|{TEAM_NAME}|$TEAM_NAME|g" \
-  -e "s|{ORG}|$ORG|g" \
-  -e "s|{PROJECT}|$PROJECT|g" \
+  -e "s||$PROJECT_NAME|g" \
+  -e "s||$TEAM_NAME|g" \
+  -e "s||$ORG|g" \
+  -e "s||$PROJECT|g" \
   -e "s|{BACKEND_TECH}|$BACKEND_TECH|g" \
   -e "s|{FRONTEND_TECH}|$FRONTEND_TECH|g" \
   -e "s|{DATABASE}|$DATABASE|g" \
-  -e "s|{BUILD_CMD}|$BUILD_CMD|g" \
-  -e "s|{TEST_CMD}|$TEST_CMD|g" \
+  -e "s||$BUILD_CMD|g" \
+  -e "s||$TEST_CMD|g" \
   TEMPLATE_claude/CLAUDE_TEMPLATE.md > CLAUDE.md
 echo "✓ CLAUDE.md généré"
 

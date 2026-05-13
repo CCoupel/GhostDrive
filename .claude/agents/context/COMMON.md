@@ -235,5 +235,5 @@ Pour toute modification du comportement de cet agent, écrire dans `xxx.md` (jam
 |---------|-------------|
 | `CLAUDE.md` | Architecture complete |
 | `CHANGELOG.md` | Historique des versions |
-| `config.json` | Version actuelle |
+| `{VERSION_FILE}` | Version actuelle |
 | `contracts/*.md` | Contrats API |
