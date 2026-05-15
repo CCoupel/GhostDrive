@@ -34,8 +34,6 @@ export function GetCacheStats():Promise<types.CacheStats>;
 
 export function GetConfig():Promise<config.AppConfig>;
 
-export function GetDriveStatus():Promise<placeholder.DriveStatus>;
-
 export function GetDriveStatuses():Promise<Record<string, placeholder.DriveStatus>>;
 
 export function GetGhostDriveRoot():Promise<string>;

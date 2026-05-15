@@ -7,32 +7,74 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	syncdispatch "github.com/CCoupel/GhostDrive/internal/sync"
 )
+
+// driveBackendEmitter wraps a base EventEmitter to intercept "sync:offline",
+// "sync:error", and "sync:online" events emitted by watchLoop and bridge them
+// to DriveManager.SetSyncError(backendID, ...) so that GetDriveStatuses() always
+// reflects the real reachability state — even when the sync engine is not running
+// (AutoSync disabled or StartSync not yet called) (#118).
+type driveBackendEmitter struct {
+	backendID string
+	dm        *DriveManager
+	base      syncdispatch.EventEmitter // may be NoopEmitter; never nil
+}
+
+// Emit forwards the event to the base emitter and, for the three reachability
+// sentinels, calls SetSyncError to update the DriveStatus visible to the tray.
+func (e *driveBackendEmitter) Emit(event string, data any) {
+	e.base.Emit(event, data)
+	switch event {
+	case "sync:offline":
+		e.dm.SetSyncError(e.backendID, "backend unreachable (watchLoop offline)")
+	case "sync:error":
+		msg := "watch error"
+		if m, ok := data.(map[string]any); ok {
+			if s, ok2 := m["message"].(string); ok2 && s != "" {
+				msg = s
+			}
+		}
+		e.dm.SetSyncError(e.backendID, msg)
+	case "sync:online":
+		e.dm.SetSyncError(e.backendID, "")
+	}
+}
 
 // driveEntry pairs a VirtualDrive with its owning backend metadata so that
 // GetStatus / GetAllStatuses can decorate DriveStatus with BackendID/BackendName.
 type driveEntry struct {
-	drive VirtualDrive
-	id    string // backendID
-	name  string // human-readable backend name
+	drive     VirtualDrive
+	id        string // backendID
+	name      string // human-readable backend name
+	syncError string // runtime sync error from engine events; managed by SetSyncError (#117b)
 }
 
 // DriveManager manages a pool of per-backend VirtualDrives keyed by backendID.
 // Thread-safe: all public methods acquire mu.
 //
 // Design constraints:
-//   - No EventEmitter: events are emitted by app.go after calls to the manager.
+//   - EventEmitter: used by GhostFileSystem.watchLoop to emit "meta:updated" events.
 //   - No Wails dependency: the placeholder package must not import the Wails runtime.
 type DriveManager struct {
-	mu     sync.RWMutex
-	drives map[string]driveEntry // keyed by backendID
+	mu      sync.RWMutex
+	drives  map[string]driveEntry // keyed by backendID
+	emitter syncdispatch.EventEmitter
 }
 
-// NewDriveManager creates an empty DriveManager with no EventEmitter.
-// Events (drive:mounted, drive:unmounted, drive:error) are emitted by app.go.
-func NewDriveManager() *DriveManager {
+// NewDriveManager creates an empty DriveManager.
+// emitter is used by GhostFileSystem.watchLoop to emit Wails events (e.g. "meta:updated").
+// Pass nil to use a no-op emitter (events are silently discarded).
+// High-level drive events (drive:mounted, drive:unmounted, drive:error) are still
+// emitted by app.go after calls to the manager.
+func NewDriveManager(emitter syncdispatch.EventEmitter) *DriveManager {
+	if emitter == nil {
+		emitter = &syncdispatch.NoopEmitter{}
+	}
 	return &DriveManager{
-		drives: make(map[string]driveEntry),
+		drives:  make(map[string]driveEntry),
+		emitter: emitter,
 	}
 }
 
@@ -56,6 +98,16 @@ func (dm *DriveManager) Mount(backendID, mountPoint string, mb MountedBackend) e
 	}
 
 	drive := New()
+	// Wrap the pool-level emitter with a per-backend bridge that intercepts
+	// "sync:offline" / "sync:error" / "sync:online" emitted by watchLoop and
+	// routes them to SetSyncError(backendID, ...) so GetDriveStatuses() always
+	// reflects reachability state regardless of whether AutoSync is enabled (#118).
+	perBackendEmitter := &driveBackendEmitter{
+		backendID: backendID,
+		dm:        dm,
+		base:      dm.emitter,
+	}
+	drive.SetEmitter(perBackendEmitter)
 	if err := drive.Mount(mountPoint, []MountedBackend{mb}); err != nil {
 		return fmt.Errorf("drivemanager: mount backend %q at %q: %w", backendID, mountPoint, err)
 	}
@@ -82,7 +134,7 @@ func (dm *DriveManager) Unmount(backendID string) error {
 }
 
 // GetStatus returns the current DriveStatus for backendID.
-// The returned status has BackendID and BackendName populated.
+// The returned status has BackendID, BackendName, and SyncError populated.
 // Returns (DriveStatus{}, false) if no drive is registered for backendID.
 func (dm *DriveManager) GetStatus(backendID string) (DriveStatus, bool) {
 	dm.mu.RLock()
@@ -95,11 +147,12 @@ func (dm *DriveManager) GetStatus(backendID string) (DriveStatus, bool) {
 	s := entry.drive.Status()
 	s.BackendID = entry.id
 	s.BackendName = entry.name
+	s.SyncError = entry.syncError
 	return s, true
 }
 
 // GetAllStatuses returns a snapshot map of backendID → DriveStatus for all
-// drives currently in the pool. BackendID and BackendName are set on each status.
+// drives currently in the pool. BackendID, BackendName, and SyncError are set.
 func (dm *DriveManager) GetAllStatuses() map[string]DriveStatus {
 	dm.mu.RLock()
 	defer dm.mu.RUnlock()
@@ -109,9 +162,27 @@ func (dm *DriveManager) GetAllStatuses() map[string]DriveStatus {
 		s := entry.drive.Status()
 		s.BackendID = entry.id
 		s.BackendName = entry.name
+		s.SyncError = entry.syncError
 		result[id] = s
 	}
 	return result
+}
+
+// SetSyncError records or clears a runtime sync error for the drive identified
+// by backendID.  An empty errMsg clears the field (backend recovered or sync stopped).
+// Called by the per-backend EventEmitter bridge in app.go whenever the sync engine
+// emits "sync:offline", "sync:error", or "sync:online" (#117b).
+// No-op when no drive is registered for backendID.
+func (dm *DriveManager) SetSyncError(backendID, errMsg string) {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	entry, ok := dm.drives[backendID]
+	if !ok {
+		return
+	}
+	entry.syncError = errMsg
+	dm.drives[backendID] = entry
 }
 
 // AssignAvailableLetter returns the first drive letter ≥ "E:" that is:

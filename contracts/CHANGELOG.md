@@ -5,6 +5,15 @@ Les changements **BREAKING** doivent être validés par le CDP avant implémenta
 
 ---
 
+## [20260513] — v1.7.0 / #108 #109 #110
+
+- **[BREAKING]** `GetDriveStatus()` — binding Wails supprimé (remplacé par `GetDriveStatuses()` depuis v1.1.x) ; le tray migre vers `GetDriveStatuses()` avec agrégation `LastError`
+- **[NEW]** `meta:updated` — événement Wails émis par la goroutine `watchLoop` de `GhostFileSystem` à chaque `FileEvent` reçu de `Watch()` ; payload `MetaUpdatedEvent{backendID, path, eventType}`
+- **[INTERNAL]** Cache LRU métadonnées `Stat`/`List` dans la couche VFS (`GhostFileSystem`) ; invalidation push via `Watch()` ; TTL 5 min fallback ; borné à 1 000 entrées
+- **[BUGFIX]** `isCacheFresh()` : fichier 0-octet en cache local systématiquement considéré périmé (re-download forcé)
+
+---
+
 ## [20260503] — v1.5.x MooseFS plugin (#26 #27 #92 #93)
 
 - **[NEW]** Plugin `moosefs` — backend StorageBackend natif TCP ; binaire `ghostdrive-moosefs[.exe]` (issues #26 #27)

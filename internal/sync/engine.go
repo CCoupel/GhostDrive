@@ -194,7 +194,30 @@ func (e *Engine) run(ctx context.Context) {
 
 		case evt, ok := <-remoteEvents:
 			if !ok {
+				// Channel closed by the backend Watch goroutine.
+				// If the context is still live this is a persistent backend
+				// failure (e.g. server down) — record it so aggregateStatus
+				// promotes the tray icon to the error colour (#115).
+				if ctx.Err() == nil {
+					e.recordError("", "backend unreachable: remote watch channel closed unexpectedly")
+				}
 				remoteEvents = make(chan plugins.FileEvent) // prevent tight loop
+				continue
+			}
+			// Sentinel events: Watch() signals backend availability changes.
+			// Processed regardless of pause state.
+			if evt.Type == plugins.FileEventBackendOffline {
+				// First consecutive failure → SyncOffline (orange tray, #115b).
+				if ctx.Err() == nil {
+					e.recordOffline()
+				}
+				continue
+			}
+			if evt.Type == plugins.FileEventBackendOnline {
+				// Recovery: poll succeeded after ≥1 failure → back to SyncIdle (#115b).
+				if ctx.Err() == nil {
+					e.recordOnline()
+				}
 				continue
 			}
 			if e.isPaused() {
@@ -326,4 +349,35 @@ func (e *Engine) recordError(path, message string) {
 	e.state.Status = types.SyncError
 	e.mu.Unlock()
 	e.emitter.Emit("sync:error", syncErr)
+}
+
+// recordOffline transitions the engine to SyncOffline state and emits
+// "sync:offline".  Called when Watch() sends the FileEventBackendOffline
+// sentinel on its first consecutive poll failure (#115b).
+// Unlike recordError it does not append to the error list — offline is
+// transient.  If the backend remains unreachable, Watch eventually closes
+// its channel and recordError escalates the state to SyncError.
+func (e *Engine) recordOffline() {
+	e.mu.Lock()
+	e.state.Status = types.SyncOffline
+	e.mu.Unlock()
+	e.emitter.Emit("sync:offline", map[string]string{
+		"message": "backend unreachable: connection lost (offline, retrying with backoff)",
+	})
+}
+
+// recordOnline clears the SyncOffline state and returns the engine to SyncIdle.
+// Called when Watch() sends the FileEventBackendOnline sentinel after a
+// successful poll following one or more failures (#115b).
+// It only acts when the engine is currently in SyncOffline — it does not
+// override SyncError (persistent failure from a closed Watch channel).
+func (e *Engine) recordOnline() {
+	e.mu.Lock()
+	if e.state.Status == types.SyncOffline {
+		e.state.Status = types.SyncIdle
+	}
+	e.mu.Unlock()
+	e.emitter.Emit("sync:online", map[string]string{
+		"message": "backend reachable again",
+	})
 }

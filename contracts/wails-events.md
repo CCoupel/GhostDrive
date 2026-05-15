@@ -164,6 +164,38 @@ Fréquence : Sur chaque conflit résolu
 
 ---
 
+## meta:updated
+
+Émis par la goroutine `watchLoop` de `GhostFileSystem` à chaque `FileEvent` reçu de `Watch()`.
+Indique qu'un chemin distant a changé et que le cache métadonnées VFS a été invalidé.
+
+```
+Nom     : "meta:updated"
+Payload : MetaUpdatedEvent
+Fréquence : Dépend du backend — polling 30s (MooseFS/WebDAV) ou push natif (futur)
+```
+
+**Payload** :
+```json
+{
+  "backendID": "backend-uuid",
+  "path":      "/documents/rapport.pdf",
+  "eventType": "modified"
+}
+```
+
+**Champs** :
+| Champ | Type | Description |
+|-------|------|-------------|
+| `backendID` | `string` | Identifiant du backend qui a émis l'événement |
+| `path` | `string` | Chemin distant affecté par le changement |
+| `eventType` | `string` | `"created"`, `"modified"`, `"deleted"`, `"renamed"` |
+
+**Usage frontend** : écouter `"meta:updated"` pour rafraîchir la vue du répertoire `path.dirname(path)`.
+N'émet que si `Watch()` est disponible sur le backend — la dégradation gracieuse (TTL seul) ne produit pas d'événement.
+
+---
+
 ## Tableau Récapitulatif
 
 | Événement | Émetteur | Consommateur | Fréquence |
@@ -177,3 +209,4 @@ Fréquence : Sur chaque conflit résolu
 | `placeholder:hydration-done` | PlaceholderManager | StatusPanel | Sur complétion |
 | `sync:conflict-resolved` | SyncEngine | StatusPanel | Sur conflit résolu |
 | `app:ready` | App.startup | Tous | 1x au démarrage |
+| `meta:updated` | GhostFileSystem.watchLoop | FileListView | Sur événement Watch() |

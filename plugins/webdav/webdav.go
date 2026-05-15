@@ -35,6 +35,20 @@ var (
 	ErrFileNotFound = fmt.Errorf("webdav: %w", plugins.ErrFileNotFound)
 )
 
+// ─── Watch tuning ─────────────────────────────────────────────────────────────
+
+// watchMaxConsecutiveErrors is the number of consecutive List errors that
+// cause Watch to give up and close the channel (#115).
+const watchMaxConsecutiveErrors = 5
+
+// watchBackoffInitial / watchBackoffMax control the exponential retry delay
+// after a poll error.  They are vars (not consts) so tests can override them
+// to keep wall-clock time short without touching production defaults.
+var (
+	watchBackoffInitial = time.Second
+	watchBackoffMax     = 30 * time.Second
+)
+
 // ─── PROPFIND request body ────────────────────────────────────────────────────
 
 // propfindBody is the minimal WebDAV PROPFIND XML body sent for every
@@ -110,8 +124,16 @@ type Backend struct {
 	basePath  string // URL-path portion of baseURL, no trailing slash
 	auth      authConfig
 	client    *http.Client // immutable after Connect; nil when disconnected
-	pollMs    int          // Watch polling interval in milliseconds (default 30)
-	lastCfg   plugins.BackendConfig
+
+	// Adaptive Watch polling parameters (set at Connect time).
+	// After a change is detected the interval resets to pollIntervalMin.
+	// Each poll without a change multiplies the interval by pollBackoffFactor
+	// until it reaches pollIntervalMax.
+	pollIntervalMin   time.Duration // minimum poll interval — after a change  (default 2 s)
+	pollIntervalMax   time.Duration // maximum poll interval — idle backoff cap  (default 30 s)
+	pollBackoffFactor float64       // backoff multiplier (default 2.0)
+
+	lastCfg plugins.BackendConfig
 }
 
 // New returns an unconnected Backend.  Call Connect before any other method.
@@ -138,7 +160,9 @@ func (b *Backend) Describe() plugins.PluginDescriptor {
 			{Key: "password", Label: "Mot de passe", Type: plugins.ParamTypePassword, Required: false},
 			{Key: "token", Label: "Token Bearer", Type: plugins.ParamTypePassword, Required: false, HelpText: "Requis si authType=bearer"},
 			{Key: "tlsSkipVerify", Label: "Ignorer erreurs TLS", Type: plugins.ParamTypeBool, Required: false, Default: "false", HelpText: "Accepter les certificats auto-signés"},
-			{Key: "pollInterval", Label: "Intervalle Watch (ms)", Type: plugins.ParamTypeNumber, Required: false, Default: "30000"},
+			{Key: "pollIntervalMin", Label: "Intervalle Watch min (ms)", Type: plugins.ParamTypeNumber, Required: false, Default: "2000", HelpText: "Intervalle de polling après un changement détecté"},
+			{Key: "pollIntervalMax", Label: "Intervalle Watch max (ms)", Type: plugins.ParamTypeNumber, Required: false, Default: "30000", HelpText: "Plafond du backoff adaptatif (alias de pollInterval pour la rétrocompatibilité)"},
+			{Key: "pollBackoffFactor", Label: "Facteur backoff Watch", Type: plugins.ParamTypeString, Required: false, Default: "2.0", HelpText: "Multiplicateur de l'intervalle après chaque poll sans changement"},
 			{Key: "basePath", Label: "Chemin de base", Type: plugins.ParamTypePath, Required: false, Default: "/", Placeholder: "/dossier/sous-dossier", HelpText: "Chroot du backend sur le serveur distant (ex: /partage/documents)"},
 		},
 	}
@@ -205,11 +229,33 @@ func (b *Backend) Connect(cfg plugins.BackendConfig) error {
 		return fmt.Errorf("webdav: connect: unsupported authType %q (must be 'basic' or 'bearer')", kind)
 	}
 
-	// ── Parse optional params ─────────────────────────────────────────────────
-	pollMs := 30_000
-	if s := cfg.Params["pollInterval"]; s != "" {
+	// ── Parse adaptive Watch polling params ──────────────────────────────────
+	// pollIntervalMax defaults to pollInterval for backward compatibility.
+	pollMax := 30 * time.Second
+	if s := cfg.Params["pollIntervalMax"]; s != "" {
 		if n, atoiErr := strconv.Atoi(s); atoiErr == nil && n > 0 {
-			pollMs = n
+			pollMax = time.Duration(n) * time.Millisecond
+		}
+	} else if s := cfg.Params["pollInterval"]; s != "" {
+		if n, atoiErr := strconv.Atoi(s); atoiErr == nil && n > 0 {
+			pollMax = time.Duration(n) * time.Millisecond
+		}
+	}
+
+	pollMin := 2 * time.Second
+	if s := cfg.Params["pollIntervalMin"]; s != "" {
+		if n, atoiErr := strconv.Atoi(s); atoiErr == nil && n > 0 {
+			pollMin = time.Duration(n) * time.Millisecond
+		}
+	}
+	if pollMin > pollMax {
+		pollMin = pollMax // clamp: min cannot exceed max
+	}
+
+	pollFactor := 2.0
+	if s := cfg.Params["pollBackoffFactor"]; s != "" {
+		if f, parseErr := strconv.ParseFloat(s, 64); parseErr == nil && f > 1.0 {
+			pollFactor = f
 		}
 	}
 
@@ -264,7 +310,9 @@ func (b *Backend) Connect(cfg plugins.BackendConfig) error {
 	b.basePath = urlBasePath
 	b.auth = auth
 	b.client = client
-	b.pollMs = pollMs
+	b.pollIntervalMin = pollMin
+	b.pollIntervalMax = pollMax
+	b.pollBackoffFactor = pollFactor
 	b.lastCfg = cfg
 	return nil
 }
@@ -754,8 +802,21 @@ func (b *Backend) CreateDir(ctx context.Context, dirPath string) error {
 
 // ─── Watch ────────────────────────────────────────────────────────────────────
 
-// Watch polls path every pollMs milliseconds and emits FileEvents on the
-// returned channel when files are created, modified, or deleted.
+// Watch polls watchPath and emits FileEvents on the returned channel when
+// files are created, modified, or deleted.
+//
+// Adaptive polling: after a change is detected the poll interval resets to
+// pollIntervalMin. Each successful poll without a change multiplies the
+// interval by pollBackoffFactor until it reaches pollIntervalMax. This
+// delivers near-real-time responsiveness after activity while reducing HTTP
+// traffic to the WebDAV server during quiet periods.
+//
+// Error handling: on poll failure a FileEventBackendOffline sentinel is sent
+// to the engine on the first error; exponential backoff (watchBackoffInitial
+// → watchBackoffMax) is applied across consecutive errors; after
+// watchMaxConsecutiveErrors failures the channel is closed so the engine can
+// record a persistent SyncError. Recovery emits FileEventBackendOnline.
+//
 // The channel (buffered, size 64) is closed when ctx is cancelled.
 // Pre-condition: IsConnected() == true, else returns nil, ErrNotConnected.
 func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.FileEvent, error) {
@@ -764,7 +825,9 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 	}
 
 	b.mu.RLock()
-	pollMs := b.pollMs
+	pollMin    := b.pollIntervalMin
+	pollMax    := b.pollIntervalMax
+	pollFactor := b.pollBackoffFactor
 	b.mu.RUnlock()
 
 	ch := make(chan plugins.FileEvent, 64)
@@ -772,31 +835,81 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 	go func() {
 		defer close(ch)
 
-		ticker := time.NewTicker(time.Duration(pollMs) * time.Millisecond)
-		defer ticker.Stop()
+		var (
+			consecutiveErrs int
+			errBackoff      = watchBackoffInitial // error-recovery backoff (independent of adaptive interval)
+		)
+
+		// Adaptive interval: starts at min, backs off to max on empty polls,
+		// resets to min whenever at least one event is emitted.
+		adaptiveInterval := pollMin
 
 		// Establish the initial snapshot before starting the loop so that
 		// files that already exist at Watch time are not emitted as Created.
 		snapshot := buildSnapshot(ctx, b, watchPath)
 
+		// Use a Timer (not Ticker) so we can adjust the interval per-tick.
+		timer := time.NewTimer(adaptiveInterval)
+		defer timer.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-timer.C:
 				if !b.IsConnected() {
 					return
 				}
 
 				current, err := b.List(ctx, watchPath)
 				if err != nil {
-					continue // transient error — retry on next tick
+					consecutiveErrs++
+					if consecutiveErrs == 1 {
+						// First failure: signal the engine to set SyncOffline
+						// (tray turns orange) before we start backing off (#115b).
+						select {
+						case ch <- plugins.FileEvent{
+							Type:      plugins.FileEventBackendOffline,
+							Timestamp: time.Now(),
+						}:
+						default: // non-blocking
+						}
+					}
+					if consecutiveErrs >= watchMaxConsecutiveErrors {
+						// Persistent failure — close the channel so the sync
+						// engine detects the condition and records a SyncError.
+						// See issue #115.
+						return
+					}
+					// Exponential error backoff before the next attempt.
+					timer.Reset(errBackoff)
+					errBackoff *= 2
+					if errBackoff > watchBackoffMax {
+						errBackoff = watchBackoffMax
+					}
+					continue
+				}
+
+				// Successful poll — reset error state.
+				if consecutiveErrs > 0 {
+					// Signal the engine that the backend is reachable again (#115b).
+					select {
+					case ch <- plugins.FileEvent{
+						Type:      plugins.FileEventBackendOnline,
+						Timestamp: time.Now(),
+					}:
+					default: // non-blocking
+					}
+					consecutiveErrs = 0
+					errBackoff = watchBackoffInitial
 				}
 
 				currentMap := make(map[string]plugins.FileInfo, len(current))
 				for _, fi := range current {
 					currentMap[fi.Path] = fi
 				}
+
+				changed := false
 
 				// Detect created and modified files.
 				for p, fi := range currentMap {
@@ -808,6 +921,7 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 						evType = plugins.FileEventModified
 					}
 					if evType != "" {
+						changed = true
 						select {
 						case ch <- plugins.FileEvent{
 							Type:      evType,
@@ -824,6 +938,7 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 				// Detect deleted files.
 				for p := range snapshot {
 					if _, exists := currentMap[p]; !exists {
+						changed = true
 						select {
 						case ch <- plugins.FileEvent{
 							Type:      plugins.FileEventDeleted,
@@ -838,11 +953,29 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 				}
 
 				snapshot = currentMap
+
+				// Adaptive interval: reset to min after a change, backoff otherwise.
+				adaptiveInterval = computeNextInterval(adaptiveInterval, pollMin, pollMax, pollFactor, changed)
+				timer.Reset(adaptiveInterval)
 			}
 		}
 	}()
 
 	return ch, nil
+}
+
+// computeNextInterval calculates the next adaptive poll interval.
+// If changed is true the interval resets to min.
+// Otherwise the interval is multiplied by factor and clamped to max.
+func computeNextInterval(current, min, max time.Duration, factor float64, changed bool) time.Duration {
+	if changed {
+		return min
+	}
+	next := time.Duration(float64(current) * factor)
+	if next > max {
+		return max
+	}
+	return next
 }
 
 // buildSnapshot creates the initial path→FileInfo map for Watch.

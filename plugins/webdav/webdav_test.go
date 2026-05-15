@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -704,6 +705,296 @@ func TestWatch_StopsOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestWatch_ClosesOnPersistentErrors verifies that Watch closes its channel
+// after watchMaxConsecutiveErrors consecutive poll failures, and that the
+// engine's remoteEvents handler will therefore be able to record a SyncError
+// (issue #115: tray stays green when backend is down).
+//
+// Strategy: connect the backend to a working server, start Watch, then shut
+// the server down so every subsequent List() call returns a connection error.
+// With the short test backoff the channel must close well within 2 seconds.
+func TestWatch_ClosesOnPersistentErrors(t *testing.T) {
+	// Override backoff timings so the test completes in milliseconds.
+	origInitial := watchBackoffInitial
+	origMax := watchBackoffMax
+	watchBackoffInitial = 5 * time.Millisecond
+	watchBackoffMax = 20 * time.Millisecond
+	t.Cleanup(func() {
+		watchBackoffInitial = origInitial
+		watchBackoffMax = origMax
+	})
+
+	serverURL, srvClose := newTestServer(t)
+	b := newTestBackend(t, serverURL)
+
+	ctx := context.Background()
+	ch, err := b.Watch(ctx, "/")
+	require.NoError(t, err)
+
+	// Give the watcher one successful tick to establish its baseline before
+	// we pull the server out from under it.
+	time.Sleep(3 * time.Duration(20) * time.Millisecond) // ~3 poll ticks
+
+	// Shut down the server — all subsequent List() calls will fail with
+	// "connection refused", triggering the consecutive-error counter.
+	srvClose()
+
+	// The channel must close within 2 seconds: 5 errors × max 20ms backoff
+	// = at most 100ms, well under the 2s budget even on a slow CI runner.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return // success: Watch closed the channel after persistent errors
+			}
+			// Drain any events that arrived before the server went down.
+		case <-deadline:
+			t.Fatal("Watch channel not closed within 2s after persistent backend failure (#115)")
+		}
+	}
+}
+
+// TestWatch_SendsOfflineSentinelOnFirstError verifies that Watch sends a
+// FileEventBackendOffline sentinel on the first consecutive poll failure so
+// the engine can transition to SyncOffline (orange tray) before the full
+// error state (issue #115b).
+func TestWatch_SendsOfflineSentinelOnFirstError(t *testing.T) {
+	// Override backoff timings for a fast test.
+	origInitial := watchBackoffInitial
+	origMax := watchBackoffMax
+	watchBackoffInitial = 5 * time.Millisecond
+	watchBackoffMax = 20 * time.Millisecond
+	t.Cleanup(func() {
+		watchBackoffInitial = origInitial
+		watchBackoffMax = origMax
+	})
+
+	serverURL, srvClose := newTestServer(t)
+	b := newTestBackend(t, serverURL)
+
+	// Use a cancellable context so we can stop the Watch goroutine before
+	// t.Cleanup resets the backoff vars — prevents the data race seen with
+	// context.Background().
+	ctx, cancel := context.WithCancel(context.Background())
+
+	ch, err := b.Watch(ctx, "/")
+	require.NoError(t, err)
+
+	// Wait for one healthy tick (baseline established).
+	time.Sleep(3 * time.Duration(20) * time.Millisecond)
+
+	// Kill the server — next poll will fail.
+	srvClose()
+
+	// The first event after the server goes down must be the offline sentinel.
+	// Cancel the context once we've verified it so the Watch goroutine exits
+	// cleanly before t.Cleanup restores the package-level backoff vars.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatal("channel closed before offline sentinel was received")
+			}
+			if ev.Type == plugins.FileEventBackendOffline {
+				cancel()
+				// Drain until the goroutine sees the cancellation and closes the channel.
+				for range ch {
+				}
+				return // success
+			}
+			// Skip any events emitted before the server went down.
+		case <-deadline:
+			cancel()
+			t.Fatal("offline sentinel not received within 2s after server shutdown (#115b)")
+		}
+	}
+}
+
+// TestWatch_SendsOnlineSentinelOnRecovery verifies that Watch sends a
+// FileEventBackendOnline sentinel when a poll succeeds after one or more
+// consecutive failures (backend came back online, issue #115b).
+func TestWatch_SendsOnlineSentinelOnRecovery(t *testing.T) {
+	// Override backoff timings for a fast test.
+	origInitial := watchBackoffInitial
+	origMax := watchBackoffMax
+	watchBackoffInitial = 5 * time.Millisecond
+	watchBackoffMax = 20 * time.Millisecond
+	t.Cleanup(func() {
+		watchBackoffInitial = origInitial
+		watchBackoffMax = origMax
+	})
+
+	// Start a mutable server: can be paused and resumed.
+	var serverDown atomic.Bool
+	wdHandler := &gowebdav.Handler{
+		FileSystem: gowebdav.NewMemFS(),
+		LockSystem: gowebdav.NewMemLS(),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serverDown.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != testUser || pass != testPass {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		wdHandler.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := b.Watch(ctx, "/")
+	require.NoError(t, err)
+
+	// Let Watch establish its baseline on the healthy server.
+	time.Sleep(3 * time.Duration(20) * time.Millisecond)
+
+	// Take the server offline — triggers offline sentinel.
+	serverDown.Store(true)
+
+	deadline := time.After(2 * time.Second)
+	gotOffline := false
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatal("channel closed before online sentinel was received")
+			}
+			switch ev.Type {
+			case plugins.FileEventBackendOffline:
+				if !gotOffline {
+					gotOffline = true
+					// Bring server back online.
+					serverDown.Store(false)
+				}
+			case plugins.FileEventBackendOnline:
+				if gotOffline {
+					cancel()
+					for range ch {
+					}
+					return // success: offline → online cycle complete
+				}
+			}
+		case <-deadline:
+			cancel()
+			t.Fatal("online sentinel not received within 2s after server recovery (#115b)")
+		}
+	}
+}
+
+// ─── Watch adaptive polling ───────────────────────────────────────────────────
+
+// TestComputeNextInterval verifies the pure backoff algorithm used by Watch.
+func TestComputeNextInterval(t *testing.T) {
+	min := 10 * time.Millisecond
+	max := 80 * time.Millisecond
+
+	tests := []struct {
+		name    string
+		current time.Duration
+		factor  float64
+		changed bool
+		want    time.Duration
+	}{
+		// Change detected → always reset to min.
+		{"changed resets to min from min", min, 2.0, true, min},
+		{"changed resets to min from mid", 40 * time.Millisecond, 2.0, true, min},
+		{"changed resets to min from max", max, 2.0, true, min},
+
+		// No change → backoff by factor.
+		{"idle min→20ms", min, 2.0, false, 20 * time.Millisecond},
+		{"idle 20ms→40ms", 20 * time.Millisecond, 2.0, false, 40 * time.Millisecond},
+		{"idle 40ms→80ms", 40 * time.Millisecond, 2.0, false, max},
+		{"idle clamped at max", max, 2.0, false, max},
+		{"idle factor=1.5", min, 1.5, false, 15 * time.Millisecond},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeNextInterval(tt.current, min, max, tt.factor, tt.changed)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestWatch_adaptiveBackoff_sequence verifies that the interval sequence
+// produced by successive empty polls follows the expected backoff pattern.
+func TestWatch_adaptiveBackoff_sequence(t *testing.T) {
+	min := 10 * time.Millisecond
+	max := 80 * time.Millisecond
+
+	sequence := []time.Duration{min}
+	cur := min
+	for i := 0; i < 4; i++ {
+		cur = computeNextInterval(cur, min, max, 2.0, false)
+		sequence = append(sequence, cur)
+	}
+
+	want := []time.Duration{
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		80 * time.Millisecond, // clamped at max
+	}
+	assert.Equal(t, want, sequence, "backoff sequence mismatch")
+}
+
+// TestWatch_adaptiveReset verifies that Watch resets to fast polling
+// after a change is detected, allowing a subsequent change to be picked
+// up quickly even if the interval had backed off.
+func TestWatch_adaptiveReset(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+	b := newTestBackend(t, serverURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Override adaptive interval to short values for a fast test.
+	b.mu.Lock()
+	b.pollIntervalMin = 20 * time.Millisecond
+	b.pollIntervalMax = 200 * time.Millisecond
+	b.pollBackoffFactor = 2.0
+	b.mu.Unlock()
+
+	ch, err := b.Watch(ctx, "/")
+	require.NoError(t, err)
+
+	// Let the snapshot settle.
+	time.Sleep(60 * time.Millisecond)
+
+	// Upload first file.
+	f1 := writeTempFile(t, []byte("adaptive-reset-1"))
+	go func() { _ = b.Upload(context.Background(), f1, "/adaptive1.txt", nil) }()
+
+	select {
+	case ev, ok := <-ch:
+		require.True(t, ok, "channel closed unexpectedly")
+		assert.Equal(t, plugins.FileEventCreated, ev.Type)
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for first FileEventCreated")
+	}
+
+	// Upload second file. Interval should have reset to min (20ms).
+	f2 := writeTempFile(t, []byte("adaptive-reset-2"))
+	go func() { _ = b.Upload(context.Background(), f2, "/adaptive2.txt", nil) }()
+
+	select {
+	case ev, ok := <-ch:
+		require.True(t, ok, "channel closed unexpectedly")
+		assert.Equal(t, plugins.FileEventCreated, ev.Type)
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for second FileEventCreated (adaptive reset failed)")
+	}
+}
+
 // ─── Describe ────────────────────────────────────────────────────────────────
 
 // TestBackend_Describe verifies the static descriptor returned by Describe().
@@ -730,7 +1021,8 @@ func TestBackend_Describe(t *testing.T) {
 	}
 
 	// Required keys from the plugin contract
-	expectedKeys := []string{"url", "username", "password", "token", "authType", "pollInterval", "tlsSkipVerify"}
+	expectedKeys := []string{"url", "username", "password", "token", "authType",
+		"pollIntervalMin", "pollIntervalMax", "pollBackoffFactor", "tlsSkipVerify"}
 	for _, key := range expectedKeys {
 		assert.Contains(t, paramsByKey, key,
 			"Describe().Params must contain a ParamSpec with Key=%q", key)
@@ -774,10 +1066,14 @@ func TestBackend_Describe(t *testing.T) {
 			"Describe() param \"tlsSkipVerify\" must be ParamTypeBool")
 	}
 
-	// "pollInterval" must be ParamTypeNumber
-	if poll, ok := paramsByKey["pollInterval"]; ok {
+	// "pollIntervalMin" and "pollIntervalMax" must be ParamTypeNumber
+	if poll, ok := paramsByKey["pollIntervalMin"]; ok {
 		assert.Equal(t, plugins.ParamTypeNumber, poll.Type,
-			"Describe() param \"pollInterval\" must be ParamTypeNumber")
+			"Describe() param \"pollIntervalMin\" must be ParamTypeNumber")
+	}
+	if poll, ok := paramsByKey["pollIntervalMax"]; ok {
+		assert.Equal(t, plugins.ParamTypeNumber, poll.Type,
+			"Describe() param \"pollIntervalMax\" must be ParamTypeNumber")
 	}
 }
 

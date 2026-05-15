@@ -6,6 +6,7 @@
 package mfsclient
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -588,27 +589,38 @@ func (s *fakeMFSServer) handleRead(conn net.Conn, payload []byte) {
 // handleReadChunk handles CLTOMA_FUSE_READ_CHUNK (432).
 //
 // Payload: [msgid:32][nodeID:32][index:32] (chunkopflags:8 optional, accepted if present)
-// Response proto 2:
+//
+// Multi-chunk support: uses the chunk index to return a distinct chunkID per
+// chunk and pre-loads the correct slice of node.content into the CS.
+//
+//   chunkID = (uint64(nodeID) << 32) | uint64(chunkIndex)
+//   CS data  = node.content[chunkIndex*ChunkSize : (chunkIndex+1)*ChunkSize]
+//
+// When chunkIndex*ChunkSize >= fileLength the master would normally return a
+// 5-byte StatusOK (EOF), but some MooseFS versions return a proto=2 response
+// with nCS=0 instead (e.g. when the file size is exactly a multiple of
+// ChunkSize).  This fake server mimics that behaviour to exercise the EOF fix
+// in client.go.
+//
+// Response proto 2 (nCS=1 when chunk exists):
 //
 //	[msgid:32][protocolid:8=2][length:64][chunkID:64][version:32]
 //	1×[ip:32 port:16 cs_ver:32 labelmask:32]
 //
-// Before responding, the handler pre-loads the node's content into the
-// embedded fakeCSServer so that the subsequent ReadChunk call against the CS
-// always sees the latest committed data.
+// Response proto 2 (nCS=0 when chunk is at/past EOF):
+//
+//	[msgid:32][protocolid:8=2][length:64][chunkID:64][version:32]
+//	(no CS entries)
 func (s *fakeMFSServer) handleReadChunk(conn net.Conn, payload []byte) {
 	if len(payload) < 12 {
 		return
 	}
 	msgid, off, _ := ReadUint32(payload, 0)
-	nodeID, _, _ := ReadUint32(payload, off)
+	nodeID, off, _ := ReadUint32(payload, off)
+	chunkIndex, _, _ := ReadUint32(payload, off)
 
 	s.mu.Lock()
 	n, ok := s.nodes[nodeID]
-	if ok {
-		// Sync node.content → CS so reads always see committed data.
-		s.cs.SetChunkData(uint64(nodeID), n.content)
-	}
 	s.mu.Unlock()
 
 	if !ok {
@@ -616,21 +628,41 @@ func (s *fakeMFSServer) handleReadChunk(conn net.Conn, payload []byte) {
 		return
 	}
 
-	// Build proto 2 response: protocolid=2, file length, chunkid, version, 1 server.
-	fileLen := uint64(0)
-	if n != nil {
-		fileLen = uint64(len(n.content))
+	fileLen := uint64(len(n.content))
+	chunkStart := uint64(chunkIndex) * ChunkSize
+
+	// Compound chunkID: upper 32 bits = nodeID, lower 32 bits = chunkIndex.
+	// This ensures each MooseFS chunk of the same inode has a distinct ID in
+	// the fake CS store, matching real MooseFS master behaviour.
+	chunkID := (uint64(nodeID) << 32) | uint64(chunkIndex)
+
+	if chunkStart < fileLen {
+		// Pre-load this chunk's slice into the CS so ReadChunk always sees
+		// committed data (mirrors what the real master + CS provide).
+		chunkEnd := chunkStart + ChunkSize
+		if chunkEnd > fileLen {
+			chunkEnd = fileLen
+		}
+		s.cs.SetChunkData(chunkID, n.content[chunkStart:chunkEnd])
 	}
+
+	// Build proto 2 response.
 	var resp []byte
 	resp = PutUint32(resp, msgid)
-	resp = PutUint8(resp, 2)               // protocolid = 2
-	resp = PutUint64(resp, fileLen)         // current file length
-	resp = PutUint64(resp, uint64(nodeID))  // chunkID = nodeID (fake mapping)
-	resp = PutUint32(resp, 1)               // chunk version
-	resp = PutUint32(resp, s.csIP)
-	resp = PutUint16(resp, s.csPort)
-	resp = PutUint32(resp, 0) // cs_ver (unused in fake)
-	resp = PutUint32(resp, 0) // labelmask (unused in fake)
+	resp = PutUint8(resp, 2)        // protocolid = 2
+	resp = PutUint64(resp, fileLen) // current file length
+	resp = PutUint64(resp, chunkID) // compound chunkID
+	resp = PutUint32(resp, 1)       // chunk version
+
+	if chunkStart < fileLen {
+		// Include the CS entry — data is available.
+		resp = PutUint32(resp, s.csIP)
+		resp = PutUint16(resp, s.csPort)
+		resp = PutUint32(resp, 0) // cs_ver (unused in fake)
+		resp = PutUint32(resp, 0) // labelmask (unused in fake)
+	}
+	// If chunkStart >= fileLen: no CS entries (nCS=0) — simulates MooseFS
+	// returning a boundary-slot proto response instead of 5-byte StatusOK.
 	_ = WriteFrame(conn, MatoclFuseReadChunk, resp)
 }
 
@@ -1152,6 +1184,97 @@ func TestRead_eof(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+// TestRead_MultiChunk_SecondChunk verifies that Read() correctly crosses the
+// 64 MiB MooseFS chunk boundary and returns data from chunk 1.
+//
+// The test injects a file of ChunkSize+100 bytes directly into the fake
+// master (bypassing the upload protocol) and then reads:
+//   - 10 bytes from offset 0 (chunk 0)   → byte value 0xAA
+//   - 100 bytes from offset ChunkSize (chunk 1) → byte value 0xBB
+//   - 10 bytes from offset ChunkSize+100 (past EOF) → nil
+//
+// This covers the production scenario where a download of a file > 64 MiB
+// fails with "no chunk servers available" if handleReadChunk ignores the
+// chunk index and always returns the same chunkID.
+func TestRead_MultiChunk_SecondChunk(t *testing.T) {
+	c, srv := newTestClient(t)
+
+	nodeID, err := c.Mknod(RootNodeID, "bigfile.bin", 0o644)
+	require.NoError(t, err)
+
+	// Inject content directly: chunk 0 = 0xAA × ChunkSize, chunk 1 = 0xBB × 100.
+	content := make([]byte, int(ChunkSize)+100)
+	for i := 0; i < int(ChunkSize); i++ {
+		content[i] = 0xAA
+	}
+	for i := int(ChunkSize); i < len(content); i++ {
+		content[i] = 0xBB
+	}
+	srv.mu.Lock()
+	srv.nodes[nodeID].content = content
+	srv.mu.Unlock()
+
+	// Read 10 bytes from chunk 0 (offset 0).
+	got0, err := c.Read(nodeID, 0, 10)
+	require.NoError(t, err)
+	assert.Equal(t, bytes.Repeat([]byte{0xAA}, 10), got0, "chunk 0 data mismatch")
+
+	// Read 100 bytes from chunk 1 (offset = ChunkSize).
+	got1, err := c.Read(nodeID, ChunkSize, 100)
+	require.NoError(t, err)
+	require.NotNil(t, got1, "chunk 1 must not be nil (no EOF)")
+	assert.Equal(t, bytes.Repeat([]byte{0xBB}, 100), got1, "chunk 1 data mismatch")
+
+	// Read past EOF — must return empty (nil), not error.
+	gotEOF, err := c.Read(nodeID, uint64(len(content)), 10)
+	require.NoError(t, err)
+	assert.Empty(t, gotEOF, "read past EOF must return empty")
+}
+
+// TestRead_MultiChunk_NCSZeroAtEOF verifies that Read() treats a master
+// proto response with nCS=0 as EOF when offset >= info.Length.
+//
+// This reproduces the production error:
+//
+//	mfsclient: Read(N, off=67108864): no chunk servers available
+//
+// which occurs when a file is exactly a multiple of ChunkSize bytes.  In that
+// case, some MooseFS master versions return a proto=2/nCS=0 response for chunk
+// index 1 rather than the standard 5-byte StatusOK EOF signal.
+//
+// Before the fix, Read() returned an error; after the fix it returns nil (EOF).
+func TestRead_MultiChunk_NCSZeroAtEOF(t *testing.T) {
+	c, srv := newTestClient(t)
+
+	nodeID, err := c.Mknod(RootNodeID, "exact64m.bin", 0o644)
+	require.NoError(t, err)
+
+	// Inject content of exactly ChunkSize bytes (fills chunk 0 completely).
+	// This causes handleReadChunk to return nCS=0 for chunk index 1 since
+	// chunkStart(1) = ChunkSize == fileLen.
+	content := bytes.Repeat([]byte{0xCC}, 10) // small sentinel data
+	// We need fileLen to simulate ChunkSize so that the offset check triggers.
+	// Trick: use a custom content slice whose length is exactly ChunkSize by
+	// allocating the real size.
+	bigContent := make([]byte, int(ChunkSize))
+	copy(bigContent, content)
+	srv.mu.Lock()
+	srv.nodes[nodeID].content = bigContent
+	srv.mu.Unlock()
+
+	// Read from chunk 0 (offset 0) — must succeed.
+	got0, err := c.Read(nodeID, 0, 10)
+	require.NoError(t, err)
+	assert.Equal(t, content, got0, "chunk 0 must return injected data")
+
+	// Read at offset ChunkSize — this is the boundary chunk slot.
+	// handleReadChunk returns proto=2/nCS=0 with info.Length=ChunkSize.
+	// Fixed Read() must return nil (EOF), NOT "no chunk servers available".
+	gotBoundary, err := c.Read(nodeID, ChunkSize, 10)
+	require.NoError(t, err, "Read at chunk boundary (nCS=0 with offset==fileLen) must return EOF, not error")
+	assert.Empty(t, gotBoundary, "boundary read must return empty (EOF)")
+}
+
 // ─── Unlink tests ─────────────────────────────────────────────────────────────
 
 func TestUnlink_file(t *testing.T) {
@@ -1323,6 +1446,119 @@ func TestWrite_lockIDParsing(t *testing.T) {
 		assert.Empty(t, info.Servers, "no CS entries expected")
 		assert.Equal(t, wantLockID, info.LockID,
 			"lockid must be extracted even when there are 0 CS entries")
+	})
+}
+
+// TestParseChunkInfo_Proto3 verifies that parseChunkInfo correctly handles
+// protocolid=3 responses (MooseFS >= 4.0.0, erasure-coded chunks).
+//
+// Proto=3 has the same wire format as proto=2 (14 bytes per CS entry), but is
+// used for chunks split into 4 or 8 independent EC shards.  Before this fix,
+// any proto=3 response triggered "unknown protocolid 3" — issue #114.
+//
+// Two behaviours are tested:
+//
+//  1. Truncated raw bytes from the production Windows log (first 32 of a longer
+//     response): no error, ChunkInfo fields decoded, 0 CS entries (incomplete
+//     payload gives N = 7/14 = 0).
+//
+//  2. Well-formed 4-entry proto=3 response: parseChunkInfo returns a clear
+//     "EC not supported" error instead of trying to serve corrupt data from a
+//     single shard.
+func TestParseChunkInfo_Proto3(t *testing.T) {
+	t.Run("raw_bytes_from_issue_114", func(t *testing.T) {
+		// First 32 bytes captured from a Windows production log (issue #114).
+		// The parseChunkInfo error logger truncates raw bytes at 32 bytes; the
+		// full proto=3 response would be 25 (header) + 4×14 = 81 bytes.
+		// With only 32 bytes available: remaining = 7, N = 7/14 = 0 (truncated).
+		//
+		// Hex: 0000000003000000000002a107000000000000aebb00000001c0a8026424ce00
+		var raw []byte
+		raw = PutUint32(raw, 0)          // msgid = 0
+		raw = PutUint8(raw, 3)           // protocolid = 3
+		raw = PutUint64(raw, 172295)     // fileLength = 0x0002a107
+		raw = PutUint64(raw, 44731)      // chunkID   = 0x0000aebb
+		raw = PutUint32(raw, 1)          // version   = 1
+		// Partial first CS entry (7 bytes — response truncated at 32 bytes):
+		raw = PutUint32(raw, 0xC0A80264) // ip   = 192.168.2.100
+		raw = PutUint16(raw, 0x24CE)     // port = 9422
+		raw = PutUint8(raw, 0)           // first byte of cs_ver (truncated)
+		// Total: 25 header + 7 partial = 32 bytes.
+		require.Len(t, raw, 32, "test vector must be exactly 32 bytes")
+
+		info, err := parseChunkInfo(raw)
+		require.NoError(t, err, "proto=3 must not return 'unknown protocolid' error")
+		assert.Equal(t, uint64(44731), info.ChunkID, "chunkID decoded")
+		assert.Equal(t, uint64(172295), info.Length, "file length decoded")
+		assert.Equal(t, uint32(1), info.Version, "version decoded")
+		assert.Empty(t, info.Servers,
+			"0 CS entries expected: truncated payload (7 bytes) < entrySize (14)")
+	})
+
+	t.Run("four_part_ec_chunk_returns_error", func(t *testing.T) {
+		// Well-formed proto=3 response with 4 CS entries (minimum EC configuration,
+		// per MooseFS source: chunks.c / matoclserv.c).
+		// parseChunkInfo must parse the 4 servers and then return a clear error
+		// rather than silently serving corrupt data from a single EC shard.
+		var resp []byte
+		resp = PutUint32(resp, 0)      // msgid
+		resp = PutUint8(resp, 3)       // protocolid = 3
+		resp = PutUint64(resp, 172295) // fileLength
+		resp = PutUint64(resp, 44731)  // chunkID
+		resp = PutUint32(resp, 1)      // version
+		// 4 CS entries × 14 bytes = 56 bytes.
+		for i := uint32(0); i < 4; i++ {
+			resp = PutUint32(resp, 0xC0A80264+i) // ip: 192.168.2.100 … 103
+			resp = PutUint16(resp, 0x24CE)        // port: 9422
+			resp = PutUint32(resp, 0)             // cs_ver
+			resp = PutUint32(resp, 0)             // labelmask
+		}
+		require.Len(t, resp, 81, "test vector must be 25-byte header + 4×14 = 81 bytes")
+
+		_, err := parseChunkInfo(resp)
+		require.Error(t, err, "proto=3 EC chunk must return an error")
+		assert.Contains(t, err.Error(), "erasure-coded",
+			"error must identify the EC nature of the chunk")
+		assert.Contains(t, err.Error(), "4",
+			"error must report the part count")
+	})
+
+	t.Run("eight_part_ec_chunk_returns_error", func(t *testing.T) {
+		// Same as four_part but with 8 entries (maximum EC configuration).
+		var resp []byte
+		resp = PutUint32(resp, 0)
+		resp = PutUint8(resp, 3)
+		resp = PutUint64(resp, 172295)
+		resp = PutUint64(resp, 44731)
+		resp = PutUint32(resp, 1)
+		for i := uint32(0); i < 8; i++ {
+			resp = PutUint32(resp, 0xC0A80264+i)
+			resp = PutUint16(resp, 0x24CE)
+			resp = PutUint32(resp, 0)
+			resp = PutUint32(resp, 0)
+		}
+		require.Len(t, resp, 137, "test vector must be 25-byte header + 8×14 = 137 bytes")
+
+		_, err := parseChunkInfo(resp)
+		require.Error(t, err, "proto=3 EC chunk (8 parts) must return an error")
+		assert.Contains(t, err.Error(), "8", "error must report the part count")
+	})
+
+	t.Run("proto3_zero_servers_no_error", func(t *testing.T) {
+		// Proto=3 with 0 CS entries (e.g., master returns proto=3 but no servers
+		// are available). N=0 is a degenerate case handled by the existing nCS=0
+		// guard in Read() — parseChunkInfo must not error here.
+		var resp []byte
+		resp = PutUint32(resp, 0)
+		resp = PutUint8(resp, 3)
+		resp = PutUint64(resp, 172295)
+		resp = PutUint64(resp, 44731)
+		resp = PutUint32(resp, 1)
+		// No CS entries.
+
+		info, err := parseChunkInfo(resp)
+		require.NoError(t, err, "proto=3 with 0 servers must not error")
+		assert.Empty(t, info.Servers)
 	})
 }
 

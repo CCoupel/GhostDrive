@@ -19,14 +19,14 @@ func newMB(id, name string) placeholder.MountedBackend {
 // ─── NewDriveManager ─────────────────────────────────────────────────────────
 
 func TestNewDriveManager_NotNil(t *testing.T) {
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 	assert.NotNil(t, dm)
 }
 
 // ─── Unmount on empty pool ────────────────────────────────────────────────────
 
 func TestDriveManager_Unmount_UnknownBackend_IsNoop(t *testing.T) {
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 	assert.NoError(t, dm.Unmount("nonexistent-id"),
 		"Unmount of an unknown backendID must return nil (idempotent)")
 }
@@ -34,7 +34,7 @@ func TestDriveManager_Unmount_UnknownBackend_IsNoop(t *testing.T) {
 // ─── GetStatus on empty pool ──────────────────────────────────────────────────
 
 func TestDriveManager_GetStatus_Unknown_ReturnsFalse(t *testing.T) {
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 	_, ok := dm.GetStatus("unknown")
 	assert.False(t, ok, "GetStatus must return false for an unregistered backendID")
 }
@@ -42,7 +42,7 @@ func TestDriveManager_GetStatus_Unknown_ReturnsFalse(t *testing.T) {
 // ─── GetAllStatuses on empty pool ─────────────────────────────────────────────
 
 func TestDriveManager_GetAllStatuses_Empty(t *testing.T) {
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 	statuses := dm.GetAllStatuses()
 	assert.NotNil(t, statuses, "GetAllStatuses must return a non-nil map")
 	assert.Len(t, statuses, 0)
@@ -51,7 +51,7 @@ func TestDriveManager_GetAllStatuses_Empty(t *testing.T) {
 // ─── UnmountAll on empty pool ─────────────────────────────────────────────────
 
 func TestDriveManager_UnmountAll_Empty_NoError(t *testing.T) {
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 	assert.NoError(t, dm.UnmountAll())
 }
 
@@ -65,7 +65,7 @@ func TestDriveManager_Mount_NonWindows_ReturnsError(t *testing.T) {
 		t.Skip("non-Windows specific test")
 	}
 
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 	mb := newMB("b1", "Backend1")
 	err := dm.Mount("b1", "G:", mb)
 	require.Error(t, err, "Mount must return an error on non-Windows (NullDrive)")
@@ -84,7 +84,7 @@ func TestDriveManager_Mount_NonWindows_ReturnsError(t *testing.T) {
 // that already has a drive first unmounts the old drive (best-effort) and
 // replaces it. On non-Windows this just means two failures — no panic.
 func TestDriveManager_DoubleMount_ImplicitUnmount(t *testing.T) {
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 	mb := newMB("b1", "Backend1")
 
 	// Both calls will fail on non-Windows, but neither should panic.
@@ -117,7 +117,7 @@ func TestDriveManager_GetStatus_PopulatesBackendMetadata(t *testing.T) {
 	}
 	// On non-Windows, Mount fails — so we cannot test a registered drive via
 	// Mount. This test is intentionally a no-op verifying the pool stays clean.
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 	_, ok := dm.GetStatus("b1")
 	assert.False(t, ok)
 }
@@ -125,7 +125,7 @@ func TestDriveManager_GetStatus_PopulatesBackendMetadata(t *testing.T) {
 // ─── AssignAvailableLetter ────────────────────────────────────────────────────
 
 func TestDriveManager_AssignAvailableLetter_SkipsUsed(t *testing.T) {
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 
 	// On non-Windows, IsLetterInUse always returns false, so the first
 	// available letter not in usedLetters should be "E:".
@@ -153,7 +153,7 @@ func TestDriveManager_AssignAvailableLetter_AllUsed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("all-letters-used scenario only feasible on non-Windows where OS check is false")
 	}
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 
 	// Build a list with E: through Z: all "used".
 	all := make([]string, 0, 22)
@@ -167,7 +167,7 @@ func TestDriveManager_AssignAvailableLetter_AllUsed(t *testing.T) {
 // ─── UnmountAll ───────────────────────────────────────────────────────────────
 
 func TestDriveManager_UnmountAll_ClearsPool(t *testing.T) {
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 	// Mount attempts will fail on non-Windows, pool stays empty.
 	// UnmountAll must still succeed with an empty pool.
 	assert.NoError(t, dm.UnmountAll())
@@ -179,7 +179,7 @@ func TestDriveManager_UnmountAll_ClearsPool(t *testing.T) {
 // TestDriveManager_ConcurrentMountUnmount verifies that concurrent Mount and
 // Unmount calls do not race on the internal map.  Run with: go test -race
 func TestDriveManager_ConcurrentMountUnmount(t *testing.T) {
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 	mb := newMB("race-backend", "RaceBackend")
 
 	var wg sync.WaitGroup
@@ -201,7 +201,7 @@ func TestDriveManager_ConcurrentMountUnmount(t *testing.T) {
 
 // TestDriveManager_ConcurrentGetStatus verifies concurrent reads are safe.
 func TestDriveManager_ConcurrentGetStatus(t *testing.T) {
-	dm := placeholder.NewDriveManager()
+	dm := placeholder.NewDriveManager(nil)
 
 	var wg sync.WaitGroup
 	const readers = 30

@@ -220,6 +220,52 @@ func TestEngineRecordError(t *testing.T) {
 	assert.True(t, emitter.hasEvent("sync:error"))
 }
 
+func TestEngineRecordOffline(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	engine, emitter := newTestEngine(t, backend, tmp)
+
+	engine.recordOffline()
+
+	state := engine.GetState()
+	assert.Equal(t, types.SyncOffline, state.Status, "recordOffline must set SyncOffline state")
+	assert.Len(t, state.Errors, 0, "recordOffline must not add to the error list")
+	assert.True(t, emitter.hasEvent("sync:offline"), "recordOffline must emit sync:offline")
+}
+
+func TestEngineRecordOnline_ClearsOfflineState(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	engine, emitter := newTestEngine(t, backend, tmp)
+
+	// Drive the engine into offline state, then recover.
+	engine.recordOffline()
+	require.Equal(t, types.SyncOffline, engine.GetState().Status)
+
+	engine.recordOnline()
+
+	state := engine.GetState()
+	assert.Equal(t, types.SyncIdle, state.Status, "recordOnline must clear SyncOffline → SyncIdle")
+	assert.True(t, emitter.hasEvent("sync:online"), "recordOnline must emit sync:online")
+}
+
+func TestEngineRecordOnline_DoesNotOverrideError(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	engine, emitter := newTestEngine(t, backend, tmp)
+
+	// Drive the engine into error state (persistent failure).
+	engine.recordError("/file", "server down")
+	require.Equal(t, types.SyncError, engine.GetState().Status)
+
+	// A spurious online sentinel must not clear an error state.
+	engine.recordOnline()
+
+	state := engine.GetState()
+	assert.Equal(t, types.SyncError, state.Status, "recordOnline must not override SyncError")
+	assert.True(t, emitter.hasEvent("sync:online"), "recordOnline must still emit sync:online even when state unchanged")
+}
+
 func TestEngineRetryWithBackoff(t *testing.T) {
 	// Test that SyncQueue correctly applies backoff on failure
 	q := &SyncQueue{}

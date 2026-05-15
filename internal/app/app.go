@@ -34,14 +34,15 @@ type App struct {
 	cfgPath string
 	cfg     config.AppConfig
 
-	mu           gosync.RWMutex
-	manager      *backends.BackendManager
-	engines      map[string]*sync.Engine
-	driveManager *placeholder.DriveManager          // v1.1.x per-backend drive pool
-	dynRegistry  *pluginsregistry.DynamicRegistry   // v0.6.x dynamic plugin loader
-	descriptors  map[string]plugins.PluginDescriptor // cached plugin descriptors by type
-	localCleanup func()                              // cleanup for ServeInProcess local backend
-	logStore     *logging.Store                      // in-process log capture for the Logs UI tab
+	mu                   gosync.RWMutex
+	manager              *backends.BackendManager
+	engines              map[string]*sync.Engine
+	driveManager         *placeholder.DriveManager          // v1.1.x per-backend drive pool
+	dynRegistry          *pluginsregistry.DynamicRegistry   // v0.6.x dynamic plugin loader
+	descriptors          map[string]plugins.PluginDescriptor // cached plugin descriptors by type
+	localCleanup         func()                              // cleanup for ServeInProcess local backend
+	logStore             *logging.Store                      // in-process log capture for the Logs UI tab
+	backendConnectErrors map[string]string                   // backends that failed to connect (startup or enable); protected by mu (#117)
 }
 
 // NewApp creates a new App. Configuration is loaded in Startup once the
@@ -53,14 +54,18 @@ func NewApp(cfgPath string) *App {
 			cfgPath = p
 		}
 	}
-	return &App{
-		cfgPath:      cfgPath,
-		cfg:          config.DefaultConfig(),
-		engines:      make(map[string]*sync.Engine),
-		driveManager: placeholder.NewDriveManager(),
-		descriptors:  make(map[string]plugins.PluginDescriptor),
-		logStore:     logging.NewStore(),
+	a := &App{
+		cfgPath:              cfgPath,
+		cfg:                  config.DefaultConfig(),
+		engines:              make(map[string]*sync.Engine),
+		descriptors:          make(map[string]plugins.PluginDescriptor),
+		logStore:             logging.NewStore(),
+		backendConnectErrors: make(map[string]string),
 	}
+	// driveManager needs an emitter; App.Emit() satisfies sync.EventEmitter.
+	// The driveManager is created here so it's available before Startup is called.
+	a.driveManager = placeholder.NewDriveManager(a)
+	return a
 }
 
 // startup is called by Wails after the frontend is ready.
@@ -113,7 +118,10 @@ func (a *App) Startup(ctx context.Context) {
 	a.cfgPath = path
 	a.manager = backends.NewBackendManager(a)
 	if a.driveManager == nil {
-		a.driveManager = placeholder.NewDriveManager()
+		a.driveManager = placeholder.NewDriveManager(a)
+	}
+	if a.backendConnectErrors == nil {
+		a.backendConnectErrors = make(map[string]string)
 	}
 	a.mu.Unlock()
 
@@ -219,6 +227,11 @@ func (a *App) Startup(ctx context.Context) {
 		}
 		if err := a.manager.Add(bc); err != nil {
 			a.emitError(fmt.Sprintf("app: reconnect backend %s: %v", bc.Name, err))
+			// Track the connect failure so GetSyncState() reports SyncError and
+			// the tray turns red even when no engine is running (#117).
+			a.mu.Lock()
+			a.backendConnectErrors[bc.ID] = err.Error()
+			a.mu.Unlock()
 			continue
 		}
 
@@ -516,6 +529,10 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 		}
 		_ = a.StopSync(id)
 		_ = a.manager.Remove(id)
+		// Backend is being disabled — clear any outstanding connect error (#117).
+		a.mu.Lock()
+		delete(a.backendConnectErrors, id)
+		a.mu.Unlock()
 	} else {
 		// Enable path: connect first — only persist on success to avoid disk/memory
 		// divergence if manager.Add fails.
@@ -525,9 +542,15 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 			if idx2 := indexByID(a.cfg.Backends, id); idx2 >= 0 {
 				a.cfg.Backends[idx2].Enabled = false
 			}
+			// Record the connect failure so the tray turns red (#117).
+			a.backendConnectErrors[id] = err.Error()
 			a.mu.Unlock()
 			return fmt.Errorf("reconnect: %w", err)
 		}
+		// manager.Add succeeded — clear any previous connection error (#117).
+		a.mu.Lock()
+		delete(a.backendConnectErrors, id)
+		a.mu.Unlock()
 
 		// v1.1.x — Mount per-backend virtual drive.
 		if bc.MountPoint != "" {
@@ -660,6 +683,8 @@ func (a *App) RemoveBackend(backendID string) error {
 		}
 	}
 	a.cfg.Backends = backends
+	// Clear any outstanding connect error for this backend (#117).
+	delete(a.backendConnectErrors, backendID)
 	path := a.cfgPath
 	cfg := a.cfg
 	a.mu.Unlock()
@@ -721,8 +746,16 @@ func (a *App) UpdateBackend(newBC plugins.BackendConfig) (plugins.BackendConfig,
 	// ── Reconnect if enabled ──────────────────────────────────────────────
 	if newBC.Enabled {
 		if err := a.manager.Add(newBC); err != nil {
+			// Record the connect failure so the tray turns red (#117).
+			a.mu.Lock()
+			a.backendConnectErrors[newBC.ID] = err.Error()
+			a.mu.Unlock()
 			return newBC, fmt.Errorf("connection: %w", err)
 		}
+		// manager.Add succeeded — clear any previous connection error (#117).
+		a.mu.Lock()
+		delete(a.backendConnectErrors, newBC.ID)
+		a.mu.Unlock()
 
 		// v1.1.x — Handle MountPoint change: if the mount point changed (or drive
 		// was not previously mounted), remount on the new mount point.
@@ -940,9 +973,14 @@ func (a *App) GetSyncState() types.SyncState {
 	for k, v := range a.engines {
 		engines[k] = v
 	}
+	// Snapshot failed-connect backends in the same lock (#117).
+	connectErrors := make(map[string]string, len(a.backendConnectErrors))
+	for k, v := range a.backendConnectErrors {
+		connectErrors[k] = v
+	}
 	a.mu.RUnlock()
 
-	backendStates := make([]types.BackendSyncState, 0, len(engines))
+	backendStates := make([]types.BackendSyncState, 0, len(engines)+len(connectErrors))
 	for id, e := range engines {
 		s := e.GetState()
 		name := id
@@ -958,6 +996,32 @@ func (a *App) GetSyncState() types.SyncState {
 			Pending:     s.Pending,
 			LastSync:    s.LastSync,
 			Errors:      []types.BackendSyncError{}, // never nil → never "null" in JSON
+		})
+	}
+
+	// Backends that failed to connect have no running engine.
+	// Surface them as SyncError so the tray turns red immediately (#117).
+	for id, errMsg := range connectErrors {
+		if _, hasEngine := engines[id]; hasEngine {
+			continue // engine takes over state reporting for this backend
+		}
+		name := id
+		a.mu.RLock()
+		for _, bc := range a.cfg.Backends {
+			if bc.ID == id {
+				name = bc.Name
+				break
+			}
+		}
+		a.mu.RUnlock()
+		backendStates = append(backendStates, types.BackendSyncState{
+			BackendID:   id,
+			BackendName: name,
+			Status:      types.SyncError,
+			Errors: []types.BackendSyncError{{
+				BackendID: id,
+				Message:   "connection failed: " + errMsg,
+			}},
 		})
 	}
 
@@ -994,7 +1058,11 @@ func (a *App) StartSync(backendID string) error {
 	}
 	bc, _ := a.manager.GetConfig(backendID)
 	cfg := a.cfg
-	engine := sync.NewEngine(b, bc.SyncDir, bc.RemotePath, cfg, a)
+	// Use a per-backend emitter so sync engine events (offline/error/online) are
+	// bridged to DriveManager.SyncError, making GetDriveStatuses() reflect runtime
+	// sync state alongside mount state (#117b).
+	emitter := &backendEmitter{backendID: backendID, app: a}
+	engine := sync.NewEngine(b, bc.SyncDir, bc.RemotePath, cfg, emitter)
 	a.engines[backendID] = engine
 	a.mu.Unlock() // release before Start to avoid holding lock during I/O
 	return engine.Start(a.ctx)
@@ -1010,6 +1078,11 @@ func (a *App) StopSync(backendID string) error {
 	}
 	e.Stop()
 	delete(a.engines, backendID)
+	// Clear any outstanding sync error when the engine is stopped intentionally,
+	// so GetDriveStatuses() does not persist stale error state (#117b).
+	if a.driveManager != nil {
+		a.driveManager.SetSyncError(backendID, "")
+	}
 	return nil
 }
 
@@ -1083,6 +1156,39 @@ func (a *App) Emit(event string, data any) {
 	wailsruntime.EventsEmit(a.ctx, event, data)
 }
 
+// backendEmitter wraps App.Emit with per-backend context so that sync engine
+// events can be bridged into DriveManager.SyncError, making GetDriveStatuses()
+// reflect runtime sync state alongside mount state (#117b).
+type backendEmitter struct {
+	backendID string
+	app       *App
+}
+
+// Emit forwards the event to the Wails frontend and, for the three canonical
+// sync state events, also updates the DriveManager entry for this backend.
+func (be *backendEmitter) Emit(event string, data any) {
+	be.app.Emit(event, data)
+
+	if be.app.driveManager == nil {
+		return
+	}
+	switch event {
+	case "sync:offline":
+		// Transient unreachability — tray will show orange via state.Status, but
+		// also record in DriveStatus so GetDriveStatuses() callers see it.
+		be.app.driveManager.SetSyncError(be.backendID, "backend unreachable (reconnexion en cours…)")
+	case "sync:error":
+		msg := "sync error"
+		if se, ok := data.(types.SyncErrorInfo); ok && se.Message != "" {
+			msg = se.Message
+		}
+		be.app.driveManager.SetSyncError(be.backendID, msg)
+	case "sync:online":
+		// Backend recovered — clear the sync error so the drive shows healthy.
+		be.app.driveManager.SetSyncError(be.backendID, "")
+	}
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 func (a *App) emit(event string, data any) {
@@ -1101,17 +1207,21 @@ func (a *App) emitSyncState() {
 }
 
 // aggregateStatus computes the global SyncStatus from per-backend states.
+// Priority (high → low): error > syncing > paused > offline > idle.
 func aggregateStatus(states []types.BackendSyncState) types.SyncStatus {
 	if len(states) == 0 {
 		return types.SyncIdle
 	}
 	allPaused := true
+	anyOffline := false
 	for _, s := range states {
 		switch s.Status {
 		case types.SyncError:
 			return types.SyncError
 		case types.SyncSyncing:
 			return types.SyncSyncing
+		case types.SyncOffline:
+			anyOffline = true
 		}
 		if s.Status != types.SyncPaused {
 			allPaused = false
@@ -1119,6 +1229,9 @@ func aggregateStatus(states []types.BackendSyncState) types.SyncStatus {
 	}
 	if allPaused {
 		return types.SyncPaused
+	}
+	if anyOffline {
+		return types.SyncOffline
 	}
 	return types.SyncIdle
 }
@@ -1157,17 +1270,6 @@ func (a *App) GetMountPoint() string {
 // Wails binding: window.go.App.GetDriveStatuses()
 func (a *App) GetDriveStatuses() map[string]placeholder.DriveStatus {
 	return a.driveManager.GetAllStatuses()
-}
-
-// GetDriveStatus returns an empty DriveStatus.
-//
-// Deprecated: use GetDriveStatuses() which returns per-backend drive states.
-// Retained in v1.1.x for frontend compatibility during migration.
-//
-// Wails binding: window.go.App.GetDriveStatus()
-func (a *App) GetDriveStatus() placeholder.DriveStatus {
-	log.Printf("app: GetDriveStatus() is deprecated — use GetDriveStatuses()")
-	return placeholder.DriveStatus{}
 }
 
 // GetGhostDriveRoot returns the configurable root directory under which

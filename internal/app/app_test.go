@@ -11,6 +11,7 @@ import (
 	"github.com/CCoupel/GhostDrive/internal/config"
 	"github.com/CCoupel/GhostDrive/internal/placeholder"
 	internalsync "github.com/CCoupel/GhostDrive/internal/sync"
+	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/CCoupel/GhostDrive/plugins"
 	"github.com/CCoupel/GhostDrive/plugins/local"
 	"github.com/stretchr/testify/assert"
@@ -39,10 +40,11 @@ func newTestApp(t *testing.T) *App {
 			c.GhostDriveRoot = root
 			return c
 		}(),
-		engines:      make(map[string]*internalsync.Engine),
-		manager:      backends.NewBackendManager(nil),
-		driveManager: placeholder.NewDriveManager(),
-		descriptors:  make(map[string]plugins.PluginDescriptor),
+		engines:              make(map[string]*internalsync.Engine),
+		manager:              backends.NewBackendManager(nil),
+		driveManager:         placeholder.NewDriveManager(nil),
+		descriptors:          make(map[string]plugins.PluginDescriptor),
+		backendConnectErrors: make(map[string]string),
 	}
 }
 
@@ -283,14 +285,6 @@ func TestGetDriveStatuses_InitialState(t *testing.T) {
 	statuses := a.GetDriveStatuses()
 	assert.NotNil(t, statuses, "GetDriveStatuses must return a non-nil map")
 	assert.Len(t, statuses, 0, "no drives should be mounted at startup")
-}
-
-// TestGetDriveStatus_Deprecated verifies the deprecated binding returns an
-// empty DriveStatus (not mounted).
-func TestGetDriveStatus_Deprecated(t *testing.T) {
-	a := newTestApp(t)
-	s := a.GetDriveStatus()
-	assert.False(t, s.Mounted, "deprecated GetDriveStatus must return empty DriveStatus")
 }
 
 func TestGetMountPoint_Default(t *testing.T) {
@@ -878,6 +872,64 @@ func TestUpdateBackend_MountPointChange(t *testing.T) {
 	// Test is considered successful as long as no panic occurs.
 }
 
+// ─── #117 — GetSyncState propagates connect failures to the tray ──────────────
+
+// TestGetSyncState_ConnectFailure_ReportsSyncError verifies that a backend
+// whose Connect() failed at startup is represented as SyncError in GetSyncState,
+// even though no sync engine is running for it (#117).
+func TestGetSyncState_ConnectFailure_ReportsSyncError(t *testing.T) {
+	a := newTestApp(t)
+
+	const failedID = "failed-backend-id"
+	// Simulate what the startup loop does when manager.Add returns an error.
+	a.mu.Lock()
+	a.backendConnectErrors[failedID] = "dial tcp: connection refused"
+	a.cfg.Backends = []plugins.BackendConfig{
+		{ID: failedID, Name: "FailedWebDAV", Type: "webdav", Enabled: true},
+	}
+	a.mu.Unlock()
+
+	state := a.GetSyncState()
+	assert.Equal(t, types.SyncError, state.Status,
+		"GetSyncState must aggregate to SyncError when a backend failed to connect (#117)")
+
+	// The failed backend must appear in the Backends list with Status=SyncError.
+	var found bool
+	for _, bs := range state.Backends {
+		if bs.BackendID == failedID {
+			found = true
+			assert.Equal(t, types.SyncError, bs.Status, "failed backend state must be SyncError (#117)")
+			require.NotEmpty(t, bs.Errors, "failed backend must carry an error message (#117)")
+			assert.Contains(t, bs.Errors[0].Message, "connection failed")
+		}
+	}
+	assert.True(t, found, "failed backend must appear in Backends list (#117)")
+}
+
+// TestGetSyncState_ConnectErrorCleared_ReturnsIdle verifies that once the
+// connect error is cleared (backend re-enabled successfully), GetSyncState
+// reverts to SyncIdle (#117).
+func TestGetSyncState_ConnectErrorCleared_ReturnsIdle(t *testing.T) {
+	a := newTestApp(t)
+
+	const id = "cleared-backend-id"
+	// Record a connect error.
+	a.mu.Lock()
+	a.backendConnectErrors[id] = "dial tcp: connection refused"
+	a.mu.Unlock()
+
+	// Simulate a successful reconnect clearing the error.
+	a.mu.Lock()
+	delete(a.backendConnectErrors, id)
+	a.mu.Unlock()
+
+	state := a.GetSyncState()
+	assert.Equal(t, types.SyncIdle, state.Status,
+		"GetSyncState must return SyncIdle after connect error is cleared (#117)")
+	assert.Empty(t, state.Backends,
+		"cleared backend must not appear in Backends (#117)")
+}
+
 // TestStartup_MigratesMountPoint verifies that Startup() assigns a MountPoint
 // to backends that were created before v1.1.x (MountPoint was empty) (#88).
 func TestStartup_MigratesMountPoint(t *testing.T) {
@@ -913,7 +965,7 @@ func TestStartup_MigratesMountPoint(t *testing.T) {
 		cfg:          testCfg,
 		engines:      make(map[string]*internalsync.Engine),
 		manager:      backends.NewBackendManager(nil),
-		driveManager: placeholder.NewDriveManager(),
+		driveManager: placeholder.NewDriveManager(nil),
 		descriptors:  make(map[string]plugins.PluginDescriptor),
 	}
 

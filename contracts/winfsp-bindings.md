@@ -79,3 +79,46 @@ mapping backendID → chemin sous le drive, et dernière erreur éventuelle.
 - WinFsp est requis au runtime : https://winfsp.dev/rel/ (version minimale 2.0)
 - Sur les plateformes non-Windows, `MountDrive()` et `UnmountDrive()` retournent
   `"winfsp: not supported on this platform"` (dégradation gracieuse)
+
+---
+
+## Cache Métadonnées VFS — v1.7.0 (#108)
+
+### Getattr (Stat)
+
+`GhostFileSystem.Getattr()` consulte le cache LRU avant d'appeler `backend.Stat()` :
+
+1. **Cache hit** : retourne le `FileInfo` mis en cache — aucun appel réseau.
+2. **Cache miss** : appelle `backend.Stat()`, stocke le résultat dans le cache, retourne la valeur.
+3. **Invalidation** : le cache est invalidé immédiatement lors de toute écriture locale (Release après upload, Unlink, Rename, Mkdir, Create) et par les événements `Watch()` reçus via `watchLoop`.
+
+### Readdir (List)
+
+`GhostFileSystem.Readdir()` consulte le cache LRU avant d'appeler `backend.List()` :
+
+1. **Cache hit** : retourne la liste mise en cache — aucun appel réseau.
+2. **Cache miss** : appelle `backend.List()`, stocke le résultat dans le cache, retourne la liste.
+3. **Invalidation** : même stratégie que Getattr ; le répertoire parent est invalidé après chaque modification de son contenu.
+
+### Paramètres de configuration
+
+| Paramètre | Type | Valeur par défaut | Description |
+|-----------|------|-------------------|-------------|
+| `BackendConfig.Params["metaCacheTTL"]` | `string` (entier secondes) | `"300"` (5 min) | TTL fallback du cache métadonnées |
+
+### Comportement watchLoop
+
+- Une goroutine `watchLoop` est démarrée par backend au moment du `Mount()`.
+- La goroutine écoute le canal retourné par `backend.Watch(ctx, "/")`.
+- À chaque `FileEvent`, elle invalide les entrées cache correspondantes et émet un événement Wails `"meta:updated"`.
+- Si `Watch()` retourne une erreur ou un canal nil, la goroutine se termine immédiatement : le cache fonctionne alors en mode TTL seul (dégradation gracieuse).
+- La goroutine est annulée proprement lors de `Unmount()` via un `context.WithCancel`.
+
+### Limites du cache
+
+| Paramètre | Valeur |
+|-----------|--------|
+| Entrées max | 1 000 (LRU éviction au-delà) |
+| TTL fallback | 300 s (configurable par `metaCacheTTL`) |
+| Invalidation distante (Watch) | ≤ 30 s (délai polling MooseFS/WebDAV) |
+| Invalidation locale (écriture) | Immédiate |

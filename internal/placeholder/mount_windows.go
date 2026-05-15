@@ -3,6 +3,7 @@
 package placeholder
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -11,18 +12,29 @@ import (
 	gosync "sync"
 	"time"
 
+	syncdispatch "github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/winfsp/cgofuse/fuse"
 )
 
 // WinFspDrive mounts a virtual drive or directory via WinFsp / cgofuse.
 type WinFspDrive struct {
-	mu         gosync.Mutex
-	mounted    bool
-	mountPoint string // "G:" or `C:\GhostDrive\GhD\`
-	lastError  string // last error from Mount/Unmount; empty if no error
-	backends   []MountedBackend
-	host       *fuse.FileSystemHost
-	done       chan struct{}
+	mu          gosync.Mutex
+	mounted     bool
+	mountPoint  string // "G:" or `C:\GhostDrive\GhD\`
+	lastError   string // last error from Mount/Unmount; empty if no error
+	backends    []MountedBackend
+	host        *fuse.FileSystemHost
+	done        chan struct{}
+	emitter     syncdispatch.EventEmitter
+	watchCancel context.CancelFunc // cancels the watchLoop goroutines on Unmount
+}
+
+// SetEmitter injects the EventEmitter used by GhostFileSystem.watchLoop.
+// Must be called before Mount(). Thread-safe.
+func (d *WinFspDrive) SetEmitter(e syncdispatch.EventEmitter) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.emitter = e
 }
 
 // checkWinFsp verifies that the WinFsp runtime DLL is installed.
@@ -112,12 +124,17 @@ func (d *WinFspDrive) Mount(mountPoint string, backends []MountedBackend) error 
 		}
 	}
 
-	fs := newGhostFileSystem(backends)
+	emitter := d.emitter // captured under lock (d.mu held)
+	fs := newGhostFileSystem(backends, emitter)
 	host := fuse.NewFileSystemHost(fs)
 	// Give the filesystem a back-reference to its host so Release() can call
 	// host.Notify() after uploads (issue #103 — Explorer auto-refresh).
 	// Safe: written once here before host.Mount() starts FUSE dispatch.
 	fs.host = host
+
+	// Create a context for the watchLoop goroutines; it will be cancelled in Unmount.
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+	d.watchCancel = watchCancel
 
 	d.host = host
 	d.mountPoint = mountPoint
@@ -144,6 +161,11 @@ func (d *WinFspDrive) Mount(mountPoint string, backends []MountedBackend) error 
 
 	d.mounted = true
 
+	// Start metadata Watch() goroutines AFTER setting mounted=true and releasing
+	// the lock implicitly (the lock is still held here but watchLoops only need
+	// the context, not the drive lock).
+	fs.startWatchLoops(watchCtx)
+
 	// Set drive icon in registry for drive-letter mount points.
 	if len(mountPoint) == 2 && mountPoint[1] == ':' {
 		setDriveLetterIcon(mountPoint)
@@ -162,7 +184,14 @@ func (d *WinFspDrive) Unmount() error {
 	}
 	host := d.host
 	done := d.done
+	watchCancel := d.watchCancel
 	d.mu.Unlock()
+
+	// Cancel watchLoop goroutines before unmounting the FUSE host so they
+	// do not attempt to access the backend after the drive is gone.
+	if watchCancel != nil {
+		watchCancel()
+	}
 
 	// Capture mount point before releasing the lock.
 	d.mu.Lock()
@@ -180,6 +209,7 @@ func (d *WinFspDrive) Unmount() error {
 		d.backends = nil
 		d.host = nil
 		d.done = nil
+		d.watchCancel = nil
 		d.lastError = "winfsp: unmount timed out"
 		d.mu.Unlock()
 		if len(mp) == 2 && mp[1] == ':' {
@@ -194,6 +224,7 @@ func (d *WinFspDrive) Unmount() error {
 	d.backends = nil
 	d.host = nil
 	d.done = nil
+	d.watchCancel = nil
 	d.lastError = "" // clear on clean unmount
 	d.mu.Unlock()
 

@@ -23,7 +23,7 @@ func (m *mockBackend) List(_ context.Context, _ string) ([]plugins.FileInfo, err
 func newRouterFS() *GhostFileSystem {
 	return newGhostFileSystem([]MountedBackend{
 		{ID: "b1", Name: "NAS", Backend: &mockBackend{}, Config: plugins.BackendConfig{ID: "b1", Name: "NAS"}},
-	})
+	}, nil)
 }
 
 func TestRoute_Root_ReturnsBackend(t *testing.T) {
@@ -55,7 +55,7 @@ func TestRoute_AnyPath_ReturnsSingleBackend(t *testing.T) {
 }
 
 func TestRoute_EmptyFileSystem_ReturnsNil(t *testing.T) {
-	fs := newGhostFileSystem([]MountedBackend{})
+	fs := newGhostFileSystem([]MountedBackend{}, nil)
 	assert.Nil(t, fs.route("/anything"))
 }
 
@@ -158,7 +158,7 @@ func TestGhostFS_Getattr_ErrFileNotFound_ReturnsENOENT(t *testing.T) {
 	b := &statErrBackend{statErr: plugins.ErrFileNotFound}
 	fs := newGhostFileSystem([]MountedBackend{
 		{ID: "b1", Name: "NAS", Backend: b, Config: plugins.BackendConfig{ID: "b1", Name: "NAS"}},
-	})
+	}, nil)
 	var stat fuse.Stat_t
 	ret := fs.Getattr("/NAS/missing.txt", &stat, 0)
 	assert.Equal(t, -fuse.ENOENT, ret, "ErrFileNotFound must return -ENOENT (fix for issue #97)")
@@ -169,7 +169,7 @@ func TestGhostFS_Getattr_WrappedErrFileNotFound_ReturnsENOENT(t *testing.T) {
 	b := &statErrBackend{statErr: fmt.Errorf("stat failed: %w", plugins.ErrFileNotFound)}
 	fs := newGhostFileSystem([]MountedBackend{
 		{ID: "b1", Name: "NAS", Backend: b, Config: plugins.BackendConfig{ID: "b1", Name: "NAS"}},
-	})
+	}, nil)
 	var stat fuse.Stat_t
 	ret := fs.Getattr("/NAS/missing.txt", &stat, 0)
 	assert.Equal(t, -fuse.ENOENT, ret, "wrapped ErrFileNotFound must return -ENOENT via errors.Is chain")

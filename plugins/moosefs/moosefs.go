@@ -69,8 +69,16 @@ type Backend struct {
 	connected bool
 	client    *mfsclient.Client
 	subDir    string // backend root on the cluster (default "/")
-	pollMs    int    // Watch polling interval in milliseconds
-	lastCfg   plugins.BackendConfig
+
+	// Adaptive Watch polling parameters (set at Connect time).
+	// After a change is detected the interval resets to pollIntervalMin.
+	// Each poll without a change multiplies the interval by pollBackoffFactor
+	// until it reaches pollIntervalMax.
+	pollIntervalMin  time.Duration // minimum poll interval — after a change  (default 2 s)
+	pollIntervalMax  time.Duration // maximum poll interval — idle backoff cap  (default 30 s)
+	pollBackoffFactor float64      // backoff multiplier (default 2.0)
+
+	lastCfg plugins.BackendConfig
 
 	// reconnMu serialises reconnection attempts so that only one goroutine
 	// dials the master at a time.  Other goroutines that detect a connection
@@ -119,11 +127,28 @@ func (b *Backend) Describe() plugins.PluginDescriptor {
 				Placeholder: "/GhostDrive",
 			},
 			{
-				Key:      "pollInterval",
-				Label:    "Intervalle Watch (ms)",
+				Key:      "pollIntervalMin",
+				Label:    "Intervalle Watch min (ms)",
+				Type:     plugins.ParamTypeNumber,
+				Required: false,
+				Default:  "2000",
+				HelpText: "Intervalle de polling après un changement détecté",
+			},
+			{
+				Key:      "pollIntervalMax",
+				Label:    "Intervalle Watch max (ms)",
 				Type:     plugins.ParamTypeNumber,
 				Required: false,
 				Default:  "30000",
+				HelpText: "Plafond du backoff adaptatif (alias de pollInterval pour la rétrocompatibilité)",
+			},
+			{
+				Key:      "pollBackoffFactor",
+				Label:    "Facteur backoff Watch",
+				Type:     plugins.ParamTypeString,
+				Required: false,
+				Default:  "2.0",
+				HelpText: "Multiplicateur de l'intervalle après chaque poll sans changement",
 			},
 			{
 				Key:         "uploadConcurrency",
@@ -172,10 +197,33 @@ func (b *Backend) Connect(cfg plugins.BackendConfig) error {
 		subDir = s
 	}
 
-	pollMs := 30_000
-	if s := cfg.Params["pollInterval"]; s != "" {
+	// ── Adaptive Watch polling ────────────────────────────────────────────────
+	// pollIntervalMax defaults to pollInterval for backward compatibility.
+	pollMax := 30 * time.Second
+	if s := cfg.Params["pollIntervalMax"]; s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			pollMs = n
+			pollMax = time.Duration(n) * time.Millisecond
+		}
+	} else if s := cfg.Params["pollInterval"]; s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			pollMax = time.Duration(n) * time.Millisecond
+		}
+	}
+
+	pollMin := 2 * time.Second
+	if s := cfg.Params["pollIntervalMin"]; s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			pollMin = time.Duration(n) * time.Millisecond
+		}
+	}
+	if pollMin > pollMax {
+		pollMin = pollMax // clamp: min cannot exceed max
+	}
+
+	pollFactor := 2.0
+	if s := cfg.Params["pollBackoffFactor"]; s != "" {
+		if f, err := strconv.ParseFloat(s, 64); err == nil && f > 1.0 {
+			pollFactor = f
 		}
 	}
 
@@ -198,7 +246,9 @@ func (b *Backend) Connect(cfg plugins.BackendConfig) error {
 	b.connected = true
 	b.client = client
 	b.subDir = subDir
-	b.pollMs = pollMs
+	b.pollIntervalMin = pollMin
+	b.pollIntervalMax = pollMax
+	b.pollBackoffFactor = pollFactor
 	b.lastCfg = cfg
 	return nil
 }
@@ -232,10 +282,10 @@ func (b *Backend) IsConnected() bool {
 
 // state returns a consistent snapshot of (connected, client, subDir) under
 // a read lock.  The caller must not mutate the returned client.
-func (b *Backend) state() (connected bool, c *mfsclient.Client, subDir string, pollMs int) {
+func (b *Backend) state() (connected bool, c *mfsclient.Client, subDir string) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.connected, b.client, b.subDir, b.pollMs
+	return b.connected, b.client, b.subDir
 }
 
 // isConnError returns true when err is a TCP write/read failure (broken
@@ -347,7 +397,7 @@ func (b *Backend) Upload(ctx context.Context, local, remote string, progress plu
 }
 
 func (b *Backend) upload(ctx context.Context, local, remote string, progress plugins.ProgressCallback) error {
-	connected, c, subDir, _ := b.state()
+	connected, c, subDir := b.state()
 	if !connected {
 		return ErrNotConnected
 	}
@@ -547,7 +597,7 @@ func (b *Backend) upload(ctx context.Context, local, remote string, progress plu
 // Download reads the remote file at remote and writes it to local.
 // The parent directory of local is created if it does not exist.
 func (b *Backend) Download(ctx context.Context, remote, local string, progress plugins.ProgressCallback) error {
-	connected, c, subDir, _ := b.state()
+	connected, c, subDir := b.state()
 	if !connected {
 		return ErrNotConnected
 	}
@@ -584,13 +634,22 @@ func (b *Backend) Download(ctx context.Context, remote, local string, progress p
 			return fmt.Errorf("moosefs: download %s: context cancelled: %w", remote, err)
 		}
 
+		// Primary EOF guard: stop before requesting a chunk beyond the file's end.
+		// Real MooseFS CS zero-pads reads within a 64 MiB chunk (returns chunkSize
+		// bytes even when only a few KB of real data exist). Without this guard the
+		// loop iterates until offset reaches ChunkSize (67108864), then requests
+		// chunk 1 from the master which returns nCS=0 → "no chunk servers available".
+		if offset >= uint64(totalSize) {
+			break
+		}
+
 		chunk, readErr := c.Read(nodeID, offset, chunkSize)
 		if readErr != nil {
 			logger.Error("download %s: read at offset %d: %v", remote, offset, readErr)
 			return fmt.Errorf("moosefs: download %s: read at offset %d: %w", remote, offset, readErr)
 		}
 		if len(chunk) == 0 {
-			break // EOF
+			break // EOF signalled by mfsclient
 		}
 
 		if _, writeErr := out.Write(chunk); writeErr != nil {
@@ -601,6 +660,11 @@ func (b *Backend) Download(ctx context.Context, remote, local string, progress p
 		if progress != nil {
 			progress(done, totalSize)
 		}
+
+		// Secondary guard: a short read means the CS reached the end of its data.
+		if uint32(len(chunk)) < chunkSize {
+			break
+		}
 	}
 	return nil
 }
@@ -608,7 +672,7 @@ func (b *Backend) Download(ctx context.Context, remote, local string, progress p
 // Delete removes the file or directory at remote.
 // Returns ErrFileNotFound (wrapped) when remote does not exist.
 func (b *Backend) Delete(ctx context.Context, remote string) error {
-	connected, c, subDir, _ := b.state()
+	connected, c, subDir := b.state()
 	if !connected {
 		return ErrNotConnected
 	}
@@ -648,7 +712,7 @@ func (b *Backend) Delete(ctx context.Context, remote string) error {
 // On a TCP connection error, reconnects once and retries.
 func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {
 	for attempt := 0; attempt < 2; attempt++ {
-		connected, c, subDir, _ := b.state()
+		connected, c, subDir := b.state()
 		if !connected {
 			return ErrNotConnected
 		}
@@ -700,7 +764,7 @@ func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {
 // On a TCP connection error (e.g. WSAECONNABORTED), reconnects once and retries.
 func (b *Backend) List(ctx context.Context, dirPath string) ([]plugins.FileInfo, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		connected, c, subDir, _ := b.state()
+		connected, c, subDir := b.state()
 		if !connected {
 			return nil, ErrNotConnected
 		}
@@ -758,7 +822,7 @@ func (b *Backend) List(ctx context.Context, dirPath string) ([]plugins.FileInfo,
 // Returns ErrFileNotFound (wrapped) when filePath does not exist.
 func (b *Backend) Stat(ctx context.Context, filePath string) (*plugins.FileInfo, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		connected, c, subDir, _ := b.state()
+		connected, c, subDir := b.state()
 		if !connected {
 			return nil, ErrNotConnected
 		}
@@ -803,7 +867,7 @@ func (b *Backend) Stat(ctx context.Context, filePath string) (*plugins.FileInfo,
 // If the directory already exists, the call is a no-op.
 // The parent directory must already exist.
 func (b *Backend) CreateDir(ctx context.Context, dirPath string) error {
-	connected, c, subDir, _ := b.state()
+	connected, c, subDir := b.state()
 	if !connected {
 		return ErrNotConnected
 	}
@@ -824,45 +888,62 @@ func (b *Backend) CreateDir(ctx context.Context, dirPath string) error {
 
 // ─── Watch ────────────────────────────────────────────────────────────────────
 
-// Watch polls watchPath every pollMs milliseconds and emits FileEvents when
-// entries are created, modified, or deleted.
+// Watch polls watchPath and emits FileEvents when entries are created,
+// modified, or deleted.
+//
+// Adaptive polling: after a change is detected the poll interval resets to
+// pollIntervalMin. Each poll without a change multiplies the interval by
+// pollBackoffFactor until it reaches pollIntervalMax. This provides
+// near-real-time detection immediately after activity while reducing load
+// on the MooseFS master during quiet periods.
+//
 // The returned channel (buffered, size 64) is closed when ctx is cancelled.
 func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.FileEvent, error) {
 	if !b.IsConnected() {
 		return nil, ErrNotConnected
 	}
 
-	_, _, _, pollMs := b.state()
+	b.mu.RLock()
+	pollMin    := b.pollIntervalMin
+	pollMax    := b.pollIntervalMax
+	pollFactor := b.pollBackoffFactor
+	b.mu.RUnlock()
 
 	ch := make(chan plugins.FileEvent, 64)
 
 	go func() {
 		defer close(ch)
 
-		ticker := time.NewTicker(time.Duration(pollMs) * time.Millisecond)
-		defer ticker.Stop()
-
-		// Establish initial snapshot.
+		// Establish initial snapshot before the first tick.
 		snapshot := buildWatchSnapshot(ctx, b, watchPath)
+
+		// Use a Timer (not Ticker) so we can adjust the interval adaptively.
+		current := pollMin
+		timer := time.NewTimer(current)
+		defer timer.Stop()
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-timer.C:
 				if !b.IsConnected() {
 					return
 				}
 
-				current, err := b.List(ctx, watchPath)
+				entries, err := b.List(ctx, watchPath)
 				if err != nil {
+					// Transient error: retry with the current interval unchanged.
+					timer.Reset(current)
 					continue
 				}
 
-				currentMap := make(map[string]plugins.FileInfo, len(current))
-				for _, fi := range current {
+				currentMap := make(map[string]plugins.FileInfo, len(entries))
+				for _, fi := range entries {
 					currentMap[fi.Path] = fi
 				}
+
+				changed := false
 
 				// Detect created and modified.
 				for p, fi := range currentMap {
@@ -874,6 +955,7 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 						evType = plugins.FileEventModified
 					}
 					if evType != "" {
+						changed = true
 						select {
 						case ch <- plugins.FileEvent{
 							Type:      evType,
@@ -890,6 +972,7 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 				// Detect deleted.
 				for p := range snapshot {
 					if _, exists := currentMap[p]; !exists {
+						changed = true
 						select {
 						case ch <- plugins.FileEvent{
 							Type:      plugins.FileEventDeleted,
@@ -904,11 +987,29 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 				}
 
 				snapshot = currentMap
+
+				// Adaptive interval: reset to min after a change, backoff otherwise.
+				current = computeNextInterval(current, pollMin, pollMax, pollFactor, changed)
+				timer.Reset(current)
 			}
 		}
 	}()
 
 	return ch, nil
+}
+
+// computeNextInterval calculates the next adaptive poll interval.
+// If changed is true the interval resets to min.
+// Otherwise the interval is multiplied by factor and clamped to max.
+func computeNextInterval(current, min, max time.Duration, factor float64, changed bool) time.Duration {
+	if changed {
+		return min
+	}
+	next := time.Duration(float64(current) * factor)
+	if next > max {
+		return max
+	}
+	return next
 }
 
 // buildWatchSnapshot creates the initial path→FileInfo snapshot for Watch.
@@ -936,7 +1037,7 @@ func (b *Backend) GetQuota(_ context.Context) (free, total int64, err error) {
 		if !b.IsConnected() {
 			return 0, 0, ErrNotConnected
 		}
-		_, c, _, _ := b.state()
+		_, c, _ := b.state()
 		free, total, err = c.StatFS()
 		if err != nil {
 			if attempt == 0 && isConnError(err) {

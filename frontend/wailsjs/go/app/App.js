@@ -54,10 +54,6 @@ export function GetConfig() {
   return window['go']['app']['App']['GetConfig']();
 }
 
-export function GetDriveStatus() {
-  return window['go']['app']['App']['GetDriveStatus']();
-}
-
 export function GetDriveStatuses() {
   return window['go']['app']['App']['GetDriveStatuses']();
 }

@@ -42,11 +42,114 @@ import (
 	"hash/crc32"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/CCoupel/GhostDrive/internal/logger"
 )
+
+// ── CS Connection Pool ────────────────────────────────────────────────────────
+//
+// On Windows, closing a TCP socket does not free the local port immediately —
+// it enters TIME_WAIT for ~4 minutes (default TcpTimedWaitDelay).  With
+// chunkSize = 64 KiB in Download(), reading a 100 MB file opens and closes
+// ~1 600 connections to the same CS, exhausting the ephemeral port range
+// (49 152–65 535) and triggering WSAEADDRINUSE (error 10048).
+//
+// csPool reuses idle connections to each chunk server so that each active
+// download/upload session typically holds only one TCP connection.
+// A connection is returned to the pool only after a successful operation;
+// on error the caller closes it directly so broken sockets are never pooled.
+
+// maxIdleCSConns is the maximum number of idle connections kept per CS address.
+// 4 matches the default upload pipeline concurrency (uploadConcurrency).
+const maxIdleCSConns = 4
+
+// csPool is a thread-safe pool of idle TCP connections to chunk servers.
+type csPool struct {
+	mu   sync.Mutex
+	idle map[string][]net.Conn // key: "a.b.c.d:port"
+	max  int
+}
+
+func newCSPool() *csPool {
+	return &csPool{
+		idle: make(map[string][]net.Conn),
+		max:  maxIdleCSConns,
+	}
+}
+
+// csAddr formats ip (uint32, big-endian) and port as "a.b.c.d:port".
+func csAddr(ip uint32, port uint16) string {
+	b := [4]byte{byte(ip >> 24), byte(ip >> 16), byte(ip >> 8), byte(ip)}
+	return fmt.Sprintf("%d.%d.%d.%d:%d", b[0], b[1], b[2], b[3], port)
+}
+
+// Get returns an idle connection from the pool, or dials a new one if none
+// is available.
+func (p *csPool) Get(ip uint32, port uint16) (net.Conn, error) {
+	key := csAddr(ip, port)
+	p.mu.Lock()
+	if conns := p.idle[key]; len(conns) > 0 {
+		conn := conns[len(conns)-1]
+		p.idle[key] = conns[:len(conns)-1]
+		p.mu.Unlock()
+		return conn, nil
+	}
+	p.mu.Unlock()
+	// Dial outside the lock — establishing a TCP connection can be slow.
+	return DialCS(ip, port)
+}
+
+// Put returns a healthy connection to the pool.
+// If the pool for this address is already full, the connection is closed.
+// Callers MUST NOT call Put after an error — close the connection directly.
+func (p *csPool) Put(conn net.Conn, ip uint32, port uint16) {
+	key := csAddr(ip, port)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.idle[key]) < p.max {
+		p.idle[key] = append(p.idle[key], conn)
+	} else {
+		_ = conn.Close() // pool full — discard
+	}
+}
+
+// CloseAll closes every idle connection and empties the pool.
+// Called when the owning Client is closed.
+func (p *csPool) CloseAll() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, conns := range p.idle {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}
+	p.idle = make(map[string][]net.Conn)
+}
+
+// isStaleConnErr reports whether err indicates a stale TCP connection —
+// one that was pooled successfully but later closed by the remote side
+// (server-side idle timeout, OS keepalive expiry, or network interruption).
+//
+// These errors are safe to retry once with a fresh dial because the operation
+// failed before any protocol state was modified on the server.
+func isStaleConnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "EOF") ||
+		strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "connection aborted") ||
+		strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "read frame header") ||
+		strings.Contains(s, "write frame header")
+}
 
 // readerGracePeriod is the maximum time the WriteChunk sender goroutine waits
 // for the reader goroutine to surface a protocol-level error (e.g. DISCONNECTED

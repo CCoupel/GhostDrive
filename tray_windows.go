@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/CCoupel/GhostDrive/internal/app"
+	"github.com/CCoupel/GhostDrive/internal/placeholder"
 	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/getlantern/systray"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -25,7 +26,8 @@ var (
 	iconConnected []byte // #22c55e green   — idle, ≥1 backend connected
 	iconSyncing   []byte // #3b82f6 blue    — sync in progress
 	iconPaused    []byte // #f59e0b amber   — paused or drive error
-	iconError     []byte // #ef4444 red     — sync error
+	iconOffline   []byte // #f59e0b amber   — backend transiently unreachable (#115b)
+	iconError     []byte // #ef4444 red     — sync error (persistent)
 )
 
 func init() {
@@ -33,6 +35,7 @@ func init() {
 	iconConnected = generateIconICO(0x22, 0xc5, 0x5e)
 	iconSyncing = generateIconICO(0x3b, 0x82, 0xf6)
 	iconPaused = generateIconICO(0xf5, 0x9e, 0x0b)
+	iconOffline = generateIconICO(0xf5, 0x9e, 0x0b) // amber #f59e0b
 	iconError = generateIconICO(0xef, 0x44, 0x44)
 }
 
@@ -119,7 +122,15 @@ func onSystrayReady(ghostApp *app.App) {
 				continue
 			}
 			state := ghostApp.GetSyncState()
-			ds := ghostApp.GetDriveStatus()
+			statuses := ghostApp.GetDriveStatuses()
+			// Aggregate LastError: pick the first backend with a drive error (if any).
+			var ds placeholder.DriveStatus
+			for _, s := range statuses {
+				if s.LastError != "" {
+					ds = s
+					break
+				}
+			}
 
 			switch {
 			case state.Status == types.SyncError:
@@ -130,10 +141,21 @@ func onSystrayReady(ghostApp *app.App) {
 				systray.SetIcon(iconSyncing)
 				systray.SetTooltip("GhostDrive — Synchronisation en cours...")
 
-			case state.Status == types.SyncPaused || ds.LastError != "":
+			case state.Status == types.SyncOffline:
+				// Backend transiently unreachable — Watch() encountered its first
+				// consecutive poll failure.  Orange tray signals the user without
+				// yet committing to a hard error (#115b).
+				systray.SetIcon(iconOffline)
+				systray.SetTooltip("GhostDrive — Hors ligne (reconnexion en cours…)")
+
+			case state.Status == types.SyncPaused || ds.LastError != "" || ds.SyncError != "":
+				// Amber: paused, mount error, or runtime sync error surfaced via
+				// DriveStatus.SyncError (bridged from engine events by backendEmitter, #117b).
 				systray.SetIcon(iconPaused)
 				if ds.LastError != "" {
 					systray.SetTooltip("GhostDrive — Erreur drive : " + ds.LastError)
+				} else if ds.SyncError != "" {
+					systray.SetTooltip("GhostDrive — Hors ligne : " + ds.SyncError)
 				} else {
 					systray.SetTooltip("GhostDrive — En pause")
 				}
@@ -213,6 +235,9 @@ func updateTrayIcon(status types.SyncStatus) {
 	case types.SyncPaused:
 		systray.SetIcon(iconPaused)
 		systray.SetTooltip("GhostDrive — En pause")
+	case types.SyncOffline:
+		systray.SetIcon(iconOffline)
+		systray.SetTooltip("GhostDrive — Hors ligne (reconnexion en cours…)")
 	case types.SyncError:
 		systray.SetIcon(iconError)
 		systray.SetTooltip("GhostDrive — Erreur de synchronisation")

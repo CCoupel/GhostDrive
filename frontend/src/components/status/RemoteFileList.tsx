@@ -55,6 +55,34 @@ export function RemoteFileList({ backendId, path, onNavigate }: RemoteFileListPr
     return () => { active = false; };
   }, [backendId, path]);
 
+  // ── Silent refresh on remote/VFS changes (meta:updated) ─────────────────
+  // Triggered by GhostFileSystem.Create/Mkdir/Unlink/Rename (VFS path, #116)
+  // and by watchLoop when the backend Watch() channel yields events.
+  // We only refresh when the affected path is a direct child of the current
+  // directory (or the current directory itself for rename/delete).
+  useEffect(() => {
+    const remoteParentOf = (p: string): string => {
+      const idx = p.lastIndexOf('/');
+      return idx <= 0 ? '/' : p.substring(0, idx);
+    };
+
+    const unsub = onEvent('meta:updated', (evt) => {
+      if (evt.backendID !== backendId) return;
+      // Normalise '' (root passed by FileBrowserPage) to '/' for comparison.
+      const currentNorm = path === '' ? '/' : path;
+      const evtParent   = remoteParentOf(evt.path);
+      // Also trigger on current dir being renamed/deleted (evt.path === currentNorm).
+      if (evtParent !== currentNorm && evt.path !== currentNorm) return;
+
+      // Silent refresh: keep existing file list visible while the new list loads.
+      ghostdriveApi.listFiles(backendId, path)
+        .then(result => setFiles(result ?? []))
+        .catch(() => { /* ignore transient refresh errors */ });
+    });
+
+    return unsub;
+  }, [backendId, path]);
+
   // ── Download progress via sync:progress ──────────────────────────────────
   useEffect(() => {
     const unsub = onEvent('sync:progress', (evt: ProgressEvent) => {

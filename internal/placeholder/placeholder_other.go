@@ -2,6 +2,8 @@
 
 package placeholder
 
+import syncdispatch "github.com/CCoupel/GhostDrive/internal/sync"
+
 // NullDrive is a no-op VirtualDrive for non-Windows platforms.
 // All mutating operations return ErrNotSupported; read-only queries return
 // zero values.
@@ -20,3 +22,6 @@ func (n *NullDrive) IsMounted() bool { return false }
 
 // Status returns an empty DriveStatus.
 func (n *NullDrive) Status() DriveStatus { return DriveStatus{} }
+
+// SetEmitter is a no-op on non-Windows platforms; WinFsp is unavailable.
+func (n *NullDrive) SetEmitter(_ syncdispatch.EventEmitter) {}

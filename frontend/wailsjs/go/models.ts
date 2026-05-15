@@ -113,33 +113,6 @@ export namespace logging {
 
 }
 
-export namespace placeholder {
-	
-	export class DriveStatus {
-	    mounted: boolean;
-	    mountPoint: string;
-	    backendID: string;
-	    backendName: string;
-	    backendPaths: Record<string, string>;
-	    lastError: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new DriveStatus(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.mounted = source["mounted"];
-	        this.mountPoint = source["mountPoint"];
-	        this.backendID = source["backendID"];
-	        this.backendName = source["backendName"];
-	        this.backendPaths = source["backendPaths"];
-	        this.lastError = source["lastError"];
-	    }
-	}
-
-}
-
 export namespace plugins {
 	
 	export class BackendConfig {

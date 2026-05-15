@@ -9,6 +9,10 @@ const (
 	SyncIdle    SyncStatus = "idle"
 	SyncSyncing SyncStatus = "syncing"
 	SyncPaused  SyncStatus = "paused"
+	// SyncOffline indicates a transient backend unreachability (1–4 consecutive
+	// Watch poll failures).  Tray icon turns orange.  Becomes SyncError after
+	// watchMaxConsecutiveErrors failures (Watch closes its channel).
+	SyncOffline SyncStatus = "offline"
 	SyncError   SyncStatus = "error"
 )
 

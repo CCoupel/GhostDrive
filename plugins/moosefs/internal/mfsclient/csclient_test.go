@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,11 +24,16 @@ import (
 // fakeCSServer is an in-memory MooseFS chunk server for testing.
 // It stores chunk data in memory and speaks the real CS protocol (MooseFS 4.x).
 // WRITE_STATUS uses opcode 211 (CstoclFuseWriteStatus) per MooseFS 4.x.
+//
+// Each accepted TCP connection is served in a loop (multiple READ/WRITE ops per
+// connection) to support connection-pool reuse tests.  connCount tracks how many
+// distinct TCP connections have been accepted.
 type fakeCSServer struct {
-	listener net.Listener
-	mu       sync.Mutex
-	chunks   map[uint64][]byte // chunkID → raw chunk data
-	done     chan struct{}
+	listener  net.Listener
+	mu        sync.Mutex
+	chunks    map[uint64][]byte // chunkID → raw chunk data
+	done      chan struct{}
+	connCount atomic.Int64 // number of accepted TCP connections
 }
 
 // newFakeCSServer creates an idle chunk server.  Call Start() to bind and listen.
@@ -123,24 +129,29 @@ func (s *fakeCSServer) acceptLoop() {
 		if err != nil {
 			return // listener closed
 		}
+		s.connCount.Add(1)
 		go s.handleConn(conn)
 	}
 }
 
+// handleConn serves multiple sequential READ/WRITE operations on a single
+// TCP connection.  This matches real MooseFS CS behaviour and allows the
+// csPool to reuse connections across calls — needed for pool tests.
 func (s *fakeCSServer) handleConn(conn net.Conn) {
 	defer conn.Close()
-
-	// First frame determines operation: READ or WRITE.
-	cmd, payload, err := ReadFrame(conn)
-	if err != nil {
-		return
-	}
-
-	switch cmd {
-	case CltocsFuseRead:
-		s.serveRead(conn, payload)
-	case CltocsFuseWrite:
-		s.serveWrite(conn, payload)
+	for {
+		cmd, payload, err := ReadFrame(conn)
+		if err != nil {
+			return // EOF or connection closed by client
+		}
+		switch cmd {
+		case CltocsFuseRead:
+			s.serveRead(conn, payload)
+		case CltocsFuseWrite:
+			s.serveWrite(conn, payload)
+		default:
+			return // unexpected command — close connection
+		}
 	}
 }
 
@@ -976,4 +987,174 @@ func TestWriteChunk_writeInitACK_CANTCONNECT(t *testing.T) {
 	assert.Contains(t, err.Error(), "CANTCONNECT",
 		"error must identify CANTCONNECT status")
 	<-done
+}
+
+// ── csPool unit tests ─────────────────────────────────────────────────────────
+
+// TestCSPool_DialsWhenEmpty verifies that Get() on an empty pool dials a new
+// TCP connection to the chunk server.
+func TestCSPool_DialsWhenEmpty(t *testing.T) {
+	srv := newFakeCSServer()
+	ip, port := srv.Start()
+	defer srv.Stop()
+
+	pool := newCSPool()
+	defer pool.CloseAll()
+
+	conn, err := pool.Get(ip, port)
+	require.NoError(t, err, "Get on empty pool must dial successfully")
+	conn.Close()
+
+	// The server increments connCount in its acceptLoop goroutine — use Eventually
+	// to avoid a race between the client close and the server increment.
+	require.Eventually(t, func() bool {
+		return srv.connCount.Load() == int64(1)
+	}, 200*time.Millisecond, 5*time.Millisecond,
+		"exactly one TCP connection must be established when pool is empty")
+}
+
+// TestCSPool_ReuseIdle verifies that Put() followed by Get() returns the same
+// connection without dialling a second TCP connection.
+func TestCSPool_ReuseIdle(t *testing.T) {
+	srv := newFakeCSServer()
+	ip, port := srv.Start()
+	defer srv.Stop()
+
+	pool := newCSPool()
+
+	// Dial once and return to pool.
+	conn1, err := pool.Get(ip, port)
+	require.NoError(t, err)
+	pool.Put(conn1, ip, port)
+
+	// Next Get must reuse the pooled connection (same pointer, no second dial).
+	conn2, err := pool.Get(ip, port)
+	require.NoError(t, err)
+	defer conn2.Close()
+
+	assert.Same(t, conn1, conn2,
+		"pool must return the same idle connection without dialling again")
+	// Use Eventually: the server increment races with the client-side check.
+	require.Eventually(t, func() bool {
+		return srv.connCount.Load() == int64(1)
+	}, 200*time.Millisecond, 5*time.Millisecond,
+		"only one TCP connection should have been accepted by the server")
+}
+
+// TestCSPool_FullPool_ClosesExtra verifies that when the pool is full, a Put()
+// closes the surplus connection rather than silently dropping it.
+func TestCSPool_FullPool_ClosesExtra(t *testing.T) {
+	// Use max=1 so we can easily fill the pool with a single Put().
+	pool := &csPool{idle: make(map[string][]net.Conn), max: 1}
+
+	const (
+		testIP   = uint32(0x7F000001) // 127.0.0.1
+		testPort = uint16(9420)
+	)
+	key := csAddr(testIP, testPort)
+
+	c1, c1Remote := net.Pipe()
+	c2, c2Remote := net.Pipe()
+	defer c1Remote.Close()
+	defer c2Remote.Close()
+
+	pool.Put(c1, testIP, testPort) // pool: [c1]
+	pool.Put(c2, testIP, testPort) // pool full → c2 must be closed
+
+	// c2 must be unusable after being closed by the pool.
+	_, writeErr := c2.Write([]byte("x"))
+	assert.Error(t, writeErr, "connection closed by full pool must not accept writes")
+
+	// Pool must still retain c1.
+	pool.mu.Lock()
+	retained := len(pool.idle[key])
+	pool.mu.Unlock()
+	assert.Equal(t, 1, retained, "pool must retain the first connection")
+	c1.Close() // cleanup
+}
+
+// TestCSPool_CloseAll verifies that CloseAll() closes every idle connection
+// and empties the pool, making retained connections unusable.
+func TestCSPool_CloseAll(t *testing.T) {
+	pool := newCSPool()
+
+	c1, c1Remote := net.Pipe()
+	c2, c2Remote := net.Pipe()
+	defer c1Remote.Close()
+	defer c2Remote.Close()
+
+	pool.Put(c1, 0x7F000001, 9420)
+	pool.Put(c2, 0x7F000001, 9421) // different port
+
+	pool.CloseAll()
+
+	_, err1 := c1.Write([]byte("x"))
+	_, err2 := c2.Write([]byte("x"))
+	assert.Error(t, err1, "c1 must be closed after CloseAll")
+	assert.Error(t, err2, "c2 must be closed after CloseAll")
+}
+
+// TestRead_StalePool_RetryOnce verifies that when the CS connection pool
+// contains a stale connection (closed server-side), client.Read() retries
+// once with a fresh dial and succeeds — preventing the caller from receiving
+// EIO and retrying the FUSE Open() in a tight loop (Windows Explorer tight
+// retry behaviour that produced a "parseChunkInfo" log storm — issue #112).
+func TestRead_StalePool_RetryOnce(t *testing.T) {
+	c, srv := newTestClient(t)
+
+	nodeID, err := c.Mknod(RootNodeID, "stale_retry.txt", 0o644)
+	require.NoError(t, err)
+
+	content := []byte("stale-retry-test-content")
+	require.NoError(t, c.Write(nodeID, 0, content))
+
+	// Inject a pre-closed (stale) connection into the pool.
+	// This simulates a connection that was pooled after a previous successful
+	// operation but was then closed by the CS (idle timeout / network reset).
+	staleConn, getErr := c.pool.Get(srv.csIP, srv.csPort)
+	require.NoError(t, getErr)
+	staleConn.Close() // close from client side — server will see EOF on next read
+	c.pool.Put(staleConn, srv.csIP, srv.csPort)
+
+	// Reset the CS connection counter so we can observe the retry dial.
+	srv.cs.connCount.Store(0)
+
+	// Read() must succeed: it should silently discard the stale connection and
+	// retry once with a fresh CS connection.
+	got, readErr := c.Read(nodeID, 0, uint32(len(content)))
+	require.NoError(t, readErr, "Read() must succeed transparently after a stale CS connection")
+	assert.Equal(t, content, got, "Read() must return the correct data after stale retry")
+
+	// The retry must have dialled exactly one new CS connection.
+	require.Eventually(t, func() bool {
+		return srv.cs.connCount.Load() == int64(1)
+	}, 200*time.Millisecond, 5*time.Millisecond,
+		"exactly 1 new CS connection must be dialled for the stale-retry")
+}
+
+// TestRead_PoolReuse verifies that client.Read() reuses the CS connection
+// across multiple sequential calls so that only one TCP connection is
+// established against the fake CS (prevents TIME_WAIT exhaustion on Windows —
+// WSAEADDRINUSE / error 10048).
+func TestRead_PoolReuse(t *testing.T) {
+	c, srv := newTestClient(t)
+
+	nodeID, err := c.Mknod(RootNodeID, "pool_reuse.txt", 0o644)
+	require.NoError(t, err)
+
+	content := []byte("pool-reuse-integration-test-data")
+	require.NoError(t, c.Write(nodeID, 0, content))
+	// After Write() returns, the CS connection is back in the pool and
+	// srv.cs.connCount == 1 (Write() established the first connection).
+
+	// Five sequential Reads must reuse the pooled connection — no new dial.
+	for i := 0; i < 5; i++ {
+		got, readErr := c.Read(nodeID, 0, uint32(len(content)))
+		require.NoError(t, readErr, "Read #%d must succeed", i+1)
+		assert.Equal(t, content, got, "Read #%d must return correct data", i+1)
+	}
+
+	// Total CS connections after 1 Write + 5 Reads must be exactly 1.
+	assert.Equal(t, int64(1), srv.cs.connCount.Load(),
+		"pool must reuse a single CS connection across Write + 5 sequential Reads")
 }

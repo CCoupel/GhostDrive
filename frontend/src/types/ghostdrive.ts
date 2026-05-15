@@ -209,6 +209,19 @@ export type WailsEventMap = {
     backendName: string;
     error: string;
   };
+  /**
+   * meta:updated — emitted by the WinFsp VFS callbacks (Create/Mkdir/Unlink/Rename)
+   * and by watchLoop when the backend Watch() channel yields a FileEvent (#116).
+   * The frontend uses this to refresh RemoteFileList without polling.
+   */
+  'meta:updated': {
+    /** ID of the backend that owns the changed path */
+    backendID: string;
+    /** Remote path of the file or directory that changed */
+    path: string;
+    /** Nature of the change */
+    eventType: 'created' | 'modified' | 'deleted' | 'renamed';
+  };
 };
 
 export type WailsEventName = keyof WailsEventMap;

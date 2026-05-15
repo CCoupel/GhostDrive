@@ -5,6 +5,7 @@ package placeholder
 import (
 	"errors"
 
+	syncdispatch "github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/plugins"
 )
 
@@ -25,6 +26,11 @@ type VirtualDrive interface {
 
 	// Status returns the current drive status.
 	Status() DriveStatus
+
+	// SetEmitter injects the EventEmitter used by GhostFileSystem.watchLoop to
+	// emit Wails events (e.g. "meta:updated"). Must be called before Mount().
+	// Pass nil to disable event emission (no-op emitter is used internally).
+	SetEmitter(e syncdispatch.EventEmitter)
 }
 
 // MountedBackend pairs a StorageBackend with its identity and config.
@@ -43,4 +49,5 @@ type DriveStatus struct {
 	BackendName  string            `json:"backendName"`  // human-readable backend name (set by DriveManager)
 	BackendPaths map[string]string `json:"backendPaths"` // backendID → path under the drive root
 	LastError    string            `json:"lastError"`    // last mount/unmount error message; empty if none
+	SyncError    string            `json:"syncError"`    // runtime sync error from the Watch loop; empty if healthy (#117b)
 }

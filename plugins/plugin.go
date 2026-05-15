@@ -91,6 +91,18 @@ const (
 	FileEventDeleted FileEventType = "deleted"
 	// FileEventRenamed fires when an entry is moved; OldPath is populated.
 	FileEventRenamed FileEventType = "renamed"
+
+	// FileEventBackendOffline is a sentinel type sent by Watch() on the first
+	// consecutive poll failure to signal that the backend is transiently
+	// unreachable.  The engine translates it to SyncOffline state (#115b).
+	// It is never emitted to the frontend as a file-change event.
+	FileEventBackendOffline FileEventType = "backend:offline"
+
+	// FileEventBackendOnline is a sentinel type sent by Watch() when a poll
+	// succeeds after one or more consecutive failures (recovery from SyncOffline).
+	// The engine translates it back to SyncIdle state (#115b).
+	// It is never emitted to the frontend as a file-change event.
+	FileEventBackendOnline FileEventType = "backend:online"
 )
 
 // FileEvent represents a detected change emitted by Watch.

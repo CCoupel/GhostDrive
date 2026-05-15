@@ -137,17 +137,24 @@ func (s *integFakeCSServer) acceptLoop() {
 	}
 }
 
+// handleConn serves multiple sequential READ/WRITE operations on a single
+// TCP connection.  This matches real MooseFS CS behaviour and allows the
+// csPool to reuse connections across calls.
 func (s *integFakeCSServer) handleConn(conn net.Conn) {
 	defer conn.Close()
-	cmd, payload, err := mfsclient.ReadFrame(conn)
-	if err != nil {
-		return
-	}
-	switch cmd {
-	case mfsclient.CltocsFuseRead:
-		s.serveRead(conn, payload)
-	case mfsclient.CltocsFuseWrite:
-		s.serveWrite(conn, payload)
+	for {
+		cmd, payload, err := mfsclient.ReadFrame(conn)
+		if err != nil {
+			return // EOF or connection closed by client
+		}
+		switch cmd {
+		case mfsclient.CltocsFuseRead:
+			s.serveRead(conn, payload)
+		case mfsclient.CltocsFuseWrite:
+			s.serveWrite(conn, payload)
+		default:
+			return // unexpected command
+		}
 	}
 }
 
@@ -1279,6 +1286,117 @@ func TestWatch_stopsOnContextCancel(t *testing.T) {
 	}
 }
 
+// ─── Watch adaptive polling tests ────────────────────────────────────────────
+
+// TestComputeNextInterval verifies the pure backoff algorithm used by Watch.
+func TestComputeNextInterval(t *testing.T) {
+	min := 10 * time.Millisecond
+	max := 80 * time.Millisecond
+
+	tests := []struct {
+		name    string
+		current time.Duration
+		factor  float64
+		changed bool
+		want    time.Duration
+	}{
+		// Change detected → always reset to min.
+		{"changed resets to min from min", min, 2.0, true, min},
+		{"changed resets to min from mid", 40 * time.Millisecond, 2.0, true, min},
+		{"changed resets to min from max", max, 2.0, true, min},
+
+		// No change → backoff by factor.
+		{"idle min→20ms", min, 2.0, false, 20 * time.Millisecond},
+		{"idle 20ms→40ms", 20 * time.Millisecond, 2.0, false, 40 * time.Millisecond},
+		{"idle 40ms→80ms", 40 * time.Millisecond, 2.0, false, max},
+		{"idle clamped at max", max, 2.0, false, max},
+		{"idle factor=1.5", min, 1.5, false, 15 * time.Millisecond},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeNextInterval(tt.current, min, max, tt.factor, tt.changed)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestWatch_adaptiveBackoff_backoffSequence verifies that Watch backs off
+// through the expected interval sequence when no changes are detected.
+// It uses very short intervals so the test completes in milliseconds.
+func TestWatch_adaptiveBackoff_backoffSequence(t *testing.T) {
+	// Verify the pure algorithm for the full sequence: 10→20→40→80→80.
+	min := 10 * time.Millisecond
+	max := 80 * time.Millisecond
+	factor := 2.0
+
+	sequence := []time.Duration{min}
+	cur := min
+	for i := 0; i < 4; i++ {
+		cur = computeNextInterval(cur, min, max, factor, false)
+		sequence = append(sequence, cur)
+	}
+
+	want := []time.Duration{
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		80 * time.Millisecond, // clamped
+	}
+	assert.Equal(t, want, sequence, "backoff sequence mismatch")
+}
+
+// TestWatch_adaptiveReset verifies that Watch returns to fast polling
+// immediately after a second remote change is detected, even if the
+// interval had backed off to a longer value between changes.
+func TestWatch_adaptiveReset(t *testing.T) {
+	addr := startFakeServer(t)
+	b := newTestBackend(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Override: min=20ms, max=200ms, factor=2.0 — fast enough for a unit test.
+	b.mu.Lock()
+	b.pollIntervalMin = 20 * time.Millisecond
+	b.pollIntervalMax = 200 * time.Millisecond
+	b.pollBackoffFactor = 2.0
+	b.mu.Unlock()
+
+	ch, err := b.Watch(ctx, "/")
+	require.NoError(t, err)
+
+	// Let the snapshot settle (one full poll cycle).
+	time.Sleep(50 * time.Millisecond)
+
+	// Upload first file.
+	f1 := writeTempFile(t, []byte("adaptive-reset-1"))
+	go func() { _ = b.Upload(context.Background(), f1, "/adaptive1.txt", nil) }()
+
+	// Wait for the Created event.
+	select {
+	case ev, ok := <-ch:
+		require.True(t, ok, "channel closed unexpectedly")
+		assert.Equal(t, plugins.FileEventCreated, ev.Type)
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for first FileEventCreated")
+	}
+
+	// Upload second file. The interval should have reset to min (20ms), so
+	// detection should be fast even without sleeping longer.
+	f2 := writeTempFile(t, []byte("adaptive-reset-2"))
+	go func() { _ = b.Upload(context.Background(), f2, "/adaptive2.txt", nil) }()
+
+	select {
+	case ev, ok := <-ch:
+		require.True(t, ok, "channel closed unexpectedly")
+		assert.Equal(t, plugins.FileEventCreated, ev.Type)
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for second FileEventCreated (adaptive reset failed)")
+	}
+}
+
 // ─── GetQuota tests ───────────────────────────────────────────────────────────
 
 func TestGetQuota_realValues(t *testing.T) {
@@ -1335,7 +1453,7 @@ func TestDescribe(t *testing.T) {
 	for _, p := range d.Params {
 		keys[p.Key] = true
 	}
-	for _, k := range []string{"masterHost", "masterPort", "subDir", "pollInterval"} {
+	for _, k := range []string{"masterHost", "masterPort", "subDir", "pollIntervalMin", "pollIntervalMax", "pollBackoffFactor"} {
 		assert.True(t, keys[k], "Describe() must include param %q", k)
 	}
 }

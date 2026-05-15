@@ -9,6 +9,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7.0] — 2026-05-13
+
+### Added
+
+- **Metadata cache LRU** : cache thread-safe des métadonnées (`Getattr`, `Readdir`) avec TTL 5 minutes, capacité 1000 entrées, et LRU eviction — réduit les appels au backend distant pour les opérations fréquentes. (#108)
+- **Watch-based cache invalidation** : chaque backend exécute une goroutine `watchLoop` qui écoute les changements via `StorageBackend.Watch()` et invalide les entrées du cache localement, puis émet un événement Wails `meta:updated` pour notifier le frontend. (#108)
+- **Cache invalidation points** : invalidation locale immédiate des métadonnées au `Release` (post-upload), `Unlink` (suppression), `Rename`, `Mkdir`, `Create` — maintient la cohérence sans délai TTL. (#108)
+- **Fallback gracieux Watch** : si `Watch()` retourne nil ou erreur, le cache continue de fonctionner avec seul le TTL, sans que la synchronisation ne soit bloquée. Log warning généré en cas d'erreur. (#108)
+- **Event émitter injectable** : interface `VirtualDrive` enrichie de `SetEmitter(EventEmitter)` pour injecter `App.Emit()` — permet au `watchLoop` d'émettre `meta:updated` en réponse aux changements. (#108)
+
+### Changed
+
+- **Tray aggregation refactorisée** : la méthode `tray_windows.go` itère désormais sur `GetDriveStatuses()` et agrège `LastError` du premier backend en erreur au lieu d'utiliser le binding déprécié `GetDriveStatus()`. (#109)
+
+### Fixed
+
+- **isCacheFresh pour fichiers 0-octet** : ajout du check `info.Size() > 0` pour considérer les fichiers 0-octet en cache comme périmés — provoque un re-download depuis le backend. Corrige les fichiers nouvellement créés affichant 0 octet dans l'explorateur Windows. (#110)
+- **MooseFS pool de connexions CS** : pool de connexions reusable avec `sql.DB`-style pour éviter WSAEADDRINUSE Windows lors de uploads massifs — limite les connexions concurrentes et recycle les sockets inactives. (#111)
+- **MooseFS retry-once sur connexion stale** : détection de EOF/reset pendant chunk read, reconnexion master automatique et relance du chunk server read (max 1 retry) — élimine les crash `connection reset by peer` en environnement réseau instable. (#112)
+- **MooseFS guards EOF à la frontière 64 MiB** : vérification du dépassement de chunk après chaque `ReadChunkData` ; si `offset ≥ 64 MiB`, break loop et repose le chunk suivant — corrige les lectures partielles de 1-2 KiB causant overflow. (#113)
+- **MooseFS support proto=3 erasure-coded** : détection de chunk serveurs erasure-coded (proto=3), guard sur le parsing ChunkInfo, message d'erreur explicite "erasure coding not supported v1.7" — prévu v1.8. (#114)
+- **WebDAV Watch backoff exponentiel** : polling avec backoff 2s→30s sur erreurs PROPFIND répétées ; fermeture du channel Watch après 5 erreurs consécutives pour déclencher reconnexion engine. (#115)
+- **Placeholder VFS callbacks émettent meta:updated** : Create, Unlink, Rename, Mkdir génèrent désormais un événement Wails `meta:updated` en plus de l'invalidation cache locale — permet au frontend de rafraîchir la RemoteFileList. (#116)
+- **Tray erreur Connect au démarrage** : initialisation de `backendConnectErrors` au démarrage ; Connect() failure ambre icône tray (SyncOffline) au lieu de verte — indication visuelle claire des backends inaccessibles. (#117)
+- **DriveStatus.SyncError bridge engine events** : événement `sync:error` du moteur bridgé vers `DriveStatus.SyncError` ; tray affiche amber si erreur active, rouge sur erreur config. (#117b)
+- **watchLoop plugin-agnostique retry loop** : boucle centralisée d'écoute Watch avec retry 2s→60s configurable et logging amélioré — uniformise le comportement entre WebDAV et MooseFS. (#118)
+- **Frontend abonnement meta:updated** : RemoteFileList s'abonne à l'événement Wails `meta:updated` et recharge la liste automatiquement (sans F5) — synchronisation UI après opérations VFS. (#119)
+- **Placeholder host.Notify sur Watch events** : handleWatchEvent appelle `fuse.FileSystemHost.Notify(NOTIFY_CHANGE)` pour chaque événement Watch — explore.exe rafraîchit automatiquement la vue. (gap1, commit 7d2304a)
+- **Placeholder normalisation FUSE path** : Watch events du backend convertis en chemin FUSE (`toFUSEPath`) avant `Notify` et cache lookup — élimine les cache misses dus au séparateur backslash en entrée. (path, commit 23891fb)
+- **MooseFS + WebDAV polling adaptatif** : `watchLoopOptions.AdaptiveBackoff` configurable par backend ; polling MooseFS 2s→30s, WebDAV 2s→20s — réduit la latence sur réseau rapide et l'overhead sur réseau lent. (poll, commit 7564b53)
+
+### Changed
+
+- **Tray icône orange SyncOffline (transitoire)** : avant de basculer à rouge, tray affiche orange SyncOffline pendant les reconnexions — indication visuelle que la sync n'est pas perdue. (#115b)
+
+### Deprecated
+
+- **`GetDriveStatus()` binding Wails** : déprécié en v1.7.0 — utiliser `GetDriveStatuses()` à la place pour accéder aux statuts de tous les backends.
+
+### Breaking Changes
+
+- **`GetDriveStatus()` binding supprimé** : la méthode Wails `GetDriveStatus()` a été supprimée ; utiliser `GetDriveStatuses()` pour récupérer un objet map des statuts par `backendID`.
+
+### Known Limitations
+
+- **MooseFS erasure coding (proto=3)** : non supporté en v1.7.0 — #112 marqué pour v1.8.x. Les backends EC retournent erreur explicite "erasure coding not supported" au démarrage. Configuration de backends EC non bloquée, mais sync échouera jusqu'à v1.8.
+
+### Tests
+
+- 9 gap tests ajoutés pour v1.7 cache invalidation (coverage, race conditions, filesystem_invalidation)
+- 3 tests Windows whitebox pour `isCacheFresh` : `ZeroByteFile_ReturnsFalse`, `NonZeroFile_Fresh_ReturnsTrue`, `StaleFile_ReturnsFalse`
+- 12 tests d'intégration MooseFS supplémentaires (#111-#114) : pool connexions, retry stale, frontière 64 MiB, proto=3 guard
+- Tests WebDAV Watch backoff (#115) : 3 tests exponential retry
+- Tests Placeholder VFS callbacks (#116) : 4 tests émission meta:updated (Create/Unlink/Rename/Mkdir)
+- Tests Tray icon (#117/#117b) : 2 tests Connect error handling
+- Data race dans `mockEventEmitter` résolue — mutex ajouté sur `events`, accesseurs thread-safe `len()`/`get(i)` (commit 905fd31)
+- `go test ./... -count=1 -race` : 340/340 tests PASS, 0 race condition
+- `npm run test` (Vitest frontend) : 29/29 tests PASS
+- Cross-compile `GOOS=windows GOARCH=amd64` : OK
+- `go vet` Windows : 0 warning
+
+---
+
 ## [1.6.1] — 2026-05-13
 
 ### Fixed

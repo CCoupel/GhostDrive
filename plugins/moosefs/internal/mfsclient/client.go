@@ -36,8 +36,9 @@ const mfsClientVersion = (4 << 16) | (58 << 8) | (4 * 2) // VERSION2INT(4,58,4) 
 type Client struct {
 	mu        sync.Mutex
 	conn      net.Conn
-	addr      string // "host:port"
-	sessionID uint32 // assigned by master after Register
+	addr      string  // "host:port"
+	sessionID uint32  // assigned by master after Register
+	pool      *csPool // idle CS connection pool — prevents TIME_WAIT exhaustion (Windows #111)
 }
 
 // Dial opens a TCP connection to host:port and returns a ready Client.
@@ -48,10 +49,10 @@ func Dial(host string, port int) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mfsclient: dial %s: %w", addr, err)
 	}
-	return &Client{conn: conn, addr: addr}, nil
+	return &Client{conn: conn, addr: addr, pool: newCSPool()}, nil
 }
 
-// Close closes the underlying TCP connection.
+// Close closes the underlying TCP connection and all pooled CS connections.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -60,6 +61,7 @@ func (c *Client) Close() error {
 	}
 	err := c.conn.Close()
 	c.conn = nil
+	c.pool.CloseAll()
 	return err
 }
 
@@ -849,7 +851,8 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 			si+1, len(defaultWriteStrategies), csIP, srv.Port, strat.csIdx, strat.syncChain)
 
 		// Phase 2: CS I/O — no master lock held here.
-		cs, dialErr := DialCS(srv.IP, srv.Port)
+		// Pool.Get() returns an idle connection or dials a new one.
+		cs, dialErr := c.pool.Get(srv.IP, srv.Port)
 		if dialErr != nil {
 			lastErr = dialErr
 			logger.Warn("[mfsclient] Write: strategy %d/%d CS %s:%d dial failed, trying next: %v",
@@ -870,9 +873,8 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 		}
 
 		writeErr := WriteChunk(cs, info.ChunkID, info.Version, chunkOffset, data, chain)
-		cs.Close()
-
 		if writeErr != nil {
+			cs.Close() // don't pool a broken connection
 			lastErr = writeErr
 			logger.Warn("[mfsclient] Write: strategy %d/%d CS %s:%d write failed, trying next: %v",
 				si+1, len(defaultWriteStrategies), csIP, srv.Port, writeErr)
@@ -882,6 +884,7 @@ func (c *Client) Write(nodeID uint32, offset uint64, data []byte) error {
 			}
 			continue
 		}
+		c.pool.Put(cs, srv.IP, srv.Port)
 
 		// Phase 3: CS write succeeded — commit the new file length to the master.
 		return c.writeChunkEnd(info, nodeID, index, offset, len(data))
@@ -963,6 +966,14 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): parse chunk info: %w", nodeID, offset, err)
 		}
 		if len(info.Servers) == 0 {
+			// A MooseFS master may return a proto response with nCS=0 (rather
+			// than a 5-byte StatusOK) when the requested chunk slot is at
+			// exactly the file boundary — this happens when the file size is a
+			// precise multiple of ChunkSize (e.g. exactly 64 MiB).  In this
+			// case info.Length == offset, and the correct interpretation is EOF.
+			if info.Length > 0 && offset >= info.Length {
+				return nil, nil // treat as EOF — caller (Download) will stop iterating
+			}
 			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): no chunk servers available", nodeID, offset)
 		}
 		return info, nil
@@ -975,21 +986,52 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 	}
 
 	// Phase 2: I/O chunk server hors mutex — c.conn n'est pas utilisé ici.
+	//
+	// Retry-once policy for stale pool connections:
+	//   A pooled connection may have been closed server-side (CS idle timeout,
+	//   network interruption) between two consecutive reads.  On the first
+	//   attempt, if ReadChunk returns a stale-connection error (EOF, reset…),
+	//   the bad connection is discarded and a fresh one is dialled immediately.
+	//   This prevents callers from receiving EIO and retrying the Open() in a
+	//   tight loop (Windows Explorer behaviour) — which manifested as a storm
+	//   of "parseChunkInfo" debug log lines with no download progress (#112).
 	srv := info.Servers[0]
-	cs, err := DialCS(srv.IP, srv.Port)
-	if err != nil {
-		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): dial CS: %w", nodeID, offset, err)
+	for attempt := 0; attempt < 2; attempt++ {
+		cs, dialErr := c.pool.Get(srv.IP, srv.Port)
+		if dialErr != nil {
+			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): dial CS: %w", nodeID, offset, dialErr)
+		}
+		result, readErr := ReadChunk(cs, info.ChunkID, info.Version, chunkOffset, size)
+		if readErr != nil {
+			cs.Close() // don't pool a broken connection
+			if attempt == 0 && isStaleConnErr(readErr) {
+				// Stale pooled connection — discard and retry with a fresh dial.
+				logger.Debug("[mfsclient] Read(%d, off=%d): stale CS connection on attempt 1, retrying: %v",
+					nodeID, offset, readErr)
+				continue
+			}
+			return nil, readErr
+		}
+		c.pool.Put(cs, srv.IP, srv.Port)
+		return result, nil
 	}
-	defer cs.Close()
-
-	return ReadChunk(cs, info.ChunkID, info.Version, chunkOffset, size)
+	// Unreachable: attempt 1 always returns (either success or non-stale error
+	// that falls through to return nil, readErr above).
+	return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): CS I/O failed after 2 attempts", nodeID, offset)
 }
 
 // ─── Internal: chunk info parsing ────────────────────────────────────────────
 
 // parseChunkInfo decodes the master response for READ_CHUNK (433) and
-// WRITE_CHUNK (435). Three protocol variants are supported, detected from the
+// WRITE_CHUNK (435). Four protocol variants are supported, detected from the
 // byte at offset 4 (immediately after msgid):
+//
+//	Proto 3 (MooseFS >= 4.0.0) — protocolid byte = 3:
+//	  [msgid:32][protocolid:8=3][length:64][chunkid:64][version:32]
+//	  (4 or 8) × [ip:32 port:16 cs_ver:32 labelmask:32]  (14 bytes/entry, N implicit)
+//	  Used for erasure-coded chunks split into 4 or 8 independent parts.
+//	  Wire format identical to proto 2; differs only in the N constraint and
+//	  the semantics (each server holds a distinct EC shard, not a full replica).
 //
 //	Proto 2 (MooseFS >= 3.0.10, incl. all 4.x) — protocolid byte = 2:
 //	  [msgid:32][protocolid:8=2][length:64][chunkid:64][version:32]
@@ -1030,8 +1072,8 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 	)
 
 	switch protocolID {
-	case 1, 2:
-		// Proto 1/2: consume protocolid, then [length:64][chunkid:64][version:32].
+	case 1, 2, 3:
+		// Proto 1/2/3: consume protocolid, then [length:64][chunkid:64][version:32].
 		off++ // consume protocolid byte
 		fileLength, off, err = ReadUint64(ans, off) // file length — stored in ChunkInfo.Length
 		if err != nil {
@@ -1048,7 +1090,7 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 		switch protocolID {
 		case 1:
 			entrySize = 10 // ip:32 + port:16 + cs_ver:32
-		case 2:
+		case 2, 3:
 			entrySize = 14 // ip:32 + port:16 + cs_ver:32 + labelmask:32
 		}
 
@@ -1071,9 +1113,9 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 		entrySize = 6 // ip:32 + port:16 (no cs_ver in proto 0)
 
 	default:
-		// Unknown protocolid — likely a newer MooseFS protocol version (>= proto 3)
-		// that GhostDrive does not yet support.  Falling back to proto 0 would
-		// silently misparse the response and produce incorrect chunk server lists.
+		// Unknown protocolid — a future MooseFS protocol version that GhostDrive
+		// does not yet support.  Falling back to proto 0 would silently misparse
+		// the response and produce incorrect chunk server lists.
 		// Return an explicit error so the caller can surface a diagnostic.
 		limit := len(ans)
 		if limit > 32 {
@@ -1119,6 +1161,18 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 			}
 		}
 		info.Servers = append(info.Servers, srv)
+	}
+
+	// Proto 3: erasure-coded chunk (4 or 8 independent shards).
+	// Reading an EC chunk requires reading a distinct shard from each CS and
+	// reconstructing via XOR / Reed-Solomon — not yet implemented.
+	// Return a clear error rather than silently serving corrupt data from a
+	// single shard.  N=0 is a degenerate case handled downstream by the
+	// existing nCS=0 guard (no data available on any server).
+	if protocolID == 3 && len(info.Servers) > 1 {
+		return nil, fmt.Errorf("parseChunkInfo: proto=3 erasure-coded chunk (%d parts): "+
+			"EC download not supported — disable erasure coding on the MooseFS storage class "+
+			"or upgrade GhostDrive", len(info.Servers))
 	}
 
 	// MooseFS 4.x may append a lockid:32 token after the CS entries.

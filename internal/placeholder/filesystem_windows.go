@@ -10,12 +10,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	gosync "sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/CCoupel/GhostDrive/internal/logger"
+	syncdispatch "github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/plugins"
 	"github.com/winfsp/cgofuse/fuse"
 )
@@ -35,6 +37,14 @@ type openEntry struct {
 	dirty     bool // true after at least one Write() — guards against 0-byte Create artifacts
 }
 
+// MetaUpdatedEvent is the payload of the "meta:updated" Wails event.
+// It is emitted by watchLoop whenever a FileEvent is received from Watch().
+type MetaUpdatedEvent struct {
+	BackendID string `json:"backendID"`
+	Path      string `json:"path"`
+	EventType string `json:"eventType"` // "created"|"modified"|"deleted"|"renamed"
+}
+
 // GhostFileSystem implements fuse.FileSystemInterface by routing calls to the
 // appropriate StorageBackend based on the path prefix /<BackendName>/...
 type GhostFileSystem struct {
@@ -47,6 +57,15 @@ type GhostFileSystem struct {
 	// Used to call host.Notify() after uploads so Explorer refreshes automatically.
 	host *fuse.FileSystemHost
 
+	// meta is the in-memory LRU cache for Stat/List metadata.
+	// Invalidated on writes (Release, Unlink, Rename, Mkdir, Create) and by
+	// push events from Watch() goroutines.
+	meta *metaCache
+
+	// emitter emits Wails events to the frontend (e.g. "meta:updated").
+	// May be nil if no emitter was provided; guard every Emit call with a nil check.
+	emitter syncdispatch.EventEmitter
+
 	mu            gosync.Mutex
 	fhSeq         atomic.Uint64
 	handles       map[uint64]*openEntry
@@ -55,7 +74,7 @@ type GhostFileSystem struct {
 	iconTmp       string // temp path for ghostdrive.ico reads
 }
 
-func newGhostFileSystem(backends []MountedBackend) *GhostFileSystem {
+func newGhostFileSystem(backends []MountedBackend, emitter syncdispatch.EventEmitter) *GhostFileSystem {
 	dir := filepath.Join(os.TempDir(), "ghostdrive")
 	_ = os.MkdirAll(dir, 0755)
 
@@ -66,12 +85,28 @@ func newGhostFileSystem(backends []MountedBackend) *GhostFileSystem {
 	iconTmp := filepath.Join(dir, "ghostdrive.ico")
 	_ = os.WriteFile(iconTmp, driveIconICO, 0644)
 
+	// Determine cache TTL from first backend config (fallback: defaultMetaCacheTTL).
+	cacheTTLMeta := defaultMetaCacheTTL
+	if len(backends) > 0 {
+		if v := backends[0].Config.Params["metaCacheTTL"]; v != "" {
+			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+				cacheTTLMeta = time.Duration(secs) * time.Second
+			}
+		}
+	}
+
+	if emitter == nil {
+		emitter = &syncdispatch.NoopEmitter{}
+	}
+
 	return &GhostFileSystem{
 		backends:      backends,
 		handles:       make(map[uint64]*openEntry),
 		desktopIni:    diniContent,
 		desktopIniTmp: diniTmp,
 		iconTmp:       iconTmp,
+		meta:          newMetaCache(cacheTTLMeta),
+		emitter:       emitter,
 	}
 }
 
@@ -84,6 +119,20 @@ func buildDesktopIni() []byte {
 }
 
 // ── Utility helpers ──────────────────────────────────────────────────────────
+
+// remoteParent returns the parent directory component of a remote (FUSE/POSIX)
+// path.  Uses strings to avoid shadowing the "path" package with local "path"
+// parameters in method bodies.
+func remoteParent(p string) string {
+	idx := strings.LastIndex(p, "/")
+	if idx < 0 {
+		return "/"
+	}
+	if idx == 0 {
+		return "/"
+	}
+	return p[:idx]
+}
 
 // tsFromTime converts a time.Time to a fuse.Timespec.
 func tsFromTime(t time.Time) fuse.Timespec {
@@ -101,9 +150,12 @@ func cachePath(backendID, remotePath string) string {
 }
 
 // isCacheFresh reports whether a cached file is younger than cacheTTL.
+// A 0-byte file is always considered stale: it may result from an interrupted
+// download or from a Create pre-upload before actual content was written.
+// Re-downloading a genuinely 0-byte remote file is trivial (negligible cost).
 func isCacheFresh(path string) bool {
 	info, err := os.Stat(path)
-	return err == nil && time.Since(info.ModTime()) < cacheTTL
+	return err == nil && info.Size() > 0 && time.Since(info.ModTime()) < cacheTTL
 }
 
 // ensureDownloaded downloads remotePath via backend to a temp file, reusing a
@@ -118,6 +170,10 @@ func ensureDownloaded(cfg plugins.BackendConfig, backend plugins.StorageBackend,
 	}
 	if err := backend.Download(context.Background(), remotePath, local, nil); err != nil {
 		return "", fmt.Errorf("placeholder: download %s: %w", remotePath, err)
+	}
+	// Log post-download cache size for diagnostic (helps detect 0-byte download issues).
+	if fi, statErr := os.Stat(local); statErr == nil {
+		logger.Debug("placeholder: ensureDownloaded %s → local size=%d", remotePath, fi.Size())
 	}
 	return local, nil
 }
@@ -162,23 +218,31 @@ func (fs *GhostFileSystem) Getattr(path string, stat *fuse.Stat_t, _ uint64) int
 		return -fuse.ENOENT
 	}
 
-	info, err := r.backend.Stat(context.Background(), r.relPath)
-	if err != nil {
-		logger.Debug("[placeholder/getattr] path=%q stat_err=%q", path, err.Error())
-		if errors.Is(err, plugins.ErrFileNotFound) {
-			logger.Debug("[placeholder/getattr] path=%q → ENOENT (errors.Is match)", path)
+	cacheKey := r.config.ID + ":" + r.relPath
+	var info *plugins.FileInfo
+	if cached, hit := fs.meta.getStat(cacheKey); hit {
+		info = cached
+	} else {
+		var err error
+		info, err = r.backend.Stat(context.Background(), r.relPath)
+		if err != nil {
+			logger.Debug("[placeholder/getattr] path=%q stat_err=%q", path, err.Error())
+			if errors.Is(err, plugins.ErrFileNotFound) {
+				logger.Debug("[placeholder/getattr] path=%q → ENOENT (errors.Is match)", path)
+				return -fuse.ENOENT
+			}
+			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no such") {
+				logger.Debug("[placeholder/getattr] path=%q → ENOENT (string match)", path)
+				return -fuse.ENOENT
+			}
+			logger.Error("[placeholder/getattr] path=%q → EIO (unmatched err=%q)", path, err.Error())
+			return -fuse.EIO
+		}
+		if info == nil {
+			logger.Debug("[placeholder/getattr] path=%q → ENOENT (nil info)", path)
 			return -fuse.ENOENT
 		}
-		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no such") {
-			logger.Debug("[placeholder/getattr] path=%q → ENOENT (string match)", path)
-			return -fuse.ENOENT
-		}
-		logger.Error("[placeholder/getattr] path=%q → EIO (unmatched err=%q)", path, err.Error())
-		return -fuse.EIO
-	}
-	if info == nil {
-		logger.Debug("[placeholder/getattr] path=%q → ENOENT (nil info)", path)
-		return -fuse.ENOENT
+		fs.meta.putStat(cacheKey, info)
 	}
 
 	mts := tsFromTime(info.ModTime)
@@ -247,10 +311,18 @@ func (fs *GhostFileSystem) Readdir(path string,
 		return -fuse.ENOENT
 	}
 
-	entries, err := r.backend.List(context.Background(), r.relPath)
-	if err != nil {
-		logger.Error("placeholder: Readdir %s: %v", path, err)
-		return -fuse.EIO
+	cacheKey := r.config.ID + ":" + r.relPath
+	var entries []plugins.FileInfo
+	if cached, hit := fs.meta.getList(cacheKey); hit {
+		entries = cached
+	} else {
+		var err error
+		entries, err = r.backend.List(context.Background(), r.relPath)
+		if err != nil {
+			logger.Error("placeholder: Readdir %s: %v", path, err)
+			return -fuse.EIO
+		}
+		fs.meta.putList(cacheKey, entries)
 	}
 
 	now := nowTs()
@@ -474,6 +546,10 @@ func (fs *GhostFileSystem) Release(path string, fh uint64) int {
 				} else {
 					logger.Warn("placeholder: Release post-upload stat failed %s: %v", path, statErr)
 				}
+				// Invalidate cache for this file and its parent directory so that
+				// subsequent Getattr/Readdir reflect the uploaded content immediately.
+				fs.meta.invalidate(r.config.ID + ":" + r.relPath)
+				fs.meta.invalidate(r.config.ID + ":" + remoteParent(r.relPath))
 				// Notify WinFsp/Explorer that the file size changed so Explorer
 				// refreshes its view without requiring a manual F5 (issue #103).
 				fs.notifyUpload(path)
@@ -516,6 +592,18 @@ func (fs *GhostFileSystem) Create(path string, _ int, _ uint32) (int, uint64) {
 		logger.Warn("placeholder: Create pre-upload %s: %v", path, err)
 		// Non-fatal: Getattr may briefly return ENOENT but writes will still work.
 	}
+	// Invalidate parent directory listing so Readdir includes the new entry.
+	fs.meta.invalidate(r.config.ID + ":" + remoteParent(r.relPath))
+	// Notify the frontend so it can refresh directory listings (#116).
+	logger.Debug("placeholder: Create emitting meta:updated for backend=%s path=%s emitter=%T",
+		r.config.ID, r.relPath, fs.emitter)
+	if fs.emitter != nil {
+		fs.emitter.Emit("meta:updated", MetaUpdatedEvent{
+			BackendID: r.config.ID,
+			Path:      r.relPath,
+			EventType: "created",
+		})
+	}
 
 	fs.mu.Lock()
 	fs.handles[fh] = &openEntry{tempPath: localPath, writeable: true}
@@ -533,6 +621,17 @@ func (fs *GhostFileSystem) Unlink(path string) int {
 	if err := r.backend.Delete(context.Background(), r.relPath); err != nil {
 		logger.Error("placeholder: Unlink %s: %v", path, err)
 		return -fuse.EIO
+	}
+	// Invalidate file and parent directory cache immediately.
+	fs.meta.invalidate(r.config.ID + ":" + r.relPath)
+	fs.meta.invalidate(r.config.ID + ":" + remoteParent(r.relPath))
+	// Notify the frontend so it can refresh directory listings (#116).
+	if fs.emitter != nil {
+		fs.emitter.Emit("meta:updated", MetaUpdatedEvent{
+			BackendID: r.config.ID,
+			Path:      r.relPath,
+			EventType: "deleted",
+		})
 	}
 	return 0
 }
@@ -559,6 +658,19 @@ func (fs *GhostFileSystem) Rename(oldpath, newpath string) (errc int) {
 			oldpath, newpath, ro.relPath, rn.relPath, err)
 		return -fuse.EIO
 	}
+	// Invalidate old and new paths plus their parent directories.
+	fs.meta.invalidate(ro.config.ID + ":" + ro.relPath)
+	fs.meta.invalidate(ro.config.ID + ":" + remoteParent(ro.relPath))
+	fs.meta.invalidate(rn.config.ID + ":" + rn.relPath)
+	fs.meta.invalidate(rn.config.ID + ":" + remoteParent(rn.relPath))
+	// Notify the frontend so it can refresh affected directory listings (#116).
+	if fs.emitter != nil {
+		fs.emitter.Emit("meta:updated", MetaUpdatedEvent{
+			BackendID: rn.config.ID,
+			Path:      rn.relPath,
+			EventType: "renamed",
+		})
+	}
 	logger.Info("placeholder: Rename success %q → %q", oldpath, newpath)
 	return 0
 }
@@ -583,6 +695,16 @@ func (fs *GhostFileSystem) Mkdir(path string, _ uint32) int {
 		logger.Error("placeholder: Mkdir %s: %v", path, err)
 		return -fuse.EIO
 	}
+	// Invalidate parent directory listing so Explorer shows the new folder.
+	fs.meta.invalidate(r.config.ID + ":" + remoteParent(r.relPath))
+	// Notify the frontend so it can refresh directory listings (#116).
+	if fs.emitter != nil {
+		fs.emitter.Emit("meta:updated", MetaUpdatedEvent{
+			BackendID: r.config.ID,
+			Path:      r.relPath,
+			EventType: "created",
+		})
+	}
 	return 0
 }
 
@@ -606,4 +728,207 @@ func (fs *GhostFileSystem) Statfs(path string, stat *fuse.Statfs_t) int {
 	stat.Bfree = uint64(free) / bsize
 	stat.Bavail = stat.Bfree
 	return 0
+}
+
+// ── Watch-based push invalidation ────────────────────────────────────────────
+
+// startWatchLoops starts one watchLoop goroutine per mounted backend.
+// Each goroutine listens on the channel returned by backend.Watch() and
+// invalidates the metadata cache on each received FileEvent.
+// The goroutines stop when ctx is cancelled (called in WinFspDrive.Unmount).
+func (fs *GhostFileSystem) startWatchLoops(ctx context.Context) {
+	for _, mb := range fs.backends {
+		go fs.watchLoop(ctx, mb)
+	}
+}
+
+// watchLoop is a plugin-agnostic retry loop for backend.Watch().
+// It calls Watch() repeatedly, tracking consecutive failures, and propagates
+// backend reachability state to the tray via the filesystem emitter (#118):
+//
+//   - 1st consecutive failure (Watch error or unexpected channel close):
+//     emit "sync:offline" → tray turns orange
+//   - Nth failure (≥ watchErrThreshold):
+//     emit "sync:error"  → tray turns red
+//   - Recovery (Watch succeeds after prior failures):
+//     emit "sync:online" → tray turns green
+//
+// Detection is purely structural: it monitors Watch() return values and channel
+// lifetime, never relying on plugin-emitted sentinel events.  Plugin-level
+// backoff (e.g. WebDAV exponential retry) is transparent and orthogonal.
+// Plugin sentinel events (FileEventBackendOffline/Online) are silently skipped
+// so they do not bypass the counter logic.
+//
+// The loop exits only when ctx is cancelled (normal shutdown / unmount).
+func (fs *GhostFileSystem) watchLoop(ctx context.Context, mb MountedBackend) {
+	const (
+		watchErrThreshold   = 5
+		watchBackoffInitial = 2 * time.Second
+		watchBackoffMax     = 60 * time.Second
+	)
+
+	logger.Info("placeholder: watchLoop started for backend %s", mb.ID)
+
+	consecutive := 0
+	backoffDelay := watchBackoffInitial
+
+	for ctx.Err() == nil {
+		ch, err := mb.Backend.Watch(ctx, "/")
+		if err != nil || ch == nil {
+			consecutive++
+			fs.emitWatchReachability(mb.ID, consecutive, watchErrThreshold,
+				fmt.Sprintf("Watch() unavailable: %v", err))
+			logger.Warn("placeholder: watchLoop(%s): Watch() failed (attempt %d): %v — retry in %s",
+				mb.ID, consecutive, err, backoffDelay)
+			fs.watchSleep(ctx, &backoffDelay, watchBackoffMax)
+			continue
+		}
+
+		logger.Info("placeholder: watchLoop(%s): Watch() active (attempt %d — consecutive resets to 0)",
+			mb.ID, consecutive+1)
+
+		// Watch() call succeeded — emit sync:online if recovering from prior failures.
+		if consecutive > 0 {
+			consecutive = 0
+			backoffDelay = watchBackoffInitial
+			if fs.emitter != nil {
+				fs.emitter.Emit("sync:online", map[string]any{"backendID": mb.ID})
+			}
+		}
+
+		// Drain events until channel closes or ctx is cancelled.
+		channelOpen := true
+		for channelOpen {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-ch:
+				if !ok {
+					// Channel closed unexpectedly — count as failure and retry Watch().
+					channelOpen = false
+					consecutive++
+					fs.emitWatchReachability(mb.ID, consecutive, watchErrThreshold,
+						"Watch() channel closed unexpectedly")
+					logger.Warn("placeholder: watchLoop(%s): Watch() channel closed (attempt %d) — retry in %s",
+						mb.ID, consecutive, backoffDelay)
+					fs.watchSleep(ctx, &backoffDelay, watchBackoffMax)
+					continue
+				}
+				// Skip plugin-emitted sentinel events — watchLoop does its own
+				// plugin-agnostic reachability detection; sentinels would double-count.
+				if ev.Type == plugins.FileEventBackendOffline ||
+					ev.Type == plugins.FileEventBackendOnline {
+					continue
+				}
+				fs.handleWatchEvent(mb, ev)
+			}
+		}
+	}
+}
+
+// emitWatchReachability emits the appropriate reachability event based on the
+// consecutive failure count relative to the threshold.
+// It is a no-op when the emitter is nil or when consecutive is between 2 and
+// threshold−1 (transient failure already signalled on the first occurrence).
+func (fs *GhostFileSystem) emitWatchReachability(backendID string, consecutive, threshold int, detail string) {
+	if fs.emitter == nil {
+		return
+	}
+	switch {
+	case consecutive == 1:
+		// First failure — transient; signal tray to turn orange.
+		fs.emitter.Emit("sync:offline", map[string]any{"backendID": backendID})
+	case consecutive >= threshold:
+		// Persistent failure — signal tray to turn red.
+		fs.emitter.Emit("sync:error", map[string]any{
+			"backendID": backendID,
+			"message":   fmt.Sprintf("backend unreachable after %d Watch() failures: %s", consecutive, detail),
+		})
+	}
+}
+
+// watchSleep waits for the current backoff duration or until ctx is cancelled,
+// then doubles the delay (up to max).
+func (fs *GhostFileSystem) watchSleep(ctx context.Context, delay *time.Duration, maxDelay time.Duration) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(*delay):
+	}
+	*delay *= 2
+	if *delay > maxDelay {
+		*delay = maxDelay
+	}
+}
+
+// toFUSEPath ensures path starts with "/" as required by both the metacache
+// (which uses FUSE-format keys like "id:/foo/bar") and host.Notify()
+// (which passes the path verbatim to fsp_fuse_notify).
+//
+// MooseFS and WebDAV List() strip leading slashes via strings.TrimLeft so
+// Watch() events arrive as "foo/bar" instead of "/foo/bar". Without this
+// normalisation, host.Notify() would silently no-op and cache invalidation
+// would use the wrong key.
+func toFUSEPath(p string) string {
+	if p == "" || p[0] == '/' {
+		return p
+	}
+	return "/" + p
+}
+
+// handleWatchEvent invalidates the affected cache entries, notifies WinFsp/
+// Explorer so the virtual drive (GhD:) refreshes automatically, and emits a
+// "meta:updated" Wails event so the frontend can refresh its file listings.
+func (fs *GhostFileSystem) handleWatchEvent(mb MountedBackend, ev plugins.FileEvent) {
+	// Normalise event paths to FUSE format (must start with "/").
+	// MooseFS/WebDAV Watch() events use paths without a leading "/" (from List())
+	// but both the metacache and host.Notify() require FUSE-format paths.
+	fusePath := toFUSEPath(ev.Path)
+	fuseOldPath := toFUSEPath(ev.OldPath)
+
+	// Invalidate the changed path and its parent directory.
+	key := mb.ID + ":" + fusePath
+	parentKey := mb.ID + ":" + remoteParent(fusePath)
+	fs.meta.invalidate(key)
+	fs.meta.invalidate(parentKey)
+
+	// For renames, also invalidate the old path and its parent.
+	if fuseOldPath != "" {
+		fs.meta.invalidate(mb.ID + ":" + fuseOldPath)
+		fs.meta.invalidate(mb.ID + ":" + remoteParent(fuseOldPath))
+	}
+
+	// Notify WinFsp/Explorer so the virtual drive refreshes its directory
+	// listing without requiring a manual F5 (#119 — remote changes visible in GhD:).
+	// NOTIFY_CREATE/UNLINK → FILE_NOTIFY_CHANGE_FILE_NAME (new/deleted entry).
+	// NOTIFY_TRUNCATE|NOTIFY_UTIME → FILE_NOTIFY_CHANGE_SIZE|LAST_WRITE (modified).
+	// path = changed item; WinFsp routes the notification to the watching parent.
+	if fs.host != nil {
+		switch ev.Type {
+		case plugins.FileEventCreated:
+			ok := fs.host.Notify(fusePath, fuse.NOTIFY_CREATE)
+			logger.Debug("placeholder: handleWatchEvent: Notify CREATE %s ok=%v", fusePath, ok)
+		case plugins.FileEventDeleted:
+			ok := fs.host.Notify(fusePath, fuse.NOTIFY_UNLINK)
+			logger.Debug("placeholder: handleWatchEvent: Notify UNLINK %s ok=%v", fusePath, ok)
+		case plugins.FileEventModified:
+			ok := fs.host.Notify(fusePath, fuse.NOTIFY_TRUNCATE|fuse.NOTIFY_UTIME)
+			logger.Debug("placeholder: handleWatchEvent: Notify MODIFIED %s ok=%v", fusePath, ok)
+		case plugins.FileEventRenamed:
+			if fuseOldPath != "" {
+				fs.host.Notify(fuseOldPath, fuse.NOTIFY_UNLINK)
+			}
+			ok := fs.host.Notify(fusePath, fuse.NOTIFY_CREATE)
+			logger.Debug("placeholder: handleWatchEvent: Notify RENAME %q→%q ok=%v", fuseOldPath, fusePath, ok)
+		}
+	}
+
+	// Notify the frontend so it can refresh affected directory listings.
+	// Use fusePath so RemoteFileList.tsx path-matching works correctly.
+	if fs.emitter != nil {
+		fs.emitter.Emit("meta:updated", MetaUpdatedEvent{
+			BackendID: mb.ID,
+			Path:      fusePath,
+			EventType: string(ev.Type),
+		})
+	}
 }

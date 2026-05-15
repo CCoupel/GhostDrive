@@ -103,13 +103,6 @@ export const ghostdriveApi = {
   getDriveStatuses: (): Promise<Record<string, DriveStatus>> =>
     (App as any).GetDriveStatuses() as Promise<Record<string, DriveStatus>>,
 
-  /**
-   * @deprecated depuis v1.1.x — utiliser getDriveStatuses() à la place.
-   * Conservé pour compatibilité pendant la migration.
-   */
-  getDriveStatus: (): Promise<DriveStatus> =>
-    App.GetDriveStatus() as unknown as Promise<DriveStatus>,
-
   /** Retourne les lettres de lecteur Windows disponibles (ex: ['E:', 'F:', 'G:']). */
   getAvailableDriveLetters: (): Promise<string[]> =>
     (App as any).GetAvailableDriveLetters() as Promise<string[]>,
