@@ -129,6 +129,20 @@ func (p *csPool) CloseAll() {
 	p.idle = make(map[string][]net.Conn)
 }
 
+// errUnexpectedCmd is the sentinel wrapped by ReadChunk when the chunk server
+// responds with an unrecognised command opcode (e.g. cmd=0 / ANTOAN_NOP).
+//
+// A cmd=0 frame received during a ReadChunk sequence indicates a stale TCP
+// connection: the OS TCP buffer contains zeros from a half-closed socket, and
+// ReadFrame succeeds (8 zero bytes → cmd=0, length=0) while the frame itself
+// is meaningless in the CS read protocol.  Treating this as a stale-connection
+// error enables the retry-once policy in readEC4At (and Client.Read) to dial
+// a fresh connection transparently.
+//
+// Using a sentinel (rather than a string match) allows callers to use
+// errors.Is for unambiguous detection regardless of how the error is wrapped.
+var errUnexpectedCmd = errors.New("unexpected response cmd")
+
 // isStaleConnErr reports whether err indicates a stale TCP connection —
 // one that was pooled successfully but later closed by the remote side
 // (server-side idle timeout, OS keepalive expiry, or network interruption).
@@ -139,7 +153,7 @@ func isStaleConnErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, io.EOF) {
+	if errors.Is(err, io.EOF) || errors.Is(err, errUnexpectedCmd) {
 		return true
 	}
 	s := err.Error()
@@ -239,7 +253,11 @@ func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size 
 			return result, nil
 
 		default:
-			return nil, fmt.Errorf("csclient: ReadChunk %d: unexpected response cmd %d", chunkID, cmd)
+			// cmd=0 (ANTOAN_NOP) during a CS read sequence indicates a stale
+			// pooled connection (half-closed socket returning zeros).  Wrapping
+			// errUnexpectedCmd allows isStaleConnErr to detect this via errors.Is
+			// and trigger the retry-once policy in readEC4At / Client.Read.
+			return nil, fmt.Errorf("csclient: ReadChunk %d: unexpected response cmd %d: %w", chunkID, cmd, errUnexpectedCmd)
 		}
 	}
 }

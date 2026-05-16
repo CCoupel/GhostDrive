@@ -352,6 +352,91 @@ func TestReadEC4StaleConnection(t *testing.T) {
 	assert.Equal(t, shardData[0], got, "data must match shard 0")
 }
 
+// ─── TestReadEC4StaleConnection_Cmd0 ─────────────────────────────────────────
+
+// TestReadEC4StaleConnection_Cmd0 verifies that readEC4At correctly handles the
+// "unexpected response cmd 0" error produced when a stale pooled CS connection
+// returns an ANTOAN_NOP frame (cmd=0) instead of CSTOCL_READ_DATA.
+//
+// This reproduces the QUALIF v1.8.0 symptom:
+//
+//	readEC4At chunkID=… shard=0: ReadChunk: csclient: ReadChunk …: unexpected response cmd 0
+//
+// The scenario: a chunk server closes a pooled TCP connection server-side.  The
+// OS TCP buffer may still contain zeros so ReadFrame returns (cmd=0, nil, nil)
+// instead of an EOF, causing ReadChunk to fall into the default case and return
+// errUnexpectedCmd.  isStaleConnErr must detect this via errors.Is and trigger
+// the retry-once policy — which then dials a fresh connection and succeeds.
+func TestReadEC4StaleConnection_Cmd0(t *testing.T) {
+	const block = uint32(65536)
+	const logicalID = uint64(0xb10c)
+
+	shardData := [4][]byte{
+		makeShardBytes(0, int(block)),
+		makeShardBytes(1, int(block)),
+		makeShardBytes(2, int(block)),
+		makeShardBytes(3, int(block)),
+	}
+
+	// innerCS holds the real shard data and is called on the retry connection.
+	physID := ECPhysicalChunkID(logicalID, 0)
+	innerCS := newFakeCSServer()
+	innerCS.SetChunkData(physID, shardData[0])
+
+	// NOP-then-OK listener for shard 0:
+	//   - connection 1: read CLTOCS_READ, reply ANTOAN_NOP (cmd=0), close.
+	//   - connection 2+: delegate to innerCS.handleConn (serves real data).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	// firstConnCh carries one token; consuming it marks the first connection done.
+	firstConnCh := make(chan struct{}, 1)
+	firstConnCh <- struct{}{}
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return // listener closed
+			}
+			select {
+			case <-firstConnCh:
+				// First connection: simulate stale socket returning cmd=0.
+				go func(c net.Conn) {
+					defer c.Close()
+					_, _, _ = ReadFrame(c)           // consume CLTOCS_READ
+					_ = WriteFrame(c, ANTOAN_NOP, nil) // reply with cmd=0 frame
+				}(conn)
+			default:
+				// Retry connection: serve the real shard data.
+				go innerCS.handleConn(conn)
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-serverDone
+	})
+
+	addr := ln.Addr().(*net.TCPAddr)
+	ip0 := binary.BigEndian.Uint32(addr.IP.To4())
+	port0 := uint16(addr.Port)
+
+	// Start normal CS servers for shards 1-3; override shard 0 with our server.
+	info, _ := startFourCSServers(t, logicalID, shardData)
+	info.Servers[0] = ChunkServer{IP: ip0, Port: port0}
+
+	c := makeECClient()
+
+	// readEC4At must detect cmd=0 as retriable, silently retry, and return the
+	// correct shard 0 data without exposing an error to the caller.
+	got, err := c.readEC4At(info, 0, 0, block)
+	require.NoError(t, err, "must succeed after transparent cmd=0 retry")
+	assert.Equal(t, shardData[0], got, "data must match shard 0 after retry")
+}
+
 // ─── TestReadEC4Via_ClientRead ────────────────────────────────────────────────
 
 // TestReadEC4Via_ClientRead exercises the full Client.Read() path with a fake
