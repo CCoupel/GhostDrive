@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - feat(moosefs): lecture EC4+1 (Erasure Coding 4+1) — support des fichiers stockés en EC4+1 sur MooseFS Pro 4.x (#114)
 
+### Fixed
+
+- fix(moosefs): corriger la gestion des connexions stales (cmd=0) dans readEC4At — le retry-once interne s'active désormais correctement sur socket half-closed (#114)
+
 ---
 
 ## [1.7.0] — 2026-05-13
