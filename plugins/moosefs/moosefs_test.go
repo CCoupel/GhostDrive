@@ -247,23 +247,25 @@ func (s *integFakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 
 // integFakeServer is a minimal in-memory MooseFS TCP server.
 type integFakeServer struct {
-	ln            net.Listener
-	mu            sync.Mutex
-	nodes         map[uint32]*integNode
-	nextID        atomic.Uint32
-	done          chan struct{}
-	cs            *integFakeCSServer // embedded chunk server
-	csIP          uint32             // CS listen IP (uint32 big-endian)
-	csPort        uint16             // CS listen port
-	registerCount atomic.Int32       // counts successful NewSession REGISTER calls
+	ln              net.Listener
+	mu              sync.Mutex
+	nodes           map[uint32]*integNode
+	nextID          atomic.Uint32
+	done            chan struct{}
+	cs              *integFakeCSServer // embedded chunk server
+	csIP            uint32             // CS listen IP (uint32 big-endian)
+	csPort          uint16             // CS listen port
+	registerCount   atomic.Int32       // counts successful NewSession REGISTER calls
+	getAttrErrIDs   map[uint32]bool    // nodeIDs for which svrGetAttr returns StatusENOENT
 }
 
 // newIntegFakeServer creates a fake server seeded with the root node only.
 func newIntegFakeServer() *integFakeServer {
 	s := &integFakeServer{
-		nodes: make(map[uint32]*integNode),
-		done:  make(chan struct{}),
-		cs:    newIntegFakeCSServer(),
+		nodes:         make(map[uint32]*integNode),
+		done:          make(chan struct{}),
+		cs:            newIntegFakeCSServer(),
+		getAttrErrIDs: make(map[uint32]bool),
 	}
 	s.nextID.Store(2)
 	s.nodes[mfsclient.RootNodeID] = &integNode{
@@ -539,9 +541,10 @@ func (s *integFakeServer) svrGetAttr(conn net.Conn, payload []byte) {
 
 	s.mu.Lock()
 	n, ok := s.nodes[nodeID]
+	shouldFail := s.getAttrErrIDs[nodeID]
 	s.mu.Unlock()
 
-	if !ok {
+	if shouldFail || !ok {
 		integWriteStatus(conn, mfsclient.MatoclFuseGetAttr, msgid, mfsclient.StatusENOENT)
 		return
 	}
@@ -1102,6 +1105,46 @@ func TestList_populatesMetadata(t *testing.T) {
 	assert.Equal(t, int64(len(content)), fi.Size, "Size must be populated via GetAttr (#116)")
 	assert.False(t, fi.ModTime.IsZero(), "ModTime must not be zero epoch (#116)")
 	assert.False(t, fi.ModTime.Equal(time.Unix(0, 0)), "ModTime must not be epoch 01/01/1970 (#116)")
+}
+
+// TestList_getAttrFailure verifies that List() tolerates a GetAttr error for
+// a single entry: the entry must still be included in the result with Size=0
+// and ModTime as the zero time.Time value.
+func TestList_getAttrFailure(t *testing.T) {
+	srv := newIntegFakeServer()
+	addr := srv.start(t)
+	b := newTestBackend(t, addr)
+	ctx := context.Background()
+
+	// Upload a file so it appears in ReadDir.
+	src := writeTempFile(t, []byte("getattr fail content"))
+	require.NoError(t, b.Upload(ctx, src, "/fail_test.txt", nil))
+
+	// Find the nodeID assigned to the uploaded file.
+	srv.mu.Lock()
+	var fileNodeID uint32
+	for _, n := range srv.nodes {
+		if n.name == "fail_test.txt" {
+			fileNodeID = n.nodeID
+			break
+		}
+	}
+	// Inject GetAttr failure for this specific node before releasing the lock.
+	if fileNodeID != 0 {
+		srv.getAttrErrIDs[fileNodeID] = true
+	}
+	srv.mu.Unlock()
+	require.NotZero(t, fileNodeID, "uploaded file must have been assigned a nodeID")
+
+	// List() must not fail even though GetAttr returns an error for the entry.
+	entries, err := b.List(ctx, "/")
+	require.NoError(t, err, "List must succeed despite GetAttr failure for one entry")
+	require.Len(t, entries, 1, "entry must still be present when GetAttr fails")
+
+	fi := entries[0]
+	assert.Equal(t, "fail_test.txt", fi.Name)
+	assert.Equal(t, int64(0), fi.Size, "Size must be zero when GetAttr fails")
+	assert.True(t, fi.ModTime.IsZero(), "ModTime must be zero time.Time when GetAttr fails")
 }
 
 // ─── Stat tests ───────────────────────────────────────────────────────────────

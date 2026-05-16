@@ -809,6 +809,7 @@ func (b *Backend) List(ctx context.Context, dirPath string) ([]plugins.FileInfo,
 				IsDir: e.IsDir,
 			}
 			// ReadDir with flags=0 does not return Size or MTime.
+			// TODO(#117): use ReadDir with attrs flags to avoid N+1 GetAttr roundtrips.
 			// Call GetAttr per entry to populate these fields (#116).
 			if attr, attrErr := c.GetAttr(e.NodeID); attrErr != nil {
 				logger.Warn("list %s: getattr(%d/%s) failed, using zero values: %v",
