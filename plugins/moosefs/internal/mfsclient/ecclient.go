@@ -46,6 +46,10 @@ func alignToBlock(n, blockSize uint32) uint32 {
 // The physical chunk ID for each shard is derived via ECPhysicalChunkID.
 // Connection pooling and the retry-once stale-connection policy mirror the
 // behaviour of Client.Read for normal chunks.
+//
+// Precondition: the read must not cross a shard boundary.
+// Callers must ensure chunkOffset is aligned to mfsBlockSize and
+// size ≤ mfsBlockSize ≤ shardSize.
 func (c *Client) readEC4At(
 	info *ChunkInfo,
 	chunkIndex uint32,

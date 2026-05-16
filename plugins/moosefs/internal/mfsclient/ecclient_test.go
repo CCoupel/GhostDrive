@@ -18,7 +18,6 @@ package mfsclient
 
 import (
 	"encoding/binary"
-	"fmt"
 	"math/rand"
 	"net"
 	"testing"
@@ -162,7 +161,6 @@ func TestReadEC4Basic(t *testing.T) {
 					"server %d must have been contacted for shard %d", j, i)
 			}
 		}
-		_ = servers[i] // silence unused warning
 	}
 }
 
@@ -632,6 +630,3 @@ func serveEC4MasterMultiChunk(conn net.Conn, fileLen uint64, chunks []ecChunkSpe
 	}
 }
 
-// ─── Helper: suppress unused import ──────────────────────────────────────────
-
-var _ = fmt.Sprintf // keep "fmt" import used (used in error messages above)

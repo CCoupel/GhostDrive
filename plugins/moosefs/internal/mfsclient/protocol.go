@@ -150,6 +150,9 @@ const (
 	EC8ECIDStart uint64 = 0x2000000000000000
 )
 
+// Safe range: logicalID must be ≤ 0xEBFFFFFFFFFFFFFF (includes all 5 parts incl. CF0).
+// MooseFS chunk IDs are bounded well below this limit in practice.
+
 // ECPhysicalChunkID returns the physical chunk ID for shard partIdx of an
 // EC4+1 logical chunk logicalID.
 //
