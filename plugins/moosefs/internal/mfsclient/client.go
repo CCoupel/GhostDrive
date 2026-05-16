@@ -985,6 +985,16 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 		return nil, nil // EOF
 	}
 
+	// EC routing: delegate EC4+1 chunks to readEC4At (shard-granular read).
+	// EC8+2 and other EC configurations are not yet supported.
+	if info.ECParts == 4 {
+		return c.readEC4At(info, index, chunkOffset, size)
+	}
+	if info.ECParts != 0 {
+		return nil, fmt.Errorf("mfsclient: Read(%d): EC%d+%d not supported (only EC4+1 implemented)",
+			nodeID, info.ECParts, info.ECParts/4)
+	}
+
 	// Phase 2: I/O chunk server hors mutex — c.conn n'est pas utilisé ici.
 	//
 	// Retry-once policy for stale pool connections:
@@ -1164,15 +1174,13 @@ func parseChunkInfo(ans []byte) (*ChunkInfo, error) {
 	}
 
 	// Proto 3: erasure-coded chunk (4 or 8 independent shards).
-	// Reading an EC chunk requires reading a distinct shard from each CS and
-	// reconstructing via XOR / Reed-Solomon — not yet implemented.
-	// Return a clear error rather than silently serving corrupt data from a
-	// single shard.  N=0 is a degenerate case handled downstream by the
-	// existing nCS=0 guard (no data available on any server).
-	if protocolID == 3 && len(info.Servers) > 1 {
-		return nil, fmt.Errorf("parseChunkInfo: proto=3 erasure-coded chunk (%d parts): "+
-			"EC download not supported — disable erasure coding on the MooseFS storage class "+
-			"or upgrade GhostDrive", len(info.Servers))
+	// Set ECParts so that Client.Read() can route to readEC4At.
+	// N=0 is a degenerate case (no servers available) — ECParts stays 0 and
+	// the existing nCS=0 guard in Read() handles it downstream.
+	if protocolID == 3 && len(info.Servers) > 0 {
+		info.ECParts = len(info.Servers)
+		logger.Debug("mfsclient: parseChunkInfo: proto=3 EC chunk chunkID=%d ECParts=%d",
+			info.ChunkID, info.ECParts)
 	}
 
 	// MooseFS 4.x may append a lockid:32 token after the CS entries.

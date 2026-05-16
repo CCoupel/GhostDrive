@@ -126,6 +126,40 @@ const (
 // All chunk index calculations use this constant: index = fileOffset / ChunkSize.
 const ChunkSize uint64 = 64 * 1024 * 1024
 
+// ─── Erasure-coding constants ─────────────────────────────────────────────────
+//
+// MooseFS Pro 4.x uses physical chunk IDs derived from logical chunk IDs for
+// each EC shard.  The derivation formula (from hddspacemgr.c::hdd_int_split()):
+//
+//	physical[part] = logical + EC4ECIDStart + part × EC4ECIDStep
+//
+// DF0 (part=0): logical + 0x1000000000000000
+// DF1 (part=1): logical + 0x1100000000000000
+// DF2 (part=2): logical + 0x1200000000000000
+// DF3 (part=3): logical + 0x1300000000000000
+// CF0 (part=4): logical + 0x1400000000000000  (parity — not used in normal reads)
+//
+// EC8+2 uses EC8ECIDStart (reserved for issue #115).
+
+const (
+	// EC4ECIDStart is the base physical-ID offset for EC4+1 data shard DF0.
+	EC4ECIDStart uint64 = 0x1000000000000000
+	// EC4ECIDStep is the per-part increment applied to successive EC4 shards.
+	EC4ECIDStep uint64 = 0x0100000000000000
+	// EC8ECIDStart is the base offset for EC8+2 shards (reserved — issue #115).
+	EC8ECIDStart uint64 = 0x2000000000000000
+)
+
+// ECPhysicalChunkID returns the physical chunk ID for shard partIdx of an
+// EC4+1 logical chunk logicalID.
+//
+//	partIdx: 0=DF0, 1=DF1, 2=DF2, 3=DF3, 4=CF0 (parity)
+//
+// Source: MooseFS CE hddspacemgr.c::hdd_int_split() — identical in Pro.
+func ECPhysicalChunkID(logicalID uint64, partIdx int) uint64 {
+	return logicalID + EC4ECIDStart + uint64(partIdx)*EC4ECIDStep
+}
+
 // ─── Chunk-server status codes ───────────────────────────────────────────────
 //
 // These codes appear in CSTOCL_WRITE_STATUS and CSTOCL_READ_STATUS payloads.
@@ -259,6 +293,13 @@ type ChunkInfo struct {
 	                       // Present in some MooseFS deployments; NOT included in WRITE_CHUNK_END
 	                       // by this client (confirmed against MooseFS 4.58.4 — tests pass on real cluster).
 	                       // Retained for diagnostics and future protocol compatibility.
+	// ECParts is non-zero when this chunk uses erasure coding (proto=3).
+	// 4 = EC4+1 (4 data shards + 1 parity — issue #114).
+	// 8 = EC8+2 (8 data shards + 2 parity — reserved for issue #115).
+	// 0 = normal replicated chunk (proto=0/1/2).
+	// Servers contains only the data shards (DF0..DFn-1); parity (CF0) is
+	// not included by the master in normal read responses.
+	ECParts  int
 }
 
 // ─── Frame I/O helpers ────────────────────────────────────────────────────────

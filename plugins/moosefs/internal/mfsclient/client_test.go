@@ -1493,13 +1493,13 @@ func TestParseChunkInfo_Proto3(t *testing.T) {
 		assert.Equal(t, uint32(1), info.Version, "version decoded")
 		assert.Empty(t, info.Servers,
 			"0 CS entries expected: truncated payload (7 bytes) < entrySize (14)")
+		assert.Equal(t, 0, info.ECParts, "ECParts must be 0 when Servers is empty")
 	})
 
-	t.Run("four_part_ec_chunk_returns_error", func(t *testing.T) {
-		// Well-formed proto=3 response with 4 CS entries (minimum EC configuration,
-		// per MooseFS source: chunks.c / matoclserv.c).
-		// parseChunkInfo must parse the 4 servers and then return a clear error
-		// rather than silently serving corrupt data from a single EC shard.
+	t.Run("four_part_ec_chunk_sets_ecparts", func(t *testing.T) {
+		// Well-formed proto=3 response with 4 CS entries (EC4+1 configuration).
+		// parseChunkInfo must parse the 4 servers, set ECParts=4, and return no error.
+		// The EC read itself is handled by readEC4At — parseChunkInfo only decodes.
 		var resp []byte
 		resp = PutUint32(resp, 0)      // msgid
 		resp = PutUint8(resp, 3)       // protocolid = 3
@@ -1515,16 +1515,16 @@ func TestParseChunkInfo_Proto3(t *testing.T) {
 		}
 		require.Len(t, resp, 81, "test vector must be 25-byte header + 4×14 = 81 bytes")
 
-		_, err := parseChunkInfo(resp)
-		require.Error(t, err, "proto=3 EC chunk must return an error")
-		assert.Contains(t, err.Error(), "erasure-coded",
-			"error must identify the EC nature of the chunk")
-		assert.Contains(t, err.Error(), "4",
-			"error must report the part count")
+		info, err := parseChunkInfo(resp)
+		require.NoError(t, err, "proto=3 EC4 chunk must not return an error")
+		require.NotNil(t, info)
+		assert.Equal(t, 4, info.ECParts, "ECParts must be 4 for EC4+1 chunk")
+		assert.Len(t, info.Servers, 4, "must have parsed 4 CS entries")
 	})
 
-	t.Run("eight_part_ec_chunk_returns_error", func(t *testing.T) {
-		// Same as four_part but with 8 entries (maximum EC configuration).
+	t.Run("eight_part_ec_chunk_sets_ecparts", func(t *testing.T) {
+		// Same as four_part but with 8 entries (EC8+2 configuration — future #115).
+		// parseChunkInfo must set ECParts=8 and return no error.
 		var resp []byte
 		resp = PutUint32(resp, 0)
 		resp = PutUint8(resp, 3)
@@ -1539,9 +1539,11 @@ func TestParseChunkInfo_Proto3(t *testing.T) {
 		}
 		require.Len(t, resp, 137, "test vector must be 25-byte header + 8×14 = 137 bytes")
 
-		_, err := parseChunkInfo(resp)
-		require.Error(t, err, "proto=3 EC chunk (8 parts) must return an error")
-		assert.Contains(t, err.Error(), "8", "error must report the part count")
+		info, err := parseChunkInfo(resp)
+		require.NoError(t, err, "proto=3 EC8 chunk must not return an error")
+		require.NotNil(t, info)
+		assert.Equal(t, 8, info.ECParts, "ECParts must be 8 for EC8+2 chunk")
+		assert.Len(t, info.Servers, 8, "must have parsed 8 CS entries")
 	})
 
 	t.Run("proto3_zero_servers_no_error", func(t *testing.T) {
@@ -1559,6 +1561,7 @@ func TestParseChunkInfo_Proto3(t *testing.T) {
 		info, err := parseChunkInfo(resp)
 		require.NoError(t, err, "proto=3 with 0 servers must not error")
 		assert.Empty(t, info.Servers)
+		assert.Equal(t, 0, info.ECParts, "ECParts must be 0 when Servers is empty")
 	})
 }
 
