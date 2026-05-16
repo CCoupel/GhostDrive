@@ -471,6 +471,167 @@ func serveEC4Master(conn net.Conn, logicalID uint64, fileLen uint64, csIP [4]uin
 	}
 }
 
+// ─── TestReadEC4MultiChunk ────────────────────────────────────────────────────
+
+// ecChunkSpec holds the logical chunk ID and CS servers for one EC4 chunk.
+// Used by serveEC4MasterMultiChunk to dispatch per-chunk READ_CHUNK responses.
+type ecChunkSpec struct {
+	logicalID uint64
+	csIP      [4]uint32
+	csPort    [4]uint16
+}
+
+// TestReadEC4MultiChunk verifies EC4+1 reads across a 2-chunk file
+// (file length = ChunkSize + 1 shard, so chunk 0 is full and chunk 1 is partial).
+//
+// This exercises the chunkIndex routing in Client.Read(): each chunk has a
+// distinct logical chunk ID and its own set of CS servers.  A fake master
+// dispatches the correct CS list per chunk index.
+//
+// Reads:
+//   - offset 0           → chunk 0 (full, 64 MiB), shard 0 → CS set A
+//   - offset ChunkSize   → chunk 1 (65536 bytes), shard 0 → CS set B
+func TestReadEC4MultiChunk(t *testing.T) {
+	const block = uint32(65536)
+	// File spans 2 chunks: chunk 0 full (64 MiB) + chunk 1 partial (1 × 64 KiB).
+	const fileLen = uint64(ChunkSize) + uint64(block)
+
+	const logicalID0 = uint64(0xEC4C0000) // logical ID for chunk 0
+	const logicalID1 = uint64(0xEC4C0001) // logical ID for chunk 1
+
+	// Prepare one block of identifying shard data per chunk.
+	shardA := makeShardBytes(0xA0, int(block)) // chunk 0, shard 0
+	shardB := makeShardBytes(0xB0, int(block)) // chunk 1, shard 0
+
+	// Start CS servers for chunk 0 (4 servers — only CS0 is contacted in this test).
+	var specA ecChunkSpec
+	specA.logicalID = logicalID0
+	for i := 0; i < 4; i++ {
+		s := newFakeCSServer()
+		ip, port := s.Start()
+		t.Cleanup(s.Stop)
+		if i == 0 {
+			// Seed CS0 with shard data for the first 65536 bytes of the 16 MiB shard.
+			physID := ECPhysicalChunkID(logicalID0, 0)
+			s.SetChunkData(physID, shardA)
+		}
+		specA.csIP[i] = ip
+		specA.csPort[i] = port
+	}
+
+	// Start CS servers for chunk 1 (4 servers — only CS0 is contacted in this test).
+	var specB ecChunkSpec
+	specB.logicalID = logicalID1
+	for i := 0; i < 4; i++ {
+		s := newFakeCSServer()
+		ip, port := s.Start()
+		t.Cleanup(s.Stop)
+		if i == 0 {
+			physID := ECPhysicalChunkID(logicalID1, 0)
+			s.SetChunkData(physID, shardB)
+		}
+		specB.csIP[i] = ip
+		specB.csPort[i] = port
+	}
+
+	// Build a fake master that dispatches the correct CS list per chunk index.
+	chunks := []ecChunkSpec{specA, specB}
+
+	masterLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	masterDone := make(chan struct{})
+	go func() {
+		defer close(masterDone)
+		for {
+			conn, err := masterLn.Accept()
+			if err != nil {
+				return
+			}
+			go serveEC4MasterMultiChunk(conn, fileLen, chunks)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = masterLn.Close()
+		<-masterDone
+	})
+
+	masterAddr := masterLn.Addr().(*net.TCPAddr)
+	c, err := Dial("127.0.0.1", masterAddr.Port)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+
+	// Read first block from chunk 0 (chunkOffset=0, shard 0 of chunk 0).
+	gotA, err := c.Read(1, 0, block)
+	require.NoError(t, err, "Read from chunk 0 must succeed")
+	assert.Equal(t, shardA, gotA, "chunk 0 shard 0 data mismatch")
+
+	// Read first block from chunk 1 (chunkOffset=0, shard 0 of chunk 1).
+	gotB, err := c.Read(1, ChunkSize, block)
+	require.NoError(t, err, "Read from chunk 1 must succeed")
+	assert.Equal(t, shardB, gotB, "chunk 1 shard 0 data mismatch")
+}
+
+// serveEC4MasterMultiChunk serves a fake MooseFS master that returns a
+// proto=3 READ_CHUNK response indexed by chunk index (0-based).
+// chunks[i] specifies the logical chunk ID and CS servers for chunk i.
+func serveEC4MasterMultiChunk(conn net.Conn, fileLen uint64, chunks []ecChunkSpec) {
+	defer conn.Close()
+	for {
+		cmd, payload, err := ReadFrame(conn)
+		if err != nil {
+			return
+		}
+		switch cmd {
+		case CltomFuseRegister:
+			if len(payload) < 8 {
+				return
+			}
+			msgid := binary.BigEndian.Uint32(payload[:4])
+			var resp []byte
+			resp = PutUint32(resp, msgid)
+			resp = PutUint32(resp, rand.Uint32()) // sessionID
+			resp = PutUint32(resp, 0)             // padding
+			_ = WriteFrame(conn, MatoclFuseRegister, resp)
+
+		case CltomFuseReadChunk:
+			if len(payload) < 12 {
+				return
+			}
+			msgid, off, _ := ReadUint32(payload, 0)
+			_, off, _ = ReadUint32(payload, off)         // nodeID
+			chunkIndex, _, _ := ReadUint32(payload, off) // chunk index
+
+			if int(chunkIndex) >= len(chunks) {
+				// Past EOF: return 5-byte StatusOK.
+				var eof []byte
+				eof = PutUint32(eof, msgid)
+				eof = PutUint8(eof, StatusOK)
+				_ = WriteFrame(conn, MatoclFuseReadChunk, eof)
+				continue
+			}
+
+			spec := chunks[chunkIndex]
+			var resp []byte
+			resp = PutUint32(resp, msgid)
+			resp = PutUint8(resp, 3)              // protocolid = 3
+			resp = PutUint64(resp, fileLen)        // file length
+			resp = PutUint64(resp, spec.logicalID) // per-chunk logical ID
+			resp = PutUint32(resp, 1)              // version
+			for i := 0; i < 4; i++ {
+				resp = PutUint32(resp, spec.csIP[i])
+				resp = PutUint16(resp, spec.csPort[i])
+				resp = PutUint32(resp, 0) // cs_ver
+				resp = PutUint32(resp, 0) // labelmask
+			}
+			_ = WriteFrame(conn, MatoclFuseReadChunk, resp)
+
+		default:
+			return
+		}
+	}
+}
+
 // ─── Helper: suppress unused import ──────────────────────────────────────────
 
 var _ = fmt.Sprintf // keep "fmt" import used (used in error messages above)
