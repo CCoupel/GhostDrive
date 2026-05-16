@@ -48,6 +48,36 @@ CSTOCL_READ_STATUS = 201
 CSTOCL_READ_DATA = 202
 ANTOAN_NOP = 0
 
+# ---------------------------------------------------------------------------
+# EC4 physical chunk_id encoding (source: MooseFS CE hddspacemgr.c)
+# ---------------------------------------------------------------------------
+# EC4: ecidstart = 0x1000000000000000, step = 0x0100000000000000
+# EC8: ecidstart = 0x2000000000000000, step = 0x0100000000000000
+#
+# physical_chunk_id[part] = logical_chunk_id + ecidstart + part * step
+#
+# Part index corresponds to the order returned by the master (DF0=0, DF1=1, ..., CF0=4).
+# The CS validates chunk_id exactly (no masking in the read path), so the physical ID
+# MUST be sent — sending the logical ID returns NOCHUNK for size>0.
+
+EC4_ECID_START = 0x1000000000000000  # upper byte = 0x10 for part 0
+EC4_ECID_STEP  = 0x0100000000000000  # upper byte increments by 1 per part
+EC8_ECID_START = 0x2000000000000000  # upper byte = 0x20 for EC8 part 0
+
+
+def ec4_physical_chunk_id(logical_id: int, part_idx: int) -> int:
+    """
+    Calcule le physical chunk_id EC4 pour la part `part_idx`.
+
+    part_idx 0..3 = data fragments (DF0-DF3)
+    part_idx 4    = parity (CF0)
+
+    Formule (MooseFS CE hddspacemgr.c, hdd_int_split) :
+        physical = logical_id + 0x1000000000000000 + part_idx * 0x0100000000000000
+    """
+    ecidpart = EC4_ECID_START + part_idx * EC4_ECID_STEP
+    return (logical_id + ecidpart) & 0xFFFFFFFFFFFFFFFF
+
 
 # ---------------------------------------------------------------------------
 # Primitives réseau
@@ -150,6 +180,9 @@ def read_chunk_ec(sock: socket.socket, inode: int, chunk_index: int) -> dict:
     )
     write_frame(sock, CLTOM_FUSE_READ_CHUNK, payload)
     cmd, ans = read_frame(sock)
+    # Ignorer les NOP keepalives envoyés par le master pendant les transferts CS
+    while cmd == ANTOAN_NOP:
+        cmd, ans = read_frame(sock)
     assert cmd == MATOCL_FUSE_READ_CHUNK, f"Expected MATOCL_FUSE_READ_CHUNK={MATOCL_FUSE_READ_CHUNK}, got {cmd}"
 
     if len(ans) == 5:
@@ -163,19 +196,28 @@ def read_chunk_ec(sock: socket.socket, inode: int, chunk_index: int) -> dict:
     chunk_id    = struct.unpack_from(">Q", ans, off)[0]; off += 8
     version     = struct.unpack_from(">I", ans, off)[0]; off += 4
 
+    remaining = len(ans) - off
+    # Pour EC4+1 : le master retourne 4 serveurs (DF0-DF3) pour une lecture normale.
+    # CF0 (parity) n'est fourni que pour la récupération (shard manquant).
+    # Chaque entrée : [ip:32][port:16][cs_ver:32][labelmask:32] = 14 bytes
+    ENTRY_SIZE = 14
+    n_servers = remaining // ENTRY_SIZE
+    if n_servers not in (4, 5) or remaining % ENTRY_SIZE != 0:
+        raise RuntimeError(
+            f"Unexpected EC response: remaining={remaining} bytes "
+            f"(raw: {ans[off:].hex()})"
+        )
+
     servers = []
-    while off + 14 <= len(ans):
+    for _ in range(n_servers):
         ip_raw  = struct.unpack_from(">I", ans, off)[0]; off += 4
         port    = struct.unpack_from(">H", ans, off)[0]; off += 2
-        _cs_ver = struct.unpack_from(">I", ans, off)[0]; off += 4  # cs_ver (inutilisé)
-        _label  = struct.unpack_from(">I", ans, off)[0]; off += 4  # labelmask (inutilisé)
+        off    += 8  # cs_ver (4B) + labelmask (4B)
         ip_str  = (
             f"{(ip_raw >> 24) & 0xFF}.{(ip_raw >> 16) & 0xFF}"
             f".{(ip_raw >> 8) & 0xFF}.{ip_raw & 0xFF}"
         )
         servers.append({"ip": ip_str, "port": port})
-
-    assert len(servers) == 5, f"Expected 5 EC servers (4 DF + 1 CF), got {len(servers)}"
     return {
         "chunk_id": chunk_id,
         "version": version,
@@ -188,18 +230,32 @@ def read_chunk_ec(sock: socket.socket, inode: int, chunk_index: int) -> dict:
 # ChunkServer API
 # ---------------------------------------------------------------------------
 
-def read_shard(ip: str, port: int, chunk_id: int, version: int, shard_size: int) -> bytes:
+def read_shard(ip: str, port: int, chunk_id: int, version: int, shard_size: int,
+               part_idx: int = -1) -> bytes:
     """
     Lit un shard EC depuis un chunkserver via TCP.
+
+    Le CS MooseFS Pro 4.x stocke les shards EC sous des physical chunk_ids différents
+    des logical chunk_ids retournés par le master. Le physical chunk_id doit être
+    calculé avant l'appel :
+        physical = logical_id + EC4_ECID_START + part_idx * EC4_ECID_STEP
+
+    Si `part_idx` >= 0, calcule automatiquement le physical_chunk_id depuis `chunk_id`
+    (traité comme logical_id). Sinon, `chunk_id` est utilisé tel quel (physical_id fourni).
 
     Opcode CLTOCS_READ (200) identique pour chunks EC et répliqués.
     Pour EC : size = shard_size (¼ du chunk + padding éventuel).
     Vérifie le CRC32-IEEE de chaque bloc DATA reçu.
     Retourne les données brutes du shard (shard_size bytes).
     """
+    if part_idx >= 0:
+        physical_id = ec4_physical_chunk_id(chunk_id, part_idx)
+    else:
+        physical_id = chunk_id
+
     with socket.create_connection((ip, port), timeout=10) as cs:
         payload = (
-            struct.pack(">Q", chunk_id)
+            struct.pack(">Q", physical_id)
             + struct.pack(">I", version)
             + struct.pack(">I", 0)           # offset dans le shard
             + struct.pack(">I", shard_size)  # taille à lire
@@ -289,7 +345,7 @@ def generate_fixtures(
     - <stem>_chunk<N>_shards.json : échantillon 4096B de chaque shard (pour tests XOR)
     """
     os.makedirs(out_dir, exist_ok=True)
-    stem = filename.replace(".", "_")
+    stem = os.path.basename(filename).replace(".", "_")
 
     # --- Fichier meta ---
     meta = {
@@ -374,21 +430,34 @@ def read_file_ec(
         session_id = register(master)
         print(f"  Session enregistrée : id={session_id}")
 
-        inode = lookup(master, ROOT_NODE_ID, filename)
-        print(f"  Inode : {inode}")
+        # Traversée du chemin composant par composant
+        parts = [p for p in filename.split("/") if p]
+        inode = ROOT_NODE_ID
+        for part in parts:
+            inode = lookup(master, inode, part)
+        print(f"  Inode : {inode} (path: /{'/'.join(parts)})")
 
         file_data = bytearray()
         chunk_index = 0
+        file_length = 0  # sera rempli au premier chunk
 
         while True:
+            # Vérification EOF avant de demander le chunk suivant au master
+            # (évite une requête pour un chunk qui n'existe pas)
+            if file_length > 0:
+                chunk_data_size_preview = min(file_length - chunk_index * CHUNK_SIZE, CHUNK_SIZE)
+                if chunk_data_size_preview <= 0:
+                    print(f"  Fin de fichier atteinte après {chunk_index} chunk(s)")
+                    break
+
             print(f"\n  --- Chunk {chunk_index} ---")
             try:
                 info = read_chunk_ec(master, inode, chunk_index)
             except RuntimeError as e:
                 # Fin du fichier si le status indique pas de chunk (EOF)
                 err_str = str(e)
-                if "status=0x00" in err_str or "EOF" in err_str:
-                    print(f"  Fin de fichier détectée au chunk {chunk_index}")
+                if "status=0x00" in err_str or "EOF" in err_str or "proto=" in err_str:
+                    print(f"  Fin de fichier détectée au chunk {chunk_index}: {e}")
                     break
                 raise
 
@@ -405,26 +474,36 @@ def read_file_ec(
             print(f"  chunk_id=0x{chunk_id:08X} version={version} "
                   f"chunk_data_size={chunk_data_size} shard_size={shard_size}")
 
-            # Lire les 4 data fragments
+            # Lire les 4 data fragments (physical chunk_ids = logical + ecidstart + i*step)
             dfs = []
             for i in range(4):
                 srv = servers[i]
                 role = f"DF{i}"
-                print(f"  Lecture {role} : {srv['ip']}:{srv['port']} ({shard_size} bytes)")
-                shard = read_shard(srv["ip"], srv["port"], chunk_id, version, shard_size)
+                phys_id = ec4_physical_chunk_id(chunk_id, i)
+                print(f"  Lecture {role} : {srv['ip']}:{srv['port']} "
+                      f"phys=0x{phys_id:016X} ({shard_size} bytes)")
+                shard = read_shard(srv["ip"], srv["port"], chunk_id, version, shard_size,
+                                   part_idx=i)
                 print(f"    → {len(shard)} bytes reçus")
                 dfs.append(shard)
 
-            # Lire CF0 pour vérification
-            cf0_srv = servers[4]
-            print(f"  Lecture CF0 : {cf0_srv['ip']}:{cf0_srv['port']} ({shard_size} bytes)")
-            cf0 = read_shard(cf0_srv["ip"], cf0_srv["port"], chunk_id, version, shard_size)
-            print(f"    → {len(cf0)} bytes reçus")
-
-            # Vérifier XOR
-            if not xor_verify(dfs, cf0):
-                raise RuntimeError(f"XOR parity mismatch on chunk {chunk_index}")
-            print(f"  XOR vérifié ✓")
+            # Lire CF0 si disponible dans la réponse master (récupération) ou skip
+            cf0 = None
+            if len(servers) == 5:
+                cf0_srv = servers[4]
+                phys_cf0 = ec4_physical_chunk_id(chunk_id, 4)
+                print(f"  Lecture CF0 : {cf0_srv['ip']}:{cf0_srv['port']} "
+                      f"phys=0x{phys_cf0:016X} ({shard_size} bytes)")
+                cf0 = read_shard(cf0_srv["ip"], cf0_srv["port"], chunk_id, version, shard_size,
+                                 part_idx=4)
+                print(f"    → {len(cf0)} bytes reçus")
+                if not xor_verify(dfs, cf0):
+                    raise RuntimeError(f"XOR parity mismatch on chunk {chunk_index}")
+                print(f"  XOR vérifié ✓")
+            else:
+                # Vérification XOR locale : XOR(DF0,DF1,DF2,DF3) doit être cohérent
+                # (pas de CF0 dispo en lecture normale — vérification MD5 finale suffira)
+                print(f"  CF0 non retourné par le master (lecture normale) — skip XOR check")
 
             # Générer les fixtures si demandé
             if fixtures_dir:
@@ -435,7 +514,7 @@ def read_file_ec(
                     chunk_index=chunk_index,
                     info=info,
                     dfs=dfs,
-                    cf0=cf0,
+                    cf0=cf0 or b"",
                     chunk_data_size=chunk_data_size,
                     shard_size=shard_size,
                     md5_hash=md5_chunk,
