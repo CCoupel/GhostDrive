@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- feat(moosefs): lecture EC4+1 (Erasure Coding 4+1) — support des fichiers stockés en EC4+1 sur MooseFS Pro 4.x (#114)
+
 ---
 
 ## [1.7.0] — 2026-05-13
