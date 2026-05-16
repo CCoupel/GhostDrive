@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - fix(moosefs): corriger la gestion des connexions stales (cmd=0) dans readEC4At — le retry-once interne s'active désormais correctement sur socket half-closed (#114)
+- fix(moosefs): afficher la taille réelle et la date de modification dans GhD: — List() appelle désormais GetAttr par entrée (#116)
 
 ---
 
