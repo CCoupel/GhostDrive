@@ -804,11 +804,18 @@ func (b *Backend) List(ctx context.Context, dirPath string) ([]plugins.FileInfo,
 			}
 			entryPath := strings.TrimLeft(dirPath+"/"+e.Name, "/")
 			fi := plugins.FileInfo{
-				Name:    e.Name,
-				Path:    entryPath,
-				IsDir:   e.IsDir,
-				Size:    int64(e.Size),
-				ModTime: time.Unix(int64(e.MTime), 0),
+				Name:  e.Name,
+				Path:  entryPath,
+				IsDir: e.IsDir,
+			}
+			// ReadDir with flags=0 does not return Size or MTime.
+			// Call GetAttr per entry to populate these fields (#116).
+			if attr, attrErr := c.GetAttr(e.NodeID); attrErr != nil {
+				logger.Warn("list %s: getattr(%d/%s) failed, using zero values: %v",
+					dirPath, e.NodeID, e.Name, attrErr)
+			} else {
+				fi.Size = int64(attr.Size)
+				fi.ModTime = time.Unix(int64(attr.MTime), 0)
 			}
 			result = append(result, fi)
 		}

@@ -1082,6 +1082,28 @@ func TestList_withFiles(t *testing.T) {
 	assert.Len(t, entries, 2)
 }
 
+// TestList_populatesMetadata verifies that List() returns correct Size and
+// ModTime for each entry (#116).  Before the fix, ReadDir with flags=0
+// returned zero for both fields.
+func TestList_populatesMetadata(t *testing.T) {
+	b := newTestBackend(t, startFakeServer(t))
+	ctx := context.Background()
+
+	content := []byte("hello metadata world")
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/meta_test.txt", nil))
+
+	entries, err := b.List(ctx, "/")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	fi := entries[0]
+	assert.Equal(t, "meta_test.txt", fi.Name)
+	assert.Equal(t, int64(len(content)), fi.Size, "Size must be populated via GetAttr (#116)")
+	assert.False(t, fi.ModTime.IsZero(), "ModTime must not be zero epoch (#116)")
+	assert.False(t, fi.ModTime.Equal(time.Unix(0, 0)), "ModTime must not be epoch 01/01/1970 (#116)")
+}
+
 // ─── Stat tests ───────────────────────────────────────────────────────────────
 
 func TestStat_existingFile(t *testing.T) {
