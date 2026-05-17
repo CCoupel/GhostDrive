@@ -278,6 +278,11 @@ func (d *WinFspDrive) Status() DriveStatus {
 // remounting the drive.  The GhostFileSystem will immediately see the new
 // list in Readdir("/") and route().
 // Returns an error if the drive is not mounted.
+//
+// In addition to updating the routing table, UpdateBackends diffs the old and
+// new backend lists and starts / cancels watchLoop goroutines accordingly, so
+// that newly added backends get push-invalidation and removed backends have
+// their goroutines cleaned up.
 func (d *WinFspDrive) UpdateBackends(backends []MountedBackend) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -289,12 +294,18 @@ func (d *WinFspDrive) UpdateBackends(backends []MountedBackend) error {
 	// Update WinFspDrive's own record.
 	d.backends = backends
 
-	// Propagate to the live GhostFileSystem so route() and Readdir("/") pick
-	// up the new list on the very next FUSE dispatch cycle.
+	// Propagate to the live GhostFileSystem.
 	if d.fs != nil {
-		d.fs.mu.Lock()
+		// Capture oldBackends and swap atomically under backendsMu (not the
+		// handles mutex d.fs.mu).  The watchLoop diff is performed outside the
+		// lock to avoid holding it during goroutine creation.
+		d.fs.backendsMu.Lock()
+		oldBackends := d.fs.backends
 		d.fs.backends = backends
-		d.fs.mu.Unlock()
+		d.fs.backendsMu.Unlock()
+
+		// Start goroutines for added backends, cancel for removed ones.
+		d.fs.updateWatchLoops(oldBackends, backends)
 	}
 
 	return nil

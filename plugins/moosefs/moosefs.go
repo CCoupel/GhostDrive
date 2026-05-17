@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1090,7 +1091,15 @@ func (b *Backend) ReadAt(ctx context.Context, remote string, offset, length int6
 		return []byte{}, nil
 	}
 
-	// Clamp to uint32 per mfsclient API; caller is responsible for chunking.
+	// Guard against silent uint32 wrap-around: the mfsclient Read primitive
+	// accepts a uint32 byte count, so a length > 4 GiB would silently truncate.
+	// Callers must chunk requests to at most ChunkSize() bytes.
+	if length > math.MaxUint32 {
+		return nil, fmt.Errorf("moosefs: readAt %s: length %d exceeds uint32 max (%d) — chunk read required",
+			remote, length, math.MaxUint32)
+	}
+
+	// Safe cast: length <= math.MaxUint32 verified above.
 	size := uint32(length)
 	data, err := c.Read(nodeID, uint64(offset), size)
 	if err != nil {

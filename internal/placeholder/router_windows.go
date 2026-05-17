@@ -31,7 +31,14 @@ type routeResult struct {
 // (desktop.ini, ghostdrive.ico) BEFORE invoking route, so this function is
 // never called for "/" or those virtual paths.
 func (fs *GhostFileSystem) route(path string) *routeResult {
-	if len(fs.backends) == 0 {
+	// Snapshot backends under RLock.  The slice is replaced atomically by
+	// UpdateBackends (never modified in place), so the snapshot remains valid
+	// after the unlock for the entire duration of this call.
+	fs.backendsMu.RLock()
+	backends := fs.backends
+	fs.backendsMu.RUnlock()
+
+	if len(backends) == 0 {
 		return nil
 	}
 
@@ -54,7 +61,7 @@ func (fs *GhostFileSystem) route(path string) *routeResult {
 	}
 
 	// Search for the backend whose Name matches backendName (case-insensitive).
-	for _, mb := range fs.backends {
+	for _, mb := range backends {
 		if strings.EqualFold(mb.Name, backendName) {
 			return &routeResult{
 				backend: mb.Backend,
