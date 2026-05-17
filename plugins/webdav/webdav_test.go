@@ -1268,6 +1268,62 @@ func TestGetQuota_ServerNoQuota(t *testing.T) {
 
 // ─── Reconnect ────────────────────────────────────────────────────────────────
 
+// ─── ReadAt (#121) ────────────────────────────────────────────────────────────
+
+// TestReadAt_Success uploads a file and reads a slice of it using ReadAt.
+// The in-memory WebDAV handler may not support Range (returns 200), but the
+// ReadAt implementation falls back to a full download + slice in that case,
+// so the returned bytes must always match the expected sub-slice.
+func TestReadAt_Success(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+
+	b := newTestBackend(t, serverURL)
+	ctx := context.Background()
+
+	content := []byte("Hello, WebDAV ReadAt World!")
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/readat.txt", nil))
+
+	// Read bytes [7:13) → "WebDAV"
+	data, err := b.ReadAt(ctx, "/readat.txt", 7, 6)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("WebDAV"), data)
+}
+
+// TestReadAt_FullFile verifies that ReadAt with offset=0 and length=fileSize
+// returns the full file content.
+func TestReadAt_FullFile(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+
+	b := newTestBackend(t, serverURL)
+	ctx := context.Background()
+
+	content := []byte("full WebDAV file content")
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/full.txt", nil))
+
+	data, err := b.ReadAt(ctx, "/full.txt", 0, int64(len(content)))
+	require.NoError(t, err)
+	assert.Equal(t, content, data)
+}
+
+// TestReadAt_NotConnected verifies that ReadAt returns ErrNotConnected when the
+// backend is not connected.
+func TestReadAt_NotConnected(t *testing.T) {
+	b := New()
+	_, err := b.ReadAt(context.Background(), "/file.txt", 0, 10)
+	assert.ErrorIs(t, err, plugins.ErrNotConnected)
+}
+
+// TestChunkSize_WebDAV verifies that WebDAV ChunkSize() returns 0 (no chunking
+// hint; the FUSE layer should use unbounded sequential reads).
+func TestChunkSize_WebDAV(t *testing.T) {
+	b := New()
+	assert.Equal(t, int64(0), b.ChunkSize(), "WebDAV ChunkSize must be 0")
+}
+
 // TestReconnect verifies the Connect → Disconnect → Connect lifecycle.
 func TestReconnect(t *testing.T) {
 	serverURL, cleanup := newTestServer(t)

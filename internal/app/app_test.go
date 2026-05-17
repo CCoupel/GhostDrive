@@ -930,8 +930,11 @@ func TestGetSyncState_ConnectErrorCleared_ReturnsIdle(t *testing.T) {
 		"cleared backend must not appear in Backends (#117)")
 }
 
-// TestStartup_MigratesMountPoint verifies that Startup() assigns a MountPoint
-// to backends that were created before v1.1.x (MountPoint was empty) (#88).
+// TestStartup_MigratesMountPoint verifies that Startup() assigns a global
+// AppConfig.MountPoint when the persisted config had an empty value.
+// In v2.0 a single unified drive is mounted at AppConfig.MountPoint; every
+// backend is exposed as a sub-folder of that drive.  Per-backend MountPoint
+// fields are no longer used for drive mounting (#88, v2.0).
 func TestStartup_MigratesMountPoint(t *testing.T) {
 	baseDir := t.TempDir()
 	ghostRoot := filepath.Join(baseDir, "GhostDrive")
@@ -942,9 +945,10 @@ func TestStartup_MigratesMountPoint(t *testing.T) {
 
 	syncDir := filepath.Join(ghostRoot, "LegacyBackend")
 
-	// Write a config with a backend that has no MountPoint (pre-v1.1.x).
+	// Write a config with an empty global MountPoint (pre-v2.0 legacy config).
 	testCfg := config.DefaultConfig()
 	testCfg.GhostDriveRoot = ghostRoot
+	testCfg.MountPoint = "" // missing — v2.0 migration must assign one
 	testCfg.Backends = []plugins.BackendConfig{
 		{
 			ID:         "legacy-id",
@@ -954,7 +958,7 @@ func TestStartup_MigratesMountPoint(t *testing.T) {
 			LocalPath:  syncDir,
 			SyncDir:    syncDir,
 			RemotePath: "/remote",
-			MountPoint: "", // missing — migration must assign one
+			MountPoint: "",
 			Params:     map[string]string{"rootPath": rootPath},
 		},
 	}
@@ -969,19 +973,14 @@ func TestStartup_MigratesMountPoint(t *testing.T) {
 		descriptors:  make(map[string]plugins.PluginDescriptor),
 	}
 
-	// Startup triggers MountPoint migration.
+	// Startup triggers v2.0 global MountPoint migration.
 	a.Startup(nil)
 
-	// After Startup, the backend must have a non-empty MountPoint.
+	// After Startup, AppConfig.MountPoint must be non-empty.
+	// On Linux AssignAvailableLetter returns "E:" (no OS check).
+	// On Windows it may return any available letter ≥ "E:".
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	for _, b := range a.cfg.Backends {
-		if b.ID == "legacy-id" {
-			// On Linux AssignAvailableLetter returns "E:" (no OS check).
-			// On Windows it may return any available letter.
-			// Either way it must not be empty after migration.
-			assert.NotEmpty(t, b.MountPoint,
-				"Startup must migrate empty MountPoint to a non-empty value (#88)")
-		}
-	}
+	assert.NotEmpty(t, a.cfg.MountPoint,
+		"Startup must migrate empty AppConfig.MountPoint to a non-empty value (v2.0)")
 }

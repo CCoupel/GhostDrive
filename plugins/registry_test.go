@@ -34,6 +34,10 @@ func (s *stubBackend) Watch(_ context.Context, _ string) (<-chan FileEvent, erro
 	return nil, nil
 }
 func (s *stubBackend) GetQuota(_ context.Context) (int64, int64, error) { return -1, -1, nil }
+func (s *stubBackend) ReadAt(_ context.Context, _ string, _, _ int64) ([]byte, error) {
+	return nil, nil
+}
+func (s *stubBackend) ChunkSize() int64 { return 0 }
 func (s *stubBackend) Describe() PluginDescriptor {
 	return PluginDescriptor{Type: s.name}
 }

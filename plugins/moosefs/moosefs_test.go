@@ -1744,3 +1744,59 @@ func TestReconnect_singleflight(t *testing.T) {
 	// Backend must be connected after all goroutines finish.
 	assert.True(t, b.IsConnected(), "backend must be connected after singleflight reconnect")
 }
+
+
+// ─── ReadAt (#121) ────────────────────────────────────────────────────────────
+
+// TestReadAt_Success uploads a file via the fake MooseFS server and reads a
+// slice of it back using ReadAt.  The fake CS server supports chunk reads.
+func TestReadAt_Success(t *testing.T) {
+	b := newTestBackend(t, startFakeServer(t))
+	ctx := context.Background()
+
+	content := []byte("Hello MooseFS ReadAt World!")
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/readat.txt", nil))
+
+	// Read bytes [6:13) → "MooseFS"
+	data, err := b.ReadAt(ctx, "/readat.txt", 6, 7)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("MooseFS"), data)
+}
+
+// TestReadAt_FullFile verifies that ReadAt with offset=0 returns the full content.
+func TestReadAt_FullFile(t *testing.T) {
+	b := newTestBackend(t, startFakeServer(t))
+	ctx := context.Background()
+
+	content := []byte("full moosefs read content")
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/full.txt", nil))
+
+	data, err := b.ReadAt(ctx, "/full.txt", 0, int64(len(content)))
+	require.NoError(t, err)
+	assert.Equal(t, content, data)
+}
+
+// TestReadAt_NotConnected verifies that ReadAt returns ErrNotConnected when
+// the backend is not connected.
+func TestReadAt_NotConnected(t *testing.T) {
+	b := New()
+	_, err := b.ReadAt(context.Background(), "/file.txt", 0, 10)
+	assert.ErrorIs(t, err, plugins.ErrNotConnected)
+}
+
+// TestReadAt_FileNotFound verifies that ReadAt returns an error for a path
+// that does not exist on the backend.
+func TestReadAt_FileNotFound(t *testing.T) {
+	b := newTestBackend(t, startFakeServer(t))
+	_, err := b.ReadAt(context.Background(), "/nonexistent.txt", 0, 10)
+	assert.Error(t, err, "ReadAt on missing file must return an error")
+}
+
+// TestChunkSize_MooseFS verifies that MooseFS ChunkSize() returns 64 MiB.
+func TestChunkSize_MooseFS(t *testing.T) {
+	b := New()
+	assert.Equal(t, int64(67_108_864), b.ChunkSize(),
+		"MooseFS ChunkSize must be 64 MiB (67108864)")
+}

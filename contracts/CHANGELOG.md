@@ -5,6 +5,35 @@ Les changements **BREAKING** doivent être validés par le CDP avant implémenta
 
 ---
 
+## [20260517] — v2.0 VFS Foundation (#120 #121)
+
+- **[BREAKING]** `StorageBackend` interface — ajout de `ReadAt(ctx, remote, offset, length) ([]byte, error)` : tout plugin tiers doit l'implémenter pour compiler
+- **[BREAKING]** `StorageBackend` interface — ajout de `ChunkSize() int64` : tout plugin tiers doit l'implémenter pour compiler
+- **[BREAKING]** Drive WinFsp — architecture "un drive par backend" supprimée ; remplacée par un drive unique `GhD:` (configurable via `AppConfig.MountPoint`) avec un sous-dossier par backend
+- **[BREAKING]** `GetDriveStatuses()` — retourne désormais une seule entrée `"unified"` au lieu d'une entrée par backendID
+- **[NEW]** `rpc ReadAt (ReadAtRequest) returns (ReadAtResponse)` — RPC gRPC pour les range reads
+- **[NEW]** `rpc ChunkSize (ChunkSizeRequest) returns (ChunkSizeResponse)` — RPC gRPC retournant la granularité naturelle du backend
+- **[NEW]** `DriveManager.MountUnified(mountPoint, backends)` — monte le drive unifié GhD:
+- **[NEW]** `DriveManager.UpdateBackends(backends)` — met à jour la liste de backends sans remonter le drive
+- **[NEW]** `DriveStatus.BackendPaths` — mappe chaque backendID vers son chemin sous GhD: (ex: `"G:\\MonNAS\\"`)
+- **[CHANGED]** `BackendConfig.MountPoint` — déprécié ; ignoré par la couche VFS v2.0 (conservé pour compatibilité JSON)
+- **[CHANGED]** `AppConfig.MountPoint` — promu au rôle de point de montage global du drive unifié ; défaut `"G:"`
+- **[NEW]** Contrat `contracts/v2.0-vfs-foundation.md` — spécification complète
+
+---
+
+## [20260516] — v1.8.0 / #114 EC4+1 MooseFS Go
+
+- **[CHANGED]** `ChunkInfo.ECParts int` — nouveau champ interne (non-breaking, rétrocompatible)
+  Positionné par `parseChunkInfo` quand proto=3 ; 0 pour chunks normaux
+- **[CHANGED]** `parseChunkInfo` proto=3 — ne retourne plus d'erreur ; set `ECParts=4` ou `ECParts=8`
+  (rétrocompatible : les chunks normaux proto=0/1/2 sont inchangés)
+- **[NEW]** `ECPhysicalChunkID(logicalID uint64, partIdx int) uint64` — fonction interne mfsclient
+- **[NEW]** `(c *Client) readEC4At(...)` — lecture shard-granulaire EC4+1 (interne)
+- **[INTERNAL]** Constantes `EC4ECIDStart`, `EC4ECIDStep`, `EC8ECIDStart` ajoutées dans protocol.go
+
+---
+
 ## [20260513] — v1.7.0 / #108 #109 #110
 
 - **[BREAKING]** `GetDriveStatus()` — binding Wails supprimé (remplacé par `GetDriveStatuses()` depuis v1.1.x) ; le tray migre vers `GetDriveStatuses()` avec agrégation `LastError`

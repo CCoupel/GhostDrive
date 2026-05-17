@@ -348,4 +348,20 @@ type StorageBackend interface {
 	// (-1, -1, nil) rather than an error.
 	// Pre-condition: IsConnected() == true, else returns 0, 0, ErrNotConnected.
 	GetQuota(ctx context.Context) (free, total int64, err error)
+
+	// ── Range reads ──────────────────────────────────────────────────────────
+
+	// ReadAt reads up to length bytes from the remote file at the given byte
+	// offset.  Returns the bytes read; len(data) may be less than length only
+	// on EOF.  Used for range-reads enabling progressive hydration and chunk
+	// caching.
+	// Returns ErrFileNotFound (wrapped) when remote does not exist.
+	// Pre-condition: IsConnected() == true, else returns nil, ErrNotConnected.
+	ReadAt(ctx context.Context, remote string, offset, length int64) ([]byte, error)
+
+	// ChunkSize returns the natural I/O granularity for this backend in bytes.
+	// The chunk cache aligns range reads to this boundary.
+	// Returns 0 to request use of the global default chunk size.
+	// Immutable; may be called before Connect; must not perform I/O.
+	ChunkSize() int64
 }

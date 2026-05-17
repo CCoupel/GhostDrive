@@ -245,6 +245,24 @@ func (s *GRPCBackendServer) GetQuota(ctx context.Context, _ *storagepb.QuotaRequ
 	return &storagepb.QuotaResponse{Free: free, Total: total}, nil
 }
 
+// ── Range reads ───────────────────────────────────────────────────────────────
+
+// ReadAt implements the ReadAt RPC: reads up to req.Length bytes from the
+// remote file at req.Offset and returns them in the response Data field.
+func (s *GRPCBackendServer) ReadAt(ctx context.Context, req *storagepb.ReadAtRequest) (*storagepb.ReadAtResponse, error) {
+	data, err := s.Impl.ReadAt(ctx, req.GetRemotePath(), req.GetOffset(), req.GetLength())
+	if err != nil {
+		return nil, mapBackendError(err)
+	}
+	return &storagepb.ReadAtResponse{Data: data}, nil
+}
+
+// ChunkSize implements the ChunkSize RPC: returns the backend's natural I/O
+// granularity so the client can align chunk-cache reads accordingly.
+func (s *GRPCBackendServer) ChunkSize(_ context.Context, _ *storagepb.ChunkSizeRequest) (*storagepb.ChunkSizeResponse, error) {
+	return &storagepb.ChunkSizeResponse{ChunkSize: s.Impl.ChunkSize()}, nil
+}
+
 // ── Describe ─────────────────────────────────────────────────────────────────
 
 // Describe returns the plugin's static descriptor. Callable before Connect.

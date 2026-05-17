@@ -25,3 +25,6 @@ func (n *NullDrive) Status() DriveStatus { return DriveStatus{} }
 
 // SetEmitter is a no-op on non-Windows platforms; WinFsp is unavailable.
 func (n *NullDrive) SetEmitter(_ syncdispatch.EventEmitter) {}
+
+// UpdateBackends always returns ErrNotSupported on non-Windows platforms.
+func (n *NullDrive) UpdateBackends(_ []MountedBackend) error { return ErrNotSupported }

@@ -26,32 +26,70 @@ func newRouterFS() *GhostFileSystem {
 	}, nil)
 }
 
-func TestRoute_Root_ReturnsBackend(t *testing.T) {
+// ── v2.0 routing tests ────────────────────────────────────────────────────────
+// In v2.0 the drive root is a virtual listing; every backend is exposed under
+// its own named sub-folder (/<BackendName>/...).
+
+// TestRoute_Root_ReturnsNil verifies that route("/") returns nil because the
+// virtual root is handled by callers (Getattr / Readdir) before route() is called.
+func TestRoute_Root_ReturnsNil(t *testing.T) {
 	fs := newRouterFS()
-	r := fs.route("/")
-	require.NotNil(t, r)
-	assert.Equal(t, "/", r.relPath)
+	assert.Nil(t, fs.route("/"), "route('/') must return nil in v2.0 (virtual root)")
 }
 
-func TestRoute_DirectPath(t *testing.T) {
+// TestRoute_BackendRoot verifies that route("/<name>") maps to the backend with
+// relPath="/", stripping the backend-name prefix.
+func TestRoute_BackendRoot(t *testing.T) {
 	fs := newRouterFS()
 	r := fs.route("/NAS")
 	require.NotNil(t, r)
-	assert.Equal(t, "/NAS", r.relPath)
+	assert.Equal(t, "/", r.relPath, "route('/<name>') must yield relPath='/'")
 }
 
-func TestRoute_SubPath(t *testing.T) {
+// TestRoute_BackendSubPath verifies that route("/<name>/sub/path") strips the
+// backend name and returns the remainder as relPath.
+func TestRoute_BackendSubPath(t *testing.T) {
 	fs := newRouterFS()
 	r := fs.route("/NAS/docs/file.txt")
 	require.NotNil(t, r)
-	assert.Equal(t, "/NAS/docs/file.txt", r.relPath)
+	assert.Equal(t, "/docs/file.txt", r.relPath, "sub-path must strip the backend name prefix")
 }
 
-func TestRoute_AnyPath_ReturnsSingleBackend(t *testing.T) {
+// TestRoute_UnknownBackend verifies that an unrecognised first path segment
+// returns nil (→ ENOENT to FUSE).
+func TestRoute_UnknownBackend(t *testing.T) {
 	fs := newRouterFS()
-	r := fs.route("/anything/path")
-	require.NotNil(t, r, "single backend: any path must route")
-	assert.Equal(t, "/anything/path", r.relPath)
+	assert.Nil(t, fs.route("/unknown/path"), "unknown backend name must return nil")
+	assert.Nil(t, fs.route("/anything"), "unknown backend name (root only) must return nil")
+}
+
+// TestRoute_MultiBackend_Dispatch verifies that a two-backend filesystem routes
+// each path to the correct backend instance.
+func TestRoute_MultiBackend_Dispatch(t *testing.T) {
+	b1 := &mockBackend{}
+	b2 := &mockBackend{}
+	fs := newGhostFileSystem([]MountedBackend{
+		{ID: "n1", Name: "NAS1", Backend: b1, Config: plugins.BackendConfig{ID: "n1", Name: "NAS1"}},
+		{ID: "n2", Name: "WebDAV", Backend: b2, Config: plugins.BackendConfig{ID: "n2", Name: "WebDAV"}},
+	}, nil)
+
+	r1 := fs.route("/NAS1/data/file.txt")
+	require.NotNil(t, r1, "NAS1 path must be routed")
+	assert.Equal(t, b1, r1.backend, "/NAS1/... must route to b1")
+	assert.Equal(t, "/data/file.txt", r1.relPath)
+
+	r2 := fs.route("/WebDAV/docs")
+	require.NotNil(t, r2, "WebDAV path must be routed")
+	assert.Equal(t, b2, r2.backend, "/WebDAV/... must route to b2")
+	assert.Equal(t, "/docs", r2.relPath)
+}
+
+// TestRoute_CaseInsensitive verifies that backend-name matching is case-insensitive.
+func TestRoute_CaseInsensitive(t *testing.T) {
+	fs := newRouterFS()
+	r := fs.route("/nas/file.txt") // "nas" vs registered "NAS"
+	require.NotNil(t, r, "route must be case-insensitive for backend name")
+	assert.Equal(t, "/file.txt", r.relPath)
 }
 
 func TestRoute_EmptyFileSystem_ReturnsNil(t *testing.T) {
@@ -77,7 +115,10 @@ func TestGhostFS_DesktopIni_Getattr_CaseInsensitive(t *testing.T) {
 	assert.Equal(t, 0, ret, "Getattr /Desktop.ini must be case-insensitive")
 }
 
-func TestGhostFS_Readdir_Root_ContainsVirtualFiles(t *testing.T) {
+// TestGhostFS_Readdir_Root_ListsBackendDirs verifies that Readdir("/") returns:
+//   - virtual drive files (desktop.ini, ghostdrive.ico)
+//   - one S_IFDIR entry per registered backend (v2.0)
+func TestGhostFS_Readdir_Root_ListsBackendDirs(t *testing.T) {
 	fs := newRouterFS()
 	var names []string
 	fill := func(name string, _ *fuse.Stat_t, _ int64) bool {
@@ -88,8 +129,8 @@ func TestGhostFS_Readdir_Root_ContainsVirtualFiles(t *testing.T) {
 	assert.Equal(t, 0, ret)
 	assert.Contains(t, names, "desktop.ini")
 	assert.Contains(t, names, "ghostdrive.ico")
-	// Backend name must no longer appear as a subfolder at the drive root.
-	assert.NotContains(t, names, "NAS")
+	// v2.0: backend name must appear as a virtual sub-directory at the drive root.
+	assert.Contains(t, names, "NAS", "backend name must be listed as a subfolder in v2.0")
 }
 
 func TestGhostFS_DesktopIni_Content(t *testing.T) {
@@ -151,6 +192,25 @@ type statErrBackend struct {
 
 func (m *statErrBackend) Stat(_ context.Context, _ string) (*plugins.FileInfo, error) {
 	return nil, m.statErr
+}
+
+// TestGetattr_BackendVirtualDir verifies that Getattr("/<backendName>") returns
+// S_IFDIR without calling any backend — it's a virtual directory in v2.0.
+func TestGetattr_BackendVirtualDir(t *testing.T) {
+	fs := newRouterFS()
+	var stat fuse.Stat_t
+	ret := fs.Getattr("/NAS", &stat, 0)
+	assert.Equal(t, 0, ret, "Getattr '/<backendName>' must succeed")
+	assert.Equal(t, uint32(fuse.S_IFDIR|0755), stat.Mode, "backend virtual dir must be S_IFDIR|0755")
+}
+
+// TestGetattr_UnknownFirstSegment_ReturnsENOENT verifies that Getattr of an
+// unknown first-level path component returns ENOENT.
+func TestGetattr_UnknownFirstSegment_ReturnsENOENT(t *testing.T) {
+	fs := newRouterFS()
+	var stat fuse.Stat_t
+	ret := fs.Getattr("/unknown", &stat, 0)
+	assert.Equal(t, -fuse.ENOENT, ret, "unknown first segment must return ENOENT")
 }
 
 func TestGhostFS_Getattr_ErrFileNotFound_ReturnsENOENT(t *testing.T) {

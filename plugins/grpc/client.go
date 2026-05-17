@@ -337,6 +337,35 @@ func (b *GRPCBackend) GetQuota(ctx context.Context) (free, total int64, err erro
 	return resp.GetFree(), resp.GetTotal(), nil
 }
 
+// ── Range reads ───────────────────────────────────────────────────────────────
+
+// ReadAt implements plugins.StorageBackend.
+// Delegates to the remote plugin's ReadAt RPC.
+func (b *GRPCBackend) ReadAt(ctx context.Context, remote string, offset, length int64) ([]byte, error) {
+	resp, err := b.client.ReadAt(ctx, &storagepb.ReadAtRequest{
+		RemotePath: remote,
+		Offset:     offset,
+		Length:     length,
+	})
+	if err != nil {
+		return nil, mapGRPCError("grpc: ReadAt", err)
+	}
+	if resp.GetError() != "" {
+		return nil, fmt.Errorf("grpc: ReadAt: %s", resp.GetError())
+	}
+	return resp.GetData(), nil
+}
+
+// ChunkSize implements plugins.StorageBackend.
+// Delegates to the remote plugin's ChunkSize RPC.
+func (b *GRPCBackend) ChunkSize() int64 {
+	resp, err := b.client.ChunkSize(context.Background(), &storagepb.ChunkSizeRequest{})
+	if err != nil {
+		return 0
+	}
+	return resp.GetChunkSize()
+}
+
 // ── Describe ─────────────────────────────────────────────────────────────────
 
 // Describe implements plugins.StorageBackend.

@@ -180,6 +180,11 @@ func (m *mockBackend) GetQuota(_ context.Context) (free, total int64, err error)
 	return 1000, 2000, nil
 }
 
+func (m *mockBackend) ReadAt(_ context.Context, _ string, _, _ int64) ([]byte, error) {
+	return nil, nil
+}
+func (m *mockBackend) ChunkSize() int64 { return 0 }
+
 func (m *mockBackend) Describe() plugins.PluginDescriptor {
 	return plugins.PluginDescriptor{Type: "mock", DisplayName: "Mock Backend (test)"}
 }

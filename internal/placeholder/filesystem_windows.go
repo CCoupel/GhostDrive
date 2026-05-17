@@ -213,6 +213,23 @@ func (fs *GhostFileSystem) Getattr(path string, stat *fuse.Stat_t, _ uint64) int
 		return 0
 	}
 
+	// Virtual backend root directory: "/<backendName>" maps to a synthetic
+	// S_IFDIR that does not exist on the backend itself.
+	// This check runs before route() so that Getattr("/<name>") always
+	// returns a valid directory stat even before any file inside it is listed.
+	trimmed := strings.TrimLeft(path, "/")
+	if !strings.Contains(trimmed, "/") && trimmed != "" {
+		for _, mb := range fs.backends {
+			if strings.EqualFold(mb.Name, trimmed) {
+				stat.Mode = fuse.S_IFDIR | 0755
+				stat.Nlink = 2
+				stat.Atim, stat.Mtim, stat.Ctim = now, now, now
+				return 0
+			}
+		}
+		// Unknown first-level name — fall through to backend or ENOENT.
+	}
+
 	r := fs.route(path)
 	if r == nil {
 		return -fuse.ENOENT
@@ -267,7 +284,9 @@ func (fs *GhostFileSystem) Readdir(path string,
 	fill(".", nil, 0)
 	fill("..", nil, 0)
 
-	// Root lists virtual files plus the backend's own root content.
+	// Root lists virtual files plus one synthetic sub-directory per backend.
+	// In v2.0 the drive root never exposes backend file contents directly;
+	// every backend is accessible under its own named sub-folder.
 	if path == "/" {
 		now := nowTs()
 		// Virtual desktop.ini and ghostdrive.ico for Windows Explorer drive icon.
@@ -279,27 +298,11 @@ func (fs *GhostFileSystem) Readdir(path string,
 		icoSt := &fuse.Stat_t{Mode: fuse.S_IFREG | 0444, Nlink: 1, Size: int64(len(driveIconICO))}
 		icoSt.Atim, icoSt.Mtim, icoSt.Ctim = now, now, now
 		fill("ghostdrive.ico", icoSt, 0)
-		if len(fs.backends) == 0 {
-			return 0
-		}
-		entries, err := fs.backends[0].Backend.List(context.Background(), "/")
-		if err != nil {
-			logger.Error("placeholder: Readdir /: %v", err)
-			return -fuse.EIO
-		}
-		for _, e := range entries {
-			st := &fuse.Stat_t{}
-			mts := tsFromTime(e.ModTime)
-			if e.IsDir {
-				st.Mode = fuse.S_IFDIR | 0755
-				st.Nlink = 2
-			} else {
-				st.Mode = fuse.S_IFREG | 0644
-				st.Nlink = 1
-				st.Size = e.Size
-			}
-			st.Atim, st.Mtim, st.Ctim = mts, mts, now
-			if !fill(e.Name, st, 0) {
+		// One virtual S_IFDIR per registered backend.
+		for _, mb := range fs.backends {
+			dirSt := &fuse.Stat_t{Mode: fuse.S_IFDIR | 0755, Nlink: 2}
+			dirSt.Atim, dirSt.Mtim, dirSt.Ctim = now, now, now
+			if !fill(mb.Name, dirSt, 0) {
 				break
 			}
 		}
@@ -708,12 +711,9 @@ func (fs *GhostFileSystem) Mkdir(path string, _ uint32) int {
 	return 0
 }
 
-func (fs *GhostFileSystem) Statfs(path string, stat *fuse.Statfs_t) int {
+func (fs *GhostFileSystem) Statfs(_ string, stat *fuse.Statfs_t) int {
 	if len(fs.backends) == 0 {
-		return -fuse.EIO
-	}
-	free, total, err := fs.backends[0].Backend.GetQuota(context.Background())
-	if err != nil || total == 0 {
+		// No backends: report a large but finite virtual filesystem.
 		stat.Bsize = 4096
 		stat.Frsize = 4096
 		stat.Blocks = 1 << 40 / 4096
@@ -721,11 +721,34 @@ func (fs *GhostFileSystem) Statfs(path string, stat *fuse.Statfs_t) int {
 		stat.Bavail = stat.Bfree
 		return 0
 	}
+
+	// Aggregate free/total across all backends.
+	var totalFree, totalTotal int64
+	anyValid := false
+	for _, mb := range fs.backends {
+		free, total, err := mb.Backend.GetQuota(context.Background())
+		if err != nil || total <= 0 {
+			continue
+		}
+		totalFree += free
+		totalTotal += total
+		anyValid = true
+	}
+
+	if !anyValid {
+		stat.Bsize = 4096
+		stat.Frsize = 4096
+		stat.Blocks = 1 << 40 / 4096
+		stat.Bfree = 1 << 39 / 4096
+		stat.Bavail = stat.Bfree
+		return 0
+	}
+
 	bsize := uint64(4096)
 	stat.Bsize = bsize
 	stat.Frsize = bsize
-	stat.Blocks = uint64(total) / bsize
-	stat.Bfree = uint64(free) / bsize
+	stat.Blocks = uint64(totalTotal) / bsize
+	stat.Bfree = uint64(totalFree) / bsize
 	stat.Bavail = stat.Bfree
 	return 0
 }

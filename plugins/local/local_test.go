@@ -521,3 +521,44 @@ func TestGetQuota_NotConnected(t *testing.T) {
 	assert.Equal(t, int64(0), free)
 	assert.Equal(t, int64(0), total)
 }
+
+// ─── ReadAt (#121) ────────────────────────────────────────────────────────────
+
+func TestReadAt_Success(t *testing.T) {
+	b, dir := newConnected(t)
+	content := []byte("Hello, World! ReadAt test.")
+	path := filepath.Join(dir, "readat.txt")
+	require.NoError(t, os.WriteFile(path, content, 0644))
+
+	// Read bytes [7:12) → "World"
+	data, err := b.ReadAt(context.Background(), "/readat.txt", 7, 5)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("World"), data)
+}
+
+func TestReadAt_FullFile(t *testing.T) {
+	b, dir := newConnected(t)
+	content := []byte("full content here")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "full.txt"), content, 0644))
+
+	data, err := b.ReadAt(context.Background(), "/full.txt", 0, int64(len(content)))
+	require.NoError(t, err)
+	assert.Equal(t, content, data)
+}
+
+func TestReadAt_NotConnected(t *testing.T) {
+	b := New()
+	_, err := b.ReadAt(context.Background(), "/file.txt", 0, 10)
+	assert.ErrorIs(t, err, plugins.ErrNotConnected)
+}
+
+func TestReadAt_FileNotFound(t *testing.T) {
+	b, _ := newConnected(t)
+	_, err := b.ReadAt(context.Background(), "/nonexistent.txt", 0, 10)
+	assert.Error(t, err, "ReadAt on missing file must return an error")
+}
+
+func TestChunkSize_Local(t *testing.T) {
+	b := New()
+	assert.Equal(t, int64(0), b.ChunkSize(), "local backend ChunkSize must be 0")
+}

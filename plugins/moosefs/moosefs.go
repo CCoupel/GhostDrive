@@ -1065,3 +1065,41 @@ func (b *Backend) GetQuota(_ context.Context) (free, total int64, err error) {
 	logger.Error("getquota: free=%d total=%d err=%v", free, total, ErrNotConnected)
 	return 0, 0, ErrNotConnected
 }
+
+// ─── Range reads ──────────────────────────────────────────────────────────────
+
+// moosefsChunkSize is the native chunk size of MooseFS (64 MiB).
+const moosefsChunkSize = 67_108_864
+
+// ReadAt reads up to length bytes from the remote file at the given byte offset
+// using the mfsclient Read primitive (native chunk-aware I/O).
+// Returns ErrFileNotFound (wrapped) when remote does not exist.
+// Pre-condition: IsConnected() == true, else returns nil, ErrNotConnected.
+func (b *Backend) ReadAt(ctx context.Context, remote string, offset, length int64) ([]byte, error) {
+	connected, c, subDir := b.state()
+	if !connected {
+		return nil, ErrNotConnected
+	}
+
+	nodeID, err := resolvePath(ctx, c, subDir, remote)
+	if err != nil {
+		return nil, fmt.Errorf("moosefs: readAt %s: %w", remote, err)
+	}
+
+	if length <= 0 {
+		return []byte{}, nil
+	}
+
+	// Clamp to uint32 per mfsclient API; caller is responsible for chunking.
+	size := uint32(length)
+	data, err := c.Read(nodeID, uint64(offset), size)
+	if err != nil {
+		return nil, fmt.Errorf("moosefs: readAt %s offset=%d: %w", remote, offset, err)
+	}
+	return data, nil
+}
+
+// ChunkSize returns 67_108_864 (64 MiB) — the native chunk size of MooseFS.
+// The chunk cache should align range reads to this boundary for optimal
+// performance on MooseFS chunk servers.
+func (b *Backend) ChunkSize() int64 { return moosefsChunkSize }

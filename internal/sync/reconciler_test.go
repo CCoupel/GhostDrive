@@ -109,6 +109,10 @@ func (m *mockBackend) Watch(_ context.Context, _ string) (<-chan plugins.FileEve
 }
 
 func (m *mockBackend) GetQuota(_ context.Context) (int64, int64, error) { return -1, -1, nil }
+func (m *mockBackend) ReadAt(_ context.Context, _ string, _, _ int64) ([]byte, error) {
+	return nil, nil
+}
+func (m *mockBackend) ChunkSize() int64 { return 0 }
 
 func (m *mockBackend) Describe() plugins.PluginDescriptor {
 	return plugins.PluginDescriptor{Type: "mock"}

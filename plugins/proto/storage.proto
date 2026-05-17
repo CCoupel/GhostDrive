@@ -139,6 +139,32 @@ message QuotaResponse {
   string error = 3;
 }
 
+// ─── ReadAt (range read, unary) ───────────────────────────────────────────────
+
+// ReadAtRequest initiates a ReadAt RPC.
+message ReadAtRequest {
+  string remote_path = 1;
+  int64  offset      = 2;
+  int64  length      = 3;
+}
+
+// ReadAtResponse carries the bytes read and an optional error string.
+message ReadAtResponse {
+  bytes  data  = 1;  // bytes read; len(data) may be less than length on EOF
+  string error = 2;  // non-empty on terminal error
+}
+
+// ─── ChunkSize ────────────────────────────────────────────────────────────────
+
+// ChunkSizeRequest has no fields; it is a capability query.
+message ChunkSizeRequest {}
+
+// ChunkSizeResponse returns the natural I/O granularity of the backend in bytes.
+// Returns 0 when the backend has no native chunk size (use global default).
+message ChunkSizeResponse {
+  int64 chunk_size = 1;  // 0 = use global default
+}
+
 // ─── Describe ────────────────────────────────────────────────────────────────
 // Fields 20–27 are used for Describe messages to avoid conflicts with the
 // reserve 10–19 declared in BackendConfigProto.
@@ -197,4 +223,8 @@ service StorageService {
 
   // Plugin introspection — callable before Connect
   rpc Describe  (DescribeRequest)       returns (DescribeResponse);
+
+  // Range reads (v2.0 — issue #121)
+  rpc ReadAt    (ReadAtRequest)         returns (ReadAtResponse);
+  rpc ChunkSize (ChunkSizeRequest)      returns (ChunkSizeResponse);
 }

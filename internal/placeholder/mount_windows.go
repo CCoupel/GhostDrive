@@ -24,6 +24,7 @@ type WinFspDrive struct {
 	lastError   string // last error from Mount/Unmount; empty if no error
 	backends    []MountedBackend
 	host        *fuse.FileSystemHost
+	fs          *GhostFileSystem // live filesystem instance; set by Mount, accessed by UpdateBackends
 	done        chan struct{}
 	emitter     syncdispatch.EventEmitter
 	watchCancel context.CancelFunc // cancels the watchLoop goroutines on Unmount
@@ -137,15 +138,16 @@ func (d *WinFspDrive) Mount(mountPoint string, backends []MountedBackend) error 
 	d.watchCancel = watchCancel
 
 	d.host = host
+	d.fs = fs   // stored for UpdateBackends (v2.0)
 	d.mountPoint = mountPoint
 	d.backends = backends
 	d.done = make(chan struct{})
 	d.lastError = "" // clear on successful mount start
 
-	volName := "GhostDrive"
-	if len(backends) > 0 && backends[0].Name != "" {
-		volName = backends[0].Name
-	}
+	// v2.0: volname is always "GhostDrive" for the unified drive.
+	// The previous behaviour (backends[0].Name) would yield confusing drive
+	// names when multiple backends are mounted under the same drive letter.
+	const volName = "GhostDrive"
 
 	go func() {
 		defer close(d.done)
@@ -208,6 +210,7 @@ func (d *WinFspDrive) Unmount() error {
 		d.mountPoint = ""
 		d.backends = nil
 		d.host = nil
+		d.fs = nil
 		d.done = nil
 		d.watchCancel = nil
 		d.lastError = "winfsp: unmount timed out"
@@ -223,6 +226,7 @@ func (d *WinFspDrive) Unmount() error {
 	d.mountPoint = ""
 	d.backends = nil
 	d.host = nil
+	d.fs = nil
 	d.done = nil
 	d.watchCancel = nil
 	d.lastError = "" // clear on clean unmount
@@ -242,25 +246,56 @@ func (d *WinFspDrive) IsMounted() bool {
 }
 
 // Status returns the current drive status, including any last error.
+// In v2.0, BackendPaths maps each backendID to its sub-folder path under the
+// unified drive mount point (e.g. "G:\MonNAS\").
 func (d *WinFspDrive) Status() DriveStatus {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	paths := make(map[string]string, len(d.backends))
 	if d.mounted {
+		// Normalise bare drive letters ("G:") to "G:\" so sub-paths are unambiguous.
+		base := d.mountPoint
+		if len(base) == 2 && base[1] == ':' {
+			base = base + `\`
+		}
 		for _, mb := range d.backends {
-			// Normalise bare drive letters ("G:") to "G:\" so the path is unambiguous.
-			base := d.mountPoint
-			if len(base) == 2 && base[1] == ':' {
-				base = base + `\`
-			}
-			paths[mb.ID] = base
+			// Each backend is accessible as <mountPoint>\<backendName>\
+			paths[mb.ID] = base + mb.Name + `\`
 		}
 	}
 	return DriveStatus{
 		Mounted:      d.mounted,
 		MountPoint:   d.mountPoint,
+		BackendName:  "GhostDrive",
+		BackendID:    "unified",
 		BackendPaths: paths,
 		LastError:    d.lastError,
 	}
+}
+
+// UpdateBackends atomically replaces the list of mounted backends without
+// remounting the drive.  The GhostFileSystem will immediately see the new
+// list in Readdir("/") and route().
+// Returns an error if the drive is not mounted.
+func (d *WinFspDrive) UpdateBackends(backends []MountedBackend) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if !d.mounted {
+		return fmt.Errorf("winfsp: UpdateBackends: drive is not mounted")
+	}
+
+	// Update WinFspDrive's own record.
+	d.backends = backends
+
+	// Propagate to the live GhostFileSystem so route() and Readdir("/") pick
+	// up the new list on the very next FUSE dispatch cycle.
+	if d.fs != nil {
+		d.fs.mu.Lock()
+		d.fs.backends = backends
+		d.fs.mu.Unlock()
+	}
+
+	return nil
 }

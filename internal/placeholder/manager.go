@@ -51,15 +51,23 @@ type driveEntry struct {
 	syncError string // runtime sync error from engine events; managed by SetSyncError (#117b)
 }
 
+// unifiedDriveKey is the fixed map key used for the v2.0 unified drive in the
+// drives map, replacing the per-backendID approach from v1.1.x.
+const unifiedDriveKey = "unified"
+
 // DriveManager manages a pool of per-backend VirtualDrives keyed by backendID.
 // Thread-safe: all public methods acquire mu.
+//
+// In v2.0 the preferred API is MountUnified / UpdateBackends / UnmountUnified /
+// GetUnifiedStatus.  The v1.1.x API (Mount / Unmount / GetStatus / GetAllStatuses)
+// is preserved as deprecated wrappers that delegate to the unified drive.
 //
 // Design constraints:
 //   - EventEmitter: used by GhostFileSystem.watchLoop to emit "meta:updated" events.
 //   - No Wails dependency: the placeholder package must not import the Wails runtime.
 type DriveManager struct {
 	mu      sync.RWMutex
-	drives  map[string]driveEntry // keyed by backendID
+	drives  map[string]driveEntry // keyed by backendID (v1 legacy) or "unified" (v2)
 	emitter syncdispatch.EventEmitter
 }
 
@@ -208,6 +216,102 @@ func (dm *DriveManager) AssignAvailableLetter(usedLetters []string) string {
 		return letter
 	}
 	return ""
+}
+
+// ── v2.0 Unified Drive API ────────────────────────────────────────────────────
+
+// MountUnified mounts (or re-mounts) the single unified GhD: virtual drive at
+// mountPoint, exposing all provided backends as sub-folders.
+//
+// If a unified drive already exists it is unmounted first (best-effort; errors
+// are logged but not returned so recovery is always attempted).
+//
+// On non-Windows platforms the underlying drive returns ErrNotSupported — this
+// is treated as a warning; the caller should log but not treat as fatal.
+func (dm *DriveManager) MountUnified(mountPoint string, backends []MountedBackend) error {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	// Unmount and discard any existing unified drive.
+	if existing, ok := dm.drives[unifiedDriveKey]; ok {
+		_ = existing.drive.Unmount() // best-effort
+		delete(dm.drives, unifiedDriveKey)
+	}
+
+	drive := New()
+	// Use a unified per-backend emitter that bridges sync reachability events
+	// to the DriveManager.  For the unified drive we use the "unified" ID as
+	// the backendID in SetSyncError so GetUnifiedStatus() reflects it.
+	unifiedEmitter := &driveBackendEmitter{
+		backendID: unifiedDriveKey,
+		dm:        dm,
+		base:      dm.emitter,
+	}
+	drive.SetEmitter(unifiedEmitter)
+
+	if err := drive.Mount(mountPoint, backends); err != nil {
+		return fmt.Errorf("drivemanager: MountUnified at %q: %w", mountPoint, err)
+	}
+
+	dm.drives[unifiedDriveKey] = driveEntry{
+		drive:     drive,
+		id:        unifiedDriveKey,
+		name:      "GhostDrive",
+		syncError: "",
+	}
+	return nil
+}
+
+// UpdateBackends updates the list of backends on the already-mounted unified
+// drive without unmounting it.  This is the single point of entry for adding
+// or removing a backend from the live virtual filesystem.
+//
+// Returns an error if the unified drive is not mounted.
+func (dm *DriveManager) UpdateBackends(backends []MountedBackend) error {
+	dm.mu.RLock()
+	entry, ok := dm.drives[unifiedDriveKey]
+	dm.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("drivemanager: UpdateBackends: unified drive not mounted")
+	}
+	return entry.drive.UpdateBackends(backends)
+}
+
+// UnmountUnified dismounts the unified drive and removes it from the pool.
+// Returns nil if no unified drive is registered (idempotent).
+func (dm *DriveManager) UnmountUnified() error {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	entry, ok := dm.drives[unifiedDriveKey]
+	if !ok {
+		return nil
+	}
+	err := entry.drive.Unmount()
+	delete(dm.drives, unifiedDriveKey)
+	if err != nil {
+		return fmt.Errorf("drivemanager: UnmountUnified: %w", err)
+	}
+	return nil
+}
+
+// GetUnifiedStatus returns the DriveStatus for the unified drive.
+// BackendID is always "unified" and BackendName is always "GhostDrive".
+// Returns (DriveStatus{}, false) when no unified drive is mounted.
+func (dm *DriveManager) GetUnifiedStatus() (DriveStatus, bool) {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+
+	entry, ok := dm.drives[unifiedDriveKey]
+	if !ok {
+		return DriveStatus{}, false
+	}
+	s := entry.drive.Status()
+	s.BackendID = unifiedDriveKey
+	s.BackendName = "GhostDrive"
+	s.SyncError = entry.syncError
+	return s, true
 }
 
 // UnmountAll dismounts all drives in the pool.
