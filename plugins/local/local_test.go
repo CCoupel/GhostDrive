@@ -562,3 +562,20 @@ func TestChunkSize_Local(t *testing.T) {
 	b := New()
 	assert.Equal(t, int64(0), b.ChunkSize(), "local backend ChunkSize must be 0")
 }
+
+// TestReadAt_OffsetBeyondEOF verifies that ReadAt at an offset past the end of
+// file returns an empty slice without an error.
+// os.File.ReadAt returns n=0 + io.EOF when offset ≥ file size; the local backend
+// swallows io.EOF and returns buf[:0] = empty slice.
+func TestReadAt_OffsetBeyondEOF(t *testing.T) {
+	b, dir := newConnected(t)
+	content := []byte("hi") // 2 bytes
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tiny.txt"), content, 0644))
+
+	// Offset 100 >> file size 2: os.ReadAt returns n=0, io.EOF (swallowed).
+	data, err := b.ReadAt(context.Background(), "/tiny.txt", 100, 20)
+	require.NoError(t, err,
+		"ReadAt at offset past EOF must not return an error (io.EOF is handled)")
+	assert.Empty(t, data,
+		"ReadAt at offset past EOF must return an empty slice")
+}

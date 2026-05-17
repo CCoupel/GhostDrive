@@ -1354,3 +1354,140 @@ func TestReconnect(t *testing.T) {
 	assert.True(t, b.IsConnected())
 	_ = b.Disconnect()
 }
+
+// ─── ReadAt complementary tests (#121) ───────────────────────────────────────
+
+// propfindResp207 is a minimal 207 Multistatus XML body used by mock HTTP
+// servers to satisfy the PROPFIND probe issued during Connect().
+const propfindResp207 = `<?xml version="1.0" encoding="utf-8"?>` +
+	`<D:multistatus xmlns:D="DAV:">` +
+	`<D:response><D:href>/</D:href>` +
+	`<D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>` +
+	`<D:status>HTTP/1.1 200 OK</D:status></D:propstat>` +
+	`</D:response></D:multistatus>`
+
+// TestReadAt_RangeHeader_Sent verifies that ReadAt sends a well-formed
+// "Range: bytes=<offset>-<end>" header to the server and correctly processes
+// a 206 Partial Content response.
+// This is the primary test for the HTTP Range read path (#121).
+func TestReadAt_RangeHeader_Sent(t *testing.T) {
+	content := []byte("Hello, WebDAV Range Header Test!")
+
+	var capturedRange atomic.Value // written by handler goroutine, read by test
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != testUser || pass != testPass {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case "PROPFIND":
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = w.Write([]byte(propfindResp207))
+		case "GET":
+			capturedRange.Store(r.Header.Get("Range"))
+			// Respond 206 Partial Content with bytes [7:13)
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Range", "bytes 7-12/32")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(content[7:13])
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer srv.Close()
+
+	b := New()
+	require.NoError(t, b.Connect(plugins.BackendConfig{
+		Params: map[string]string{
+			"url": srv.URL, "username": testUser, "password": testPass, "authType": "basic",
+		},
+	}))
+	t.Cleanup(func() { _ = b.Disconnect() })
+
+	// ReadAt offset=7, length=6 → Range header must be "bytes=7-12"
+	data, err := b.ReadAt(context.Background(), "/range-test.txt", 7, 6)
+	require.NoError(t, err)
+	assert.Equal(t, content[7:13], data,
+		"ReadAt must return bytes from the 206 Partial Content response")
+
+	rng, _ := capturedRange.Load().(string)
+	assert.Equal(t, "bytes=7-12", rng,
+		"ReadAt must send Range header with correct byte range (bytes=offset-offset+length-1)")
+}
+
+// TestReadAt_NoRangeSupport_200_Fallback verifies that ReadAt correctly handles
+// a server that ignores Range headers and returns 200 with the full body.
+// The implementation must fall back to downloading the full body and extracting
+// the requested slice.
+func TestReadAt_NoRangeSupport_200_Fallback(t *testing.T) {
+	content := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ") // 26 bytes
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != testUser || pass != testPass {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case "PROPFIND":
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = w.Write([]byte(propfindResp207))
+		case "GET":
+			// Explicitly ignore Range header — return 200 with full body.
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(content)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer srv.Close()
+
+	b := New()
+	require.NoError(t, b.Connect(plugins.BackendConfig{
+		Params: map[string]string{
+			"url": srv.URL, "username": testUser, "password": testPass, "authType": "basic",
+		},
+	}))
+	t.Cleanup(func() { _ = b.Disconnect() })
+
+	// Read bytes [5:10) → "FGHIJ"
+	data, err := b.ReadAt(context.Background(), "/alphabet.txt", 5, 5)
+	require.NoError(t, err,
+		"ReadAt must succeed even when server returns 200 (no Range support)")
+	assert.Equal(t, []byte("FGHIJ"), data,
+		"ReadAt must correctly slice the full-body 200 response")
+}
+
+// TestReadAt_FileNotFound verifies that ReadAt returns a wrapped ErrFileNotFound
+// when the remote file does not exist on the server (HTTP 404).
+func TestReadAt_FileNotFound(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+
+	b := newTestBackend(t, serverURL)
+
+	_, err := b.ReadAt(context.Background(), "/does-not-exist.txt", 0, 10)
+	assert.ErrorIs(t, err, plugins.ErrFileNotFound,
+		"ReadAt on a non-existent remote file must return ErrFileNotFound (wrapped)")
+}
+
+// TestReadAt_ContextCancelled verifies that ReadAt returns an error when the
+// context is already cancelled before the call.
+func TestReadAt_ContextCancelled(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+
+	b := newTestBackend(t, serverURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel before calling ReadAt
+
+	_, err := b.ReadAt(ctx, "/file.txt", 0, 10)
+	assert.Error(t, err,
+		"ReadAt with a pre-cancelled context must return an error")
+}

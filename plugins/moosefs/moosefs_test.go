@@ -1800,3 +1800,23 @@ func TestChunkSize_MooseFS(t *testing.T) {
 	assert.Equal(t, int64(67_108_864), b.ChunkSize(),
 		"MooseFS ChunkSize must be 64 MiB (67108864)")
 }
+
+// TestReadAt_OffsetBeyondEOF verifies that ReadAt at an offset past the end of
+// file returns empty data without an error.
+// The MooseFS chunk server returns no data blocks when the requested offset
+// exceeds the file size; mfsclient.Read propagates this as empty data + nil error.
+func TestReadAt_OffsetBeyondEOF(t *testing.T) {
+	b := newTestBackend(t, startFakeServer(t))
+	ctx := context.Background()
+
+	content := []byte("short") // 5 bytes
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/short.txt", nil))
+
+	// Offset 1000 >> file size 5 → must return empty data, no error.
+	data, err := b.ReadAt(ctx, "/short.txt", 1000, 10)
+	require.NoError(t, err,
+		"ReadAt at offset past EOF must not return an error for MooseFS")
+	assert.Empty(t, data,
+		"ReadAt at offset past EOF must return empty slice for MooseFS")
+}
