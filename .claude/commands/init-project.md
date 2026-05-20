@@ -91,7 +91,8 @@ TEMPLATE_BRANCH_DEFAULT = "main"
 ### Quand fetcher
 
 - **Premiere initialisation** : toujours
-- **Reinitialisation option d)** : synchronisation manuelle
+- **Pre-menu de reinitialisation** : toujours (silencieusement, avant l'analyse)
+- **Reinitialisation option d)** : appliquer les changements detectes (fetch deja fait au pre-menu)
 
 ### Procedure de fetch
 
@@ -687,7 +688,7 @@ et remplacer les placeholders :
 
 | Placeholder | Exemple |
 |-------------|---------|
-| `` | `MyApp` |
+| `{PROJECT_NAME}` | `MyApp` |
 | `{BINARY_NAME}` | `myapp` |
 | `{BACKEND_DIR}` | `backend` |
 | `{FRONTEND_DIR}` | `frontend` |
@@ -734,17 +735,18 @@ Appliquer la substitution sur les fichiers deployes (commandes + agents generiqu
 ```bash
 for f in .claude/commands/*.md .claude/agents/*.template.md; do
   name=$(basename "$f")
+  [[ "$name" == "init-project.md" ]] && continue  # contient des {VAR} d'exemple — ne pas substituer
   sed -i \
-    -e "s||$|g" \
-    -e "s||$|g"       \
-    -e "s||$|g"                   \
-    -e "s||$|g"            \
-    -e "s||${BUILD_CMD_ESC}|g"        \
-    -e "s||${TEST_CMD_ESC}|g"          \
-    -e "s||${LINT_CMD_ESC}|g"          \
-    -e "s||${AUDIT_CMD_ESC}|g"        \
-    -e "s||${TYPECHECK_CMD_ESC}|g" \
-    -e "s||$|g" \
+    -e "s|{PROJECT_NAME}|${PROJECT_NAME}|g" \
+    -e "s|{TEAM_NAME}|${TEAM_NAME}|g"       \
+    -e "s|{ORG}|${ORG}|g"                   \
+    -e "s|{PROJECT}|${PROJECT}|g"            \
+    -e "s|{BUILD_CMD}|${BUILD_CMD_ESC}|g"        \
+    -e "s|{TEST_CMD}|${TEST_CMD_ESC}|g"          \
+    -e "s|{LINT_CMD}|${LINT_CMD_ESC}|g"          \
+    -e "s|{AUDIT_CMD}|${AUDIT_CMD_ESC}|g"        \
+    -e "s|{TYPECHECK_CMD}|${TYPECHECK_CMD_ESC}|g" \
+    -e "s|{PLUGIN_PLATFORM}|${PLUGIN_PLATFORM}|g" \
     "$f"
   echo "  ✓ placeholders appliques dans $name"
 done
@@ -755,15 +757,15 @@ done
 ```bash
 # CLAUDE.md depuis le template (remplacer les placeholders)
 sed \
-  -e "s||$PROJECT_NAME|g" \
-  -e "s||$TEAM_NAME|g" \
-  -e "s||$ORG|g" \
-  -e "s||$PROJECT|g" \
+  -e "s|{PROJECT_NAME}|$PROJECT_NAME|g" \
+  -e "s|{TEAM_NAME}|$TEAM_NAME|g" \
+  -e "s|{ORG}|$ORG|g" \
+  -e "s|{PROJECT}|$PROJECT|g" \
   -e "s|{BACKEND_TECH}|$BACKEND_TECH|g" \
   -e "s|{FRONTEND_TECH}|$FRONTEND_TECH|g" \
   -e "s|{DATABASE}|$DATABASE|g" \
-  -e "s||$BUILD_CMD|g" \
-  -e "s||$TEST_CMD|g" \
+  -e "s|{BUILD_CMD}|$BUILD_CMD|g" \
+  -e "s|{TEST_CMD}|$TEST_CMD|g" \
   TEMPLATE_claude/CLAUDE_TEMPLATE.md > CLAUDE.md
 echo "✓ CLAUDE.md généré"
 
@@ -845,6 +847,9 @@ Commandes disponibles :
 - /deploy qualif, /deploy prod
 - /milestone new/status/close
 - /backlog, /marketing
+- /progression, /context-audit
+- /start-session, /end-session
+- /team-status
 
 Bonne utilisation de Claude Code !
 ```
@@ -855,23 +860,25 @@ Bonne utilisation de Claude Code !
 
 Si `project-config.json` + `TEMPLATE_claude/` existent :
 
-### Etape pre-menu — Calcul automatique des changements disponibles
+### Etape pre-menu — Fetch GitHub + Calcul automatique des changements
 
-Avant d'afficher le menu, calculer silencieusement les changements entre le template
-local (`TEMPLATE_claude/`) et les fichiers deployes (`.claude/commands/`, `.claude/agents/`).
-Ne pas fetcher GitHub a ce stade — utiliser le template local tel qu'il est.
+Avant d'afficher le menu :
 
-Calculer le statut de chaque fichier (NOUVEAU / MODIFIE / INCHANGE / RELIQUAT) selon
-la meme logique que l'etape d3 ci-dessous, puis afficher la synthese :
+**1. Fetcher silencieusement le template depuis GitHub** (procedure "Fetch du Template depuis GitHub").
+Si le fetch echoue (pas de reseau, gh non auth) → continuer avec le template local en place,
+afficher un avertissement discret : `⚠ Fetch GitHub impossible — analyse basee sur le template local (sync du <date>).`
+
+**2. Calculer les changements** entre `TEMPLATE_claude/` (maintenant a jour) et les fichiers deployes
+(`.claude/commands/`, `.claude/agents/`). Meme logique que l'etape d3 ci-dessous.
 
 Pour chaque fichier MODIFIE, lire les deux versions et generer une explication courte
 (1 ligne max) decrivant ce qui a change.
 
 ```
 Ce projet est deja initialise (config du YYYY-MM-DD).
-Template local : CCoupel/claude_project_template — dernier sync : <date> (<commit>)
+Template GitHub : CCoupel/claude_project_template — <commit> (fetch a l'instant)
 
-Changements disponibles (template local) :
+Changements disponibles :
   [+] feature, hotfix                   ← 2 nouveaux
   [~] cdp       — <explication courte du changement>
   [~] bugfix    — <explication courte du changement>
@@ -884,18 +891,14 @@ Voulez-vous :
 a) Reconfigurer completement (ecrase la config)
 b) Modifier certains parametres
 c) Re-analyser le code (detecter les changements)
-d) Synchroniser le template depuis GitHub (fetch + appliquer)
+d) Appliquer les mises a jour detectees
 e) Annuler
 ```
 
-> Si aucun changement local n'est detecte, indiquer clairement que l'option d)
-> fetchera quand meme GitHub pour verifier s'il existe une version plus recente.
+### Option d : Appliquer les mises a jour detectees
 
-### Option d : Synchronisation avec diff et nettoyage
-
-#### Etape d1 — Fetcher le nouveau template depuis GitHub
-
-Executer la procedure "Fetch du Template depuis GitHub" pour mettre a jour `TEMPLATE_claude/`.
+> Le fetch GitHub a deja ete effectue au pre-menu — `TEMPLATE_claude/` est a jour.
+> Cette option calcule le diff precis et deploie les changements dans `.claude/`.
 
 #### Etape d1b — Migration : renommer les commandes legacy *.template.md → *.md
 
@@ -949,10 +952,12 @@ done)
 #### Etape d3 — Comparer avec les fichiers deployes
 
 ```bash
-# Commandes template déployées (*.md ou *.template.md legacy — hors context/)
+# Commandes template déployées (*.md ou *.template.md legacy — hors context/ et hors init-project)
+# init-project est le bootstrapper lui-même : jamais traité comme reliquat ni supprimé
 DEPLOYED_COMMANDS=$(
   { ls .claude/commands/*.md 2>/dev/null; ls .claude/commands/*.template.md 2>/dev/null; } \
   | grep -v '/context/' \
+  | grep -v 'init-project' \
   | xargs -I{} basename {} \
   | sed 's/\.template\.md$//' | sed 's/\.md$//' \
   | sort -u
@@ -1071,11 +1076,27 @@ Scanner l'integralite de `.claude/commands/*.md`, `.claude/commands/context/*.md
 la procedure "Application des placeholders" (section 4 ci-dessus) sur tous les fichiers,
 en lisant les valeurs depuis `.claude/project-config.json` existant.
 
+> **Exclure `init-project.md`** de cette substitution (contient des `{VAR}` d'exemple
+> dans ses blocs de code — les remplacer le corromprait).
+
+**Etape additionnelle — Synchroniser init-project.md lui-même :**
+
+`init-project.md` n'est pas dans `TEMPLATE_claude/commands/` (c'est le bootstrapper).
+Le fetcher depuis la racine du repo GitHub pour que les projets existants reçoivent
+les mises à jour (Message de Fin, corrections de bugs, etc.) :
+
+```bash
+gh api repos/$TEMPLATE_REPO/contents/init-project.md \
+  --jq '.content' | base64 -d > .claude/commands/init-project.md
+echo "  ✓ .claude/commands/init-project.md mis à jour (depuis racine repo)"
+```
+
 **Option A uniquement — Supprimer les reliquats :**
 
 ```bash
 # Supprimer les commandes reliquats
 for name in $DEPLOYED_COMMANDS; do
+  [[ "$name" == "init-project" ]] && continue  # bootstrapper — jamais supprimé
   if ! echo "$EXPECTED_COMMANDS" | grep -q "^${name}$"; then
     rm ".claude/commands/${name}.md"
     echo "  ✗ .claude/commands/${name}.md supprime (reliquat)"

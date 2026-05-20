@@ -67,7 +67,10 @@ binaire Windows/amd64       .ghdp linux/amd64           .ghdp windows/amd64
     +---------------------------+---------------------------+
     |
     v
-[4. RAPPORT] -- taille binaire + liste plugins + verdict
+[4. RAPPORT] -- chemin absolu exe + taille + liste plugins + verdict
+    |
+    v
+[5. CI-VERSIONS] -- vérifier go/wails/node/npm vs .ci-versions.env → commit si écart
 ```
 
 ### Etapes Detaillees GhostDrive
@@ -229,8 +232,130 @@ for pid in "${PIDS[@]}"; do
 done
 [ "$FAILED" -eq 0 ] || { echo "ERREUR : $FAILED build(s) ont échoué"; exit 1; }
 
-# ── 4. Vérification finale ────────────────────────────────────────────────────
-ls -lh $OUT_DIR/
+# ── 4. Rapport QUALIF — contenu exact de build/qualif/<version>/ avec tailles ─
+# Ce dossier est la livraison pour test manuel Windows.
+# L'utilisateur copie son contenu sur la machine Windows pour tester.
+echo ""
+echo "=== RAPPORT QUALIF v${VERSION} ==="
+echo "Dossier de livraison : $OUT_DIR"
+echo ""
+echo "Contenu (pour copie sur machine Windows) :"
+ls -lh "$OUT_DIR/" | awk 'NR>1 {printf "  %-55s %s\n", $NF, $5}'
+echo ""
+
+EXE_PATH="$OUT_DIR/$BIN_NAME"
+if [ -f "$EXE_PATH" ]; then
+  EXE_METHOD_VAL=$(grep EXE_METHOD "$OUT_DIR/.exe-build-method" 2>/dev/null | cut -d= -f2)
+  EXE_NOTE_VAL=$(grep EXE_NOTE   "$OUT_DIR/.exe-build-method" 2>/dev/null | cut -d= -f2-)
+  echo "Exe Windows :"
+  echo "  Chemin Linux  : $EXE_PATH"
+  echo "  Chemin Windows (WSL) : $(wslpath -w "$EXE_PATH" 2>/dev/null || echo "\\\\wsl\$\\Ubuntu$EXE_PATH")"
+  echo "  Taille        : $(du -h "$EXE_PATH" | cut -f1)"
+  echo "  Méthode build : $EXE_METHOD_VAL — $EXE_NOTE_VAL"
+else
+  echo "Exe Windows : ABSENT"
+  echo "  Build échoué — consulter les logs ci-dessus."
+  echo "  Commande manuelle à lancer sur Windows :"
+  echo "    wails build -platform windows/amd64 -ldflags \"-X 'github.com/CCoupel/GhostDrive/internal/app.AppVersion=${VERSION}'\""
+  echo "    Binaire produit dans : build\\bin\\ghostdrive.exe"
+fi
+
+echo ""
+echo "Plugins (.ghdp) :"
+for f in "$OUT_DIR/"*.ghdp; do
+  [ -f "$f" ] && echo "  $(basename "$f") — $(du -h "$f" | cut -f1)"
+done
+
+echo ""
+echo "Instructions copie Windows :"
+WIN_PATH=$(wslpath -w "$OUT_DIR" 2>/dev/null || echo "\\\\wsl\$\\Ubuntu$OUT_DIR")
+echo "  Chemin Windows : $WIN_PATH"
+echo "  Copier le contenu de ce dossier sur la machine Windows pour tester."
+echo "=================================="
+
+# ── 5. Maintenance .ci-versions.env ──────────────────────────────────────────
+# Vérifier les versions réelles des outils et mettre à jour le fichier si écart.
+echo ""
+echo "=== VÉRIFICATION .ci-versions.env ==="
+
+CI_ENV_FILE="$PROJ/.ci-versions.env"
+UPDATED=0
+
+# Versions réelles
+REAL_GO=$(go version | grep -oP 'go\K[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+REAL_WAILS=$( { $HOME/go/bin/wails version 2>/dev/null || echo "not installed"; } | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+REAL_NODE=$(node --version 2>/dev/null | tr -d 'v' || echo "not installed")
+REAL_NPM=$(npm --version 2>/dev/null || echo "not installed")
+
+echo "go      : $REAL_GO"
+echo "wails   : ${REAL_WAILS:-not installed}"
+echo "node    : $REAL_NODE"
+echo "npm     : $REAL_NPM"
+
+# Lire les valeurs pinnées actuelles (défaut vide si non présentes)
+PIN_GO=$(grep '^GO_PIN=' "$CI_ENV_FILE" 2>/dev/null | cut -d= -f2)
+PIN_WAILS=$(grep '^WAILS_PIN=' "$CI_ENV_FILE" 2>/dev/null | cut -d= -f2)
+PIN_NODE=$(grep '^NODE_PIN=' "$CI_ENV_FILE" 2>/dev/null | cut -d= -f2)
+PIN_NPM=$(grep '^NPM_PIN=' "$CI_ENV_FILE" 2>/dev/null | cut -d= -f2)
+
+update_pin() {
+  local KEY="$1" VAL="$2" FILE="$3"
+  if grep -q "^${KEY}=" "$FILE" 2>/dev/null; then
+    sed -i "s|^${KEY}=.*|${KEY}=${VAL}|" "$FILE"
+  else
+    echo "${KEY}=${VAL}" >> "$FILE"
+  fi
+}
+
+[ "$REAL_GO" != "$PIN_GO" ] && [ -n "$REAL_GO" ] && \
+  { echo "⚠️  go : $PIN_GO → $REAL_GO"; update_pin GO_PIN "$REAL_GO" "$CI_ENV_FILE"; UPDATED=$((UPDATED+1)); }
+[ -n "$REAL_WAILS" ] && [ "$REAL_WAILS" != "$PIN_WAILS" ] && \
+  { echo "⚠️  wails : $PIN_WAILS → $REAL_WAILS"; update_pin WAILS_PIN "$REAL_WAILS" "$CI_ENV_FILE"; UPDATED=$((UPDATED+1)); }
+[ "$REAL_NODE" != "$PIN_NODE" ] && [ "$REAL_NODE" != "not installed" ] && \
+  { echo "⚠️  node : $PIN_NODE → $REAL_NODE"; update_pin NODE_PIN "$REAL_NODE" "$CI_ENV_FILE"; UPDATED=$((UPDATED+1)); }
+[ "$REAL_NPM" != "$PIN_NPM" ] && [ "$REAL_NPM" != "not installed" ] && \
+  { echo "⚠️  npm : $PIN_NPM → $REAL_NPM"; update_pin NPM_PIN "$REAL_NPM" "$CI_ENV_FILE"; UPDATED=$((UPDATED+1)); }
+
+if [ "$UPDATED" -gt 0 ]; then
+  cd "$PROJ"
+  git add .ci-versions.env
+  git commit -m "chore(ci): bump PROD pins après QUALIF v${VERSION}"
+  echo "✅ .ci-versions.env mis à jour et committé ($UPDATED variable(s) modifiée(s))"
+else
+  echo "✅ .ci-versions.env à jour — aucun écart détecté"
+fi
+echo "======================================"
+
+# ── 6. Lancement automatique du binaire Windows depuis WSL ───────────────────
+# Non-bloquant : l'utilisateur interagit avec l'app, le script n'attend pas.
+# Échec = warning uniquement — l'exe est produit, le test peut être fait manuellement.
+echo ""
+echo "=== LANCEMENT AUTOMATIQUE ==="
+LAUNCH_STATUS="OK"
+EXE_PATH="$OUT_DIR/$BIN_NAME"
+if [ -f "$EXE_PATH" ]; then
+  WIN_EXE=$(wslpath -w "$EXE_PATH" 2>/dev/null || echo "")
+  if [ -n "$WIN_EXE" ]; then
+    cmd.exe /c start "" "$WIN_EXE" 2>/dev/null
+    LAUNCH_EXIT=$?
+    if [ "$LAUNCH_EXIT" -eq 0 ]; then
+      echo "✅ GhostDrive v${VERSION} lancé — testez les scénarios A/B/C puis lancez /deploy prod"
+    else
+      LAUNCH_STATUS="FAILED (exit code $LAUNCH_EXIT)"
+      echo "⚠️  Lancement échoué (exit code $LAUNCH_EXIT) — tester manuellement :"
+      echo "   Double-cliquer sur : $WIN_EXE"
+    fi
+  else
+    LAUNCH_STATUS="FAILED (wslpath indisponible)"
+    echo "⚠️  wslpath indisponible — lancer manuellement :"
+    echo "   \\\\wsl\$\\Ubuntu$EXE_PATH"
+  fi
+else
+  LAUNCH_STATUS="SKIPPED (exe absent)"
+  echo "⚠️  Exe absent — lancement ignoré (build échoué)"
+fi
+echo "Lancement automatique : $LAUNCH_STATUS"
+echo "=============================="
 ```
 
 ### Structure de sortie attendue
@@ -238,11 +363,25 @@ ls -lh $OUT_DIR/
 ```
 build/qualif/<version>/
 ├── ghostdrive-v<version>-windows-amd64.exe              # ≥ 10 MB (Wails + frontend)
+├── .exe-build-method                                    # WAILS | CGO_FALLBACK | KEPT
 ├── ghostdrive-moosefs-v<version>-linux-amd64.ghdp
 ├── ghostdrive-moosefs-v<version>-windows-amd64.ghdp
 ├── ghostdrive-webdav-v<version>-linux-amd64.ghdp
 └── ghostdrive-webdav-v<version>-windows-amd64.ghdp
 ```
+
+> **Test manuel Windows** : ce dossier est la livraison pour qualification manuelle.
+> L'utilisateur copie son contenu sur la machine Windows pour tester.
+> Chemin Windows (WSL) : `\\wsl$\Ubuntu\home\cyril\GITHUB\GhostDrive\build\qualif\<version>\`
+
+**Chemin exact de l'exe à transmettre dans le rapport** :
+- Linux/WSL : `/home/cyril/GITHUB/GhostDrive/build/qualif/<version>/ghostdrive-v<version>-windows-amd64.exe`
+- Windows (via WSL) : `\\wsl$\Ubuntu\home\cyril\GITHUB\GhostDrive\build\qualif\<version>\ghostdrive-v<version>-windows-amd64.exe`
+- Si KEPT (build échoué depuis Linux) : fournir la commande Windows à lancer manuellement :
+  ```
+  wails build -platform windows/amd64
+  # Binaire produit dans : build\bin\ghostdrive.exe
+  ```
 
 ### Outils requis (vérification préalable)
 
@@ -450,11 +589,16 @@ docker-compose up -d --force-recreate app:v1.1.0
 - [ ] `go test ./... -count=1` — 0 échec, couverture ≥ 70%
 - [ ] WinFsp headers présents (`/tmp/winfsp-headers/` ou `/usr/local/include/winfsp/`)
 - [ ] MinGW présent (`which x86_64-w64-mingw32-gcc`) — sinon exe marqué KEPT
+- [ ] **`wails build -platform windows/amd64`** exécuté (méthode A obligatoire pour QUALIF finale)
 - [ ] Exe Windows présent dans `build/qualif/<version>/` — méthode documentée dans `.exe-build-method` :
   - `WAILS` : ≥ 10 MB, frontend embed — valide pour QUALIF et PROD
   - `CGO_FALLBACK` : backend seul — valide pour tester fixes `internal/`, NON valide release PROD
-  - `KEPT` : les deux méthodes ont échoué — les fixes `internal/` ne sont pas testables sur Windows
+  - `KEPT` : les deux méthodes ont échoué — **fournir commande Windows manuelle** dans le rapport
+- [ ] **Rapport QUALIF** généré : contenu exact de `build/qualif/<version>/` listé avec tailles (exe + plugins)
+- [ ] **Chemin Windows (WSL)** du dossier fourni dans le rapport — l'utilisateur copie ce dossier sur sa machine Windows
 - [ ] Plugin(s) `.ghdp` (linux + windows) présents dans `build/qualif/<version>/`
+- [ ] **`.ci-versions.env` vérifié** — go/wails/node/npm comparés aux pins actuels, écarts commités
+- [ ] **Binaire lancé automatiquement depuis WSL après build** — `cmd.exe /c start "" "<chemin-win>.exe"` (non-bloquant) ; si FAILED → lancement manuel requis avant `/deploy prod`
 
 ### PROD
 
