@@ -306,6 +306,10 @@ func (d *WinFspDrive) UpdateBackends(backends []MountedBackend) error {
 
 		// Start goroutines for added backends, cancel for removed ones.
 		d.fs.updateWatchLoops(oldBackends, backends)
+
+		// Notify Windows Explorer that the drive root contents changed so it
+		// refreshes GhD:\ without requiring an F5 from the user (#132).
+		d.fs.notifyRootChanged(oldBackends, backends)
 	}
 
 	return nil

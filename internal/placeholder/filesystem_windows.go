@@ -516,6 +516,49 @@ func (fs *GhostFileSystem) notifyUpload(path string) {
 	}
 }
 
+// notifyRootChanged sends WinFsp NOTIFY_UNLINK / NOTIFY_CREATE notifications
+// for backends that were removed from or added to the unified drive root after
+// an UpdateBackends() call.  This causes Windows Explorer to refresh GhD:\
+// automatically without requiring an F5 from the user (#132).
+//
+// Uses the same host.Notify() mechanism as notifyUpload and handleWatchEvent
+// — no additional imports required.  Non-fatal: if the host is unavailable
+// the routing table is still up-to-date; the user can press F5.
+func (fs *GhostFileSystem) notifyRootChanged(oldBackends, newBackends []MountedBackend) {
+	if fs.host == nil {
+		return
+	}
+
+	oldIDs := make(map[string]bool, len(oldBackends))
+	for _, mb := range oldBackends {
+		oldIDs[mb.ID] = true
+	}
+	newIDs := make(map[string]bool, len(newBackends))
+	for _, mb := range newBackends {
+		newIDs[mb.ID] = true
+	}
+
+	// NOTIFY_UNLINK for backends removed from the root — Explorer removes the
+	// sub-folder from its directory listing.
+	for _, mb := range oldBackends {
+		if !newIDs[mb.ID] {
+			path := "/" + mb.Name
+			ok := fs.host.Notify(path, fuse.NOTIFY_UNLINK)
+			logger.Debug("placeholder: notifyRootChanged: UNLINK %s ok=%v", path, ok)
+		}
+	}
+
+	// NOTIFY_CREATE for backends newly added to the root — Explorer adds the
+	// sub-folder to its directory listing.
+	for _, mb := range newBackends {
+		if !oldIDs[mb.ID] {
+			path := "/" + mb.Name
+			ok := fs.host.Notify(path, fuse.NOTIFY_CREATE)
+			logger.Debug("placeholder: notifyRootChanged: CREATE %s ok=%v", path, ok)
+		}
+	}
+}
+
 func (fs *GhostFileSystem) Release(path string, fh uint64) int {
 	fs.mu.Lock()
 	entry, ok := fs.handles[fh]
