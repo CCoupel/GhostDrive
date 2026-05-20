@@ -40,15 +40,19 @@ message FileInfoProto {
   // Fields 9–19 are reserved for future FileInfo extensions (e.g. permissions,
   // checksum). Do not reuse these numbers.
   reserved 9 to 19;
+  string version        = 20; // opaque version token (#131): ETag for WebDAV, ctime decimal for MooseFS, "" otherwise
 }
 
 // FileEventProto carries a change notification from Watch.
 message FileEventProto {
-  string event_type    = 1; // "created" | "modified" | "deleted" | "renamed"
-  string path          = 2;
-  string old_path      = 3;
-  int64  timestamp_unix = 4;
-  string source        = 5; // "local" | "remote"
+  string event_type             = 1; // "created" | "modified" | "deleted" | "renamed" | "metadata_changed"
+  string path                   = 2;
+  string old_path               = 3;
+  int64  timestamp_unix         = 4;
+  string source                 = 5; // "local" | "remote"
+  int64  mod_time_unix          = 6; // file's new modtime at detection time; 0 when unavailable (#130)
+  int64  previous_mod_time_unix = 7; // file's previous modtime; 0 when unknown/created (#130)
+  bool   metadata_only          = 8; // true when only metadata changed, size stable (#130)
 }
 
 // ─── Upload (client-streaming) ───────────────────────────────────────────────
@@ -139,6 +143,32 @@ message QuotaResponse {
   string error = 3;
 }
 
+// ─── ReadAt (range read, unary) ───────────────────────────────────────────────
+
+// ReadAtRequest initiates a ReadAt RPC.
+message ReadAtRequest {
+  string remote_path = 1;
+  int64  offset      = 2;
+  int64  length      = 3;
+}
+
+// ReadAtResponse carries the bytes read and an optional error string.
+message ReadAtResponse {
+  bytes  data  = 1;  // bytes read; len(data) may be less than length on EOF
+  string error = 2;  // non-empty on terminal error
+}
+
+// ─── ChunkSize ────────────────────────────────────────────────────────────────
+
+// ChunkSizeRequest has no fields; it is a capability query.
+message ChunkSizeRequest {}
+
+// ChunkSizeResponse returns the natural I/O granularity of the backend in bytes.
+// Returns 0 when the backend has no native chunk size (use global default).
+message ChunkSizeResponse {
+  int64 chunk_size = 1;  // 0 = use global default
+}
+
 // ─── Describe ────────────────────────────────────────────────────────────────
 // Fields 20–27 are used for Describe messages to avoid conflicts with the
 // reserve 10–19 declared in BackendConfigProto.
@@ -197,4 +227,8 @@ service StorageService {
 
   // Plugin introspection — callable before Connect
   rpc Describe  (DescribeRequest)       returns (DescribeResponse);
+
+  // Range reads (v2.0 — issue #121)
+  rpc ReadAt    (ReadAtRequest)         returns (ReadAtResponse);
+  rpc ChunkSize (ChunkSizeRequest)      returns (ChunkSizeResponse);
 }

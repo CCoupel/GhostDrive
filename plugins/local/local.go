@@ -439,6 +439,50 @@ func toFileEvent(e fsnotify.Event) plugins.FileEvent {
 	return fe
 }
 
+// ─── Range reads ──────────────────────────────────────────────────────────────
+
+// ReadAt reads up to length bytes from the remote file at the given byte offset
+// using os.File.ReadAt.
+// Returns ErrFileNotFound (wrapped) when remote does not exist.
+// Pre-condition: IsConnected() == true, else returns nil, ErrNotConnected.
+func (b *Backend) ReadAt(ctx context.Context, remote string, offset, length int64) ([]byte, error) {
+	if !b.IsConnected() {
+		return nil, ErrNotConnected
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("local: readAt %s: %w", remote, err)
+	}
+
+	abs, err := b.absPath(remote)
+	if err != nil {
+		return nil, fmt.Errorf("local: readAt %s: %w", remote, err)
+	}
+
+	f, err := os.Open(abs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("local: readAt %s: %w", remote, ErrFileNotFound)
+		}
+		return nil, fmt.Errorf("local: readAt %s: open: %w", remote, err)
+	}
+	defer f.Close()
+
+	if length <= 0 {
+		return []byte{}, nil
+	}
+
+	buf := make([]byte, length)
+	n, err := f.ReadAt(buf, offset)
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("local: readAt %s offset=%d: %w", remote, offset, err)
+	}
+	return buf[:n], nil
+}
+
+// ChunkSize returns 0 for the local backend — no native chunk boundary; the
+// caller uses the global default chunk size.
+func (b *Backend) ChunkSize() int64 { return 0 }
+
 // ─── Progress helpers ─────────────────────────────────────────────────────────
 
 // progressReader wraps an io.Reader and fires a ProgressCallback after each

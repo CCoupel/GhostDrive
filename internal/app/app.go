@@ -183,26 +183,18 @@ func (a *App) Startup(ctx context.Context) {
 		a.mu.Unlock()
 	}
 
-	// v1.1.x — Migration: assign MountPoint to backends that don't have one yet.
-	// This ensures backends created before v1.1.x get a letter without user action.
+	// v2.0 — Migration: ensure AppConfig.MountPoint is set.
+	// Earlier configs may have an empty MountPoint; assign the first available letter.
 	{
 		a.mu.Lock()
-		usedLetters := make([]string, 0, len(a.cfg.Backends))
-		for _, bc := range a.cfg.Backends {
-			if bc.MountPoint != "" {
-				usedLetters = append(usedLetters, bc.MountPoint)
-			}
-		}
 		needsSave := false
-		for i := range a.cfg.Backends {
-			if a.cfg.Backends[i].MountPoint == "" {
-				letter := a.driveManager.AssignAvailableLetter(usedLetters)
-				if letter != "" {
-					a.cfg.Backends[i].MountPoint = letter
-					usedLetters = append(usedLetters, letter)
-					needsSave = true
-				}
+		if a.cfg.MountPoint == "" {
+			letter := a.driveManager.AssignAvailableLetter([]string{})
+			if letter == "" {
+				letter = "G:" // fallback
 			}
+			a.cfg.MountPoint = letter
+			needsSave = true
 		}
 		migratedCfg := a.cfg
 		migrationPath := a.cfgPath
@@ -215,11 +207,14 @@ func (a *App) Startup(ctx context.Context) {
 		}
 	}
 
-	// Reconnect saved backends, auto-start sync, and mount per-backend drives.
+	// Reconnect saved backends, auto-start sync, then mount the unified drive.
 	a.mu.RLock()
 	backendsSnapshot := make([]plugins.BackendConfig, len(a.cfg.Backends))
 	copy(backendsSnapshot, a.cfg.Backends)
+	mountPoint := a.cfg.MountPoint
 	a.mu.RUnlock()
+
+	var unifiedBackends []placeholder.MountedBackend
 
 	for _, bc := range backendsSnapshot {
 		if !bc.Enabled {
@@ -235,37 +230,41 @@ func (a *App) Startup(ctx context.Context) {
 			continue
 		}
 
-		// Mount per-backend virtual drive.
-		if bc.MountPoint != "" {
-			b, ok := a.manager.Get(bc.ID)
-			if ok {
-				mb := placeholder.MountedBackend{
-					ID:      bc.ID,
-					Name:    bc.Name,
-					Backend: b,
-					Config:  bc,
-				}
-				if mountErr := a.driveManager.Mount(bc.ID, bc.MountPoint, mb); mountErr != nil {
-					log.Printf("app: startup mount %s: %v", bc.Name, mountErr)
-					a.emit("drive:error", map[string]any{
-						"backendID":   bc.ID,
-						"backendName": bc.Name,
-						"error":       mountErr.Error(),
-					})
-				} else {
-					a.emit("drive:mounted", map[string]any{
-						"backendID":   bc.ID,
-						"backendName": bc.Name,
-						"mountPoint":  bc.MountPoint,
-						"mounted":     true,
-					})
-				}
-			}
+		b, ok := a.manager.Get(bc.ID)
+		if ok {
+			unifiedBackends = append(unifiedBackends, placeholder.MountedBackend{
+				ID:      bc.ID,
+				Name:    bc.Name,
+				Backend: b,
+				Config:  bc,
+			})
 		}
 
 		if bc.AutoSync {
 			if err := a.StartSync(bc.ID); err != nil {
 				a.emitError(fmt.Sprintf("app: auto-start sync %s: %v", bc.Name, err))
+			}
+		}
+	}
+
+	// v2.0 — Mount the single unified GhD: drive with all connected backends.
+	if len(unifiedBackends) > 0 {
+		if mountErr := a.driveManager.MountUnified(mountPoint, unifiedBackends); mountErr != nil {
+			log.Printf("app: startup MountUnified %s: %v", mountPoint, mountErr)
+			a.emit("drive:error", map[string]any{
+				"backendID":   "unified",
+				"backendName": "GhostDrive",
+				"error":       mountErr.Error(),
+			})
+		} else {
+			if s, ok := a.driveManager.GetUnifiedStatus(); ok {
+				a.emit("drive:mounted", map[string]any{
+					"backendID":    "unified",
+					"backendName":  "GhostDrive",
+					"mountPoint":   s.MountPoint,
+					"backendPaths": s.BackendPaths,
+					"mounted":      s.Mounted,
+				})
 			}
 		}
 	}
@@ -278,8 +277,12 @@ func (a *App) Startup(ctx context.Context) {
 
 // shutdown is called by Wails when the application is about to quit.
 func (a *App) Shutdown(ctx context.Context) {
-	// v1.1.x — Unmount all per-backend drives before stopping sync engines.
+	// v2.0 — Unmount the unified drive before stopping sync engines.
 	if a.driveManager != nil {
+		if err := a.driveManager.UnmountUnified(); err != nil {
+			log.Printf("app: shutdown UnmountUnified: %v", err)
+		}
+		// Also attempt legacy UnmountAll for any residual per-backend drives.
 		if err := a.driveManager.UnmountAll(); err != nil {
 			log.Printf("app: shutdown unmount all: %v", err)
 		}
@@ -501,24 +504,19 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 	a.cfg.Backends[idx].Enabled = enabled
 	bc := a.cfg.Backends[idx]
 	path := a.cfgPath
+	mountPoint := a.cfg.MountPoint // captured for Shell notification (#132)
 	a.mu.Unlock()
 
 	if !enabled {
-		// v1.1.x — Unmount drive BEFORE stopping sync / disconnecting.
-		if unmountErr := a.driveManager.Unmount(id); unmountErr != nil {
-			log.Printf("app: SetBackendEnabled unmount %s: %v", bc.Name, unmountErr)
-			a.emit("drive:error", map[string]any{
-				"backendID":   id,
-				"backendName": bc.Name,
-				"error":       unmountErr.Error(),
-			})
-		} else {
-			a.emit("drive:unmounted", map[string]any{
-				"backendID":   id,
-				"backendName": bc.Name,
-				"mountPoint":  bc.MountPoint,
-			})
+		// v2.0 — Remove backend from the unified drive first (VFS update), then disconnect.
+		// Build the new list of backends without the disabled one.
+		newList := a.enabledMountedBackendsExcluding(id)
+		if updateErr := a.driveManager.UpdateBackends(newList); updateErr != nil {
+			log.Printf("app: SetBackendEnabled UpdateBackends (disable) %s: %v", bc.Name, updateErr)
+			// Non-fatal: proceed with disconnect even if VFS update failed.
 		}
+		// Notify Windows Explorer so GhD:\ refreshes without requiring F5 (#132).
+		notifyShellDirChanged(mountPoint)
 
 		// Persist first (state is definitive), then side-effects.
 		a.mu.RLock()
@@ -533,6 +531,12 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 		a.mu.Lock()
 		delete(a.backendConnectErrors, id)
 		a.mu.Unlock()
+
+		a.emit("drive:unmounted", map[string]any{
+			"backendID":   "unified",
+			"backendName": "GhostDrive",
+			"mountPoint":  bc.MountPoint,
+		})
 	} else {
 		// Enable path: connect first — only persist on success to avoid disk/memory
 		// divergence if manager.Add fails.
@@ -552,44 +556,37 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 		delete(a.backendConnectErrors, id)
 		a.mu.Unlock()
 
-		// v1.1.x — Mount per-backend virtual drive.
-		if bc.MountPoint != "" {
-			b, ok := a.manager.Get(id)
-			if ok {
-				mb := placeholder.MountedBackend{
-					ID:      bc.ID,
-					Name:    bc.Name,
-					Backend: b,
-					Config:  bc,
-				}
-				if mountErr := a.driveManager.Mount(id, bc.MountPoint, mb); mountErr != nil {
-					// Mount failed — rollback: disconnect and revert enabled flag.
-					log.Printf("app: SetBackendEnabled mount %s: %v", bc.Name, mountErr)
-					_ = a.manager.Remove(id)
-					a.mu.Lock()
-					if idx2 := indexByID(a.cfg.Backends, id); idx2 >= 0 {
-						a.cfg.Backends[idx2].Enabled = false
-					}
-					a.mu.Unlock()
-					a.emit("drive:error", map[string]any{
-						"backendID":   id,
-						"backendName": bc.Name,
-						"error":       mountErr.Error(),
-					})
-					return fmt.Errorf("mount drive: %w", mountErr)
-				}
-				// Emit mounted event with current drive status.
-				if s, ok := a.driveManager.GetStatus(id); ok {
-					a.emit("drive:mounted", map[string]any{
-						"backendID":    id,
-						"backendName":  bc.Name,
-						"mountPoint":   s.MountPoint,
-						"backendPaths": s.BackendPaths,
-						"mounted":      s.Mounted,
-					})
-				}
+		// v2.0 — Update the unified drive with the new backend list.
+		// Build updated list including the just-connected backend.
+		newList := a.enabledMountedBackendsExcluding("")
+		if updateErr := a.driveManager.UpdateBackends(newList); updateErr != nil {
+			// UpdateBackends failed — rollback: disconnect backend, revert enabled flag.
+			log.Printf("app: SetBackendEnabled UpdateBackends (enable) %s: %v", bc.Name, updateErr)
+			_ = a.manager.Remove(id)
+			a.mu.Lock()
+			if idx2 := indexByID(a.cfg.Backends, id); idx2 >= 0 {
+				a.cfg.Backends[idx2].Enabled = false
 			}
+			a.mu.Unlock()
+			a.emit("drive:error", map[string]any{
+				"backendID":   "unified",
+				"backendName": "GhostDrive",
+				"error":       updateErr.Error(),
+			})
+			return fmt.Errorf("update unified drive: %w", updateErr)
 		}
+		// Emit mounted event with current unified status.
+		if s, ok := a.driveManager.GetUnifiedStatus(); ok {
+			a.emit("drive:mounted", map[string]any{
+				"backendID":    "unified",
+				"backendName":  "GhostDrive",
+				"mountPoint":   s.MountPoint,
+				"backendPaths": s.BackendPaths,
+				"mounted":      s.Mounted,
+			})
+		}
+		// Notify Windows Explorer so GhD:\ refreshes without requiring F5 (#132).
+		notifyShellDirChanged(mountPoint)
 
 		a.mu.RLock()
 		cfg := a.cfg
@@ -1264,12 +1261,51 @@ func (a *App) GetMountPoint() string {
 	return filepath.Join(home, "GhostDrive", "GhD")
 }
 
-// GetDriveStatuses returns the current mount status of every per-backend virtual
-// drive keyed by backendID. Delegates to DriveManager.GetAllStatuses().
+// GetDriveStatuses returns the current mount status of the unified GhD: drive.
+// In v2.0 there is a single unified drive; the result map always contains at
+// most one entry keyed "unified".
 //
 // Wails binding: window.go.App.GetDriveStatuses()
 func (a *App) GetDriveStatuses() map[string]placeholder.DriveStatus {
-	return a.driveManager.GetAllStatuses()
+	result := make(map[string]placeholder.DriveStatus)
+	if s, ok := a.driveManager.GetUnifiedStatus(); ok {
+		result["unified"] = s
+	}
+	return result
+}
+
+// enabledMountedBackendsExcluding returns a []MountedBackend slice for all
+// enabled, currently-connected backends in the config, optionally skipping one
+// backend by ID.  Pass excludeID="" to include all connected enabled backends.
+//
+// Used by SetBackendEnabled to rebuild the unified drive's backend list after an
+// enable/disable operation.
+func (a *App) enabledMountedBackendsExcluding(excludeID string) []placeholder.MountedBackend {
+	a.mu.RLock()
+	cfgBackends := make([]plugins.BackendConfig, len(a.cfg.Backends))
+	copy(cfgBackends, a.cfg.Backends)
+	a.mu.RUnlock()
+
+	var result []placeholder.MountedBackend
+	for _, bc := range cfgBackends {
+		if !bc.Enabled {
+			continue
+		}
+		if excludeID != "" && bc.ID == excludeID {
+			continue
+		}
+		b, ok := a.manager.Get(bc.ID)
+		if !ok {
+			continue
+		}
+		result = append(result, placeholder.MountedBackend{
+			ID:      bc.ID,
+			Name:    bc.Name,
+			Backend: b,
+			Config:  bc,
+		})
+	}
+	return result
 }
 
 // GetGhostDriveRoot returns the configurable root directory under which

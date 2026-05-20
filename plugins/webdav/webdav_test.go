@@ -1268,6 +1268,62 @@ func TestGetQuota_ServerNoQuota(t *testing.T) {
 
 // ─── Reconnect ────────────────────────────────────────────────────────────────
 
+// ─── ReadAt (#121) ────────────────────────────────────────────────────────────
+
+// TestReadAt_Success uploads a file and reads a slice of it using ReadAt.
+// The in-memory WebDAV handler may not support Range (returns 200), but the
+// ReadAt implementation falls back to a full download + slice in that case,
+// so the returned bytes must always match the expected sub-slice.
+func TestReadAt_Success(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+
+	b := newTestBackend(t, serverURL)
+	ctx := context.Background()
+
+	content := []byte("Hello, WebDAV ReadAt World!")
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/readat.txt", nil))
+
+	// Read bytes [7:13) → "WebDAV"
+	data, err := b.ReadAt(ctx, "/readat.txt", 7, 6)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("WebDAV"), data)
+}
+
+// TestReadAt_FullFile verifies that ReadAt with offset=0 and length=fileSize
+// returns the full file content.
+func TestReadAt_FullFile(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+
+	b := newTestBackend(t, serverURL)
+	ctx := context.Background()
+
+	content := []byte("full WebDAV file content")
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/full.txt", nil))
+
+	data, err := b.ReadAt(ctx, "/full.txt", 0, int64(len(content)))
+	require.NoError(t, err)
+	assert.Equal(t, content, data)
+}
+
+// TestReadAt_NotConnected verifies that ReadAt returns ErrNotConnected when the
+// backend is not connected.
+func TestReadAt_NotConnected(t *testing.T) {
+	b := New()
+	_, err := b.ReadAt(context.Background(), "/file.txt", 0, 10)
+	assert.ErrorIs(t, err, plugins.ErrNotConnected)
+}
+
+// TestChunkSize_WebDAV verifies that WebDAV ChunkSize() returns 0 (no chunking
+// hint; the FUSE layer should use unbounded sequential reads).
+func TestChunkSize_WebDAV(t *testing.T) {
+	b := New()
+	assert.Equal(t, int64(0), b.ChunkSize(), "WebDAV ChunkSize must be 0")
+}
+
 // TestReconnect verifies the Connect → Disconnect → Connect lifecycle.
 func TestReconnect(t *testing.T) {
 	serverURL, cleanup := newTestServer(t)
@@ -1297,4 +1353,370 @@ func TestReconnect(t *testing.T) {
 	require.NoError(t, b.Connect(cfg))
 	assert.True(t, b.IsConnected())
 	_ = b.Disconnect()
+}
+
+// ─── ReadAt complementary tests (#121) ───────────────────────────────────────
+
+// propfindResp207 is a minimal 207 Multistatus XML body used by mock HTTP
+// servers to satisfy the PROPFIND probe issued during Connect().
+const propfindResp207 = `<?xml version="1.0" encoding="utf-8"?>` +
+	`<D:multistatus xmlns:D="DAV:">` +
+	`<D:response><D:href>/</D:href>` +
+	`<D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>` +
+	`<D:status>HTTP/1.1 200 OK</D:status></D:propstat>` +
+	`</D:response></D:multistatus>`
+
+// TestReadAt_RangeHeader_Sent verifies that ReadAt sends a well-formed
+// "Range: bytes=<offset>-<end>" header to the server and correctly processes
+// a 206 Partial Content response.
+// This is the primary test for the HTTP Range read path (#121).
+func TestReadAt_RangeHeader_Sent(t *testing.T) {
+	content := []byte("Hello, WebDAV Range Header Test!")
+
+	var capturedRange atomic.Value // written by handler goroutine, read by test
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != testUser || pass != testPass {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case "PROPFIND":
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = w.Write([]byte(propfindResp207))
+		case "GET":
+			capturedRange.Store(r.Header.Get("Range"))
+			// Respond 206 Partial Content with bytes [7:13)
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Range", "bytes 7-12/32")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(content[7:13])
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer srv.Close()
+
+	b := New()
+	require.NoError(t, b.Connect(plugins.BackendConfig{
+		Params: map[string]string{
+			"url": srv.URL, "username": testUser, "password": testPass, "authType": "basic",
+		},
+	}))
+	t.Cleanup(func() { _ = b.Disconnect() })
+
+	// ReadAt offset=7, length=6 → Range header must be "bytes=7-12"
+	data, err := b.ReadAt(context.Background(), "/range-test.txt", 7, 6)
+	require.NoError(t, err)
+	assert.Equal(t, content[7:13], data,
+		"ReadAt must return bytes from the 206 Partial Content response")
+
+	rng, _ := capturedRange.Load().(string)
+	assert.Equal(t, "bytes=7-12", rng,
+		"ReadAt must send Range header with correct byte range (bytes=offset-offset+length-1)")
+}
+
+// TestReadAt_NoRangeSupport_200_Fallback verifies that ReadAt correctly handles
+// a server that ignores Range headers and returns 200 with the full body.
+// The implementation must fall back to downloading the full body and extracting
+// the requested slice.
+func TestReadAt_NoRangeSupport_200_Fallback(t *testing.T) {
+	content := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ") // 26 bytes
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != testUser || pass != testPass {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case "PROPFIND":
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = w.Write([]byte(propfindResp207))
+		case "GET":
+			// Explicitly ignore Range header — return 200 with full body.
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(content)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer srv.Close()
+
+	b := New()
+	require.NoError(t, b.Connect(plugins.BackendConfig{
+		Params: map[string]string{
+			"url": srv.URL, "username": testUser, "password": testPass, "authType": "basic",
+		},
+	}))
+	t.Cleanup(func() { _ = b.Disconnect() })
+
+	// Read bytes [5:10) → "FGHIJ"
+	data, err := b.ReadAt(context.Background(), "/alphabet.txt", 5, 5)
+	require.NoError(t, err,
+		"ReadAt must succeed even when server returns 200 (no Range support)")
+	assert.Equal(t, []byte("FGHIJ"), data,
+		"ReadAt must correctly slice the full-body 200 response")
+}
+
+// TestReadAt_FileNotFound verifies that ReadAt returns a wrapped ErrFileNotFound
+// when the remote file does not exist on the server (HTTP 404).
+func TestReadAt_FileNotFound(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+
+	b := newTestBackend(t, serverURL)
+
+	_, err := b.ReadAt(context.Background(), "/does-not-exist.txt", 0, 10)
+	assert.ErrorIs(t, err, plugins.ErrFileNotFound,
+		"ReadAt on a non-existent remote file must return ErrFileNotFound (wrapped)")
+}
+
+// TestReadAt_ContextCancelled verifies that ReadAt returns an error when the
+// context is already cancelled before the call.
+func TestReadAt_ContextCancelled(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+
+	b := newTestBackend(t, serverURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel before calling ReadAt
+
+	_, err := b.ReadAt(ctx, "/file.txt", 0, 10)
+	assert.Error(t, err,
+		"ReadAt with a pre-cancelled context must return an error")
+}
+
+// ─── Version and Watch enrichment tests (#130 #131) ──────────────────────────
+
+// TestFileInfoVersionFromETag verifies that Stat() returns FileInfo.Version
+// equal to the ETag (stripped of surrounding quotes).  Both must be non-empty
+// on a standard WebDAV server that provides ETags for files (#131).
+func TestFileInfoVersionFromETag(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+	b := newTestBackend(t, serverURL)
+	ctx := context.Background()
+
+	content := []byte("version-from-etag-test-content")
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/version-etag.txt", nil))
+
+	fi, err := b.Stat(ctx, "/version-etag.txt")
+	require.NoError(t, err)
+	require.NotNil(t, fi)
+
+	assert.NotEmpty(t, fi.ETag, "ETag must not be empty after upload (#131)")
+	assert.Equal(t, fi.ETag, fi.Version,
+		"FileInfo.Version must equal ETag (stripped of quotes) for the WebDAV backend (#131)")
+}
+
+// TestWatchEmitsModTime verifies that Watch populates FileEvent.ModTime
+// (non-zero, reflecting the new mtime) and FileEvent.PreviousModTime
+// (non-zero, reflecting the snapshot mtime) on a FileEventModified event (#130).
+func TestWatchEmitsModTime(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+	b := newTestBackend(t, serverURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Upload the file BEFORE Watch so it appears in the initial baseline snapshot.
+	content1 := []byte("modtime-v1-initial-content") // 26 bytes
+	src1 := writeTempFile(t, content1)
+	require.NoError(t, b.Upload(ctx, src1, "/modtime-watch.txt", nil))
+
+	ch, err := b.Watch(ctx, "/")
+	require.NoError(t, err)
+
+	// Allow the watcher goroutine to build its baseline snapshot.
+	time.Sleep(100 * time.Millisecond)
+
+	// Re-upload with different content size so FileEventModified is emitted.
+	content2 := []byte("modtime-v2-updated-content-with-more-bytes") // 42 bytes — larger
+	src2 := writeTempFile(t, content2)
+	go func() {
+		_ = b.Upload(context.Background(), src2, "/modtime-watch.txt", nil)
+	}()
+
+	deadline := time.After(8 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			require.True(t, ok, "Watch channel must not close prematurely")
+			if ev.Type == plugins.FileEventModified {
+				assert.False(t, ev.ModTime.IsZero(),
+					"FileEvent.ModTime must not be zero for FileEventModified (#130)")
+				assert.False(t, ev.PreviousModTime.IsZero(),
+					"FileEvent.PreviousModTime must not be zero when file was in the baseline snapshot (#130)")
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for FileEventModified with non-zero ModTime and PreviousModTime (#130)")
+		}
+	}
+}
+
+// TestWatchMetadataChanged verifies that Watch emits FileEventMetadataChanged
+// with MetadataOnly=true when a file's ETag changes while its size remains
+// stable.  Uses a custom mock HTTP server with controlled PROPFIND responses so
+// that the test is deterministic and does not depend on filesystem timing.
+// This exercises the ETag-only change detection path in the WebDAV Watch
+// goroutine (#130).
+func TestWatchMetadataChanged(t *testing.T) {
+	const (
+		fileName = "meta-change.txt"
+		etag1    = "abc123def456"
+		etag2    = "xyz789uvw012" // different ETag, same size
+	)
+
+	modTime1 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	modTime2 := time.Date(2025, 1, 1, 0, 1, 0, 0, time.UTC) // one minute later
+
+	// buildListResp builds a Depth:1 PROPFIND response with the root collection
+	// and one file entry with the given ETag and modification time.
+	buildListResp := func(etag string, mt time.Time) string {
+		return `<?xml version="1.0" encoding="utf-8"?>` +
+			`<D:multistatus xmlns:D="DAV:">` +
+			// Root self-entry (always present for Depth:1 responses).
+			`<D:response><D:href>/</D:href>` +
+			`<D:propstat><D:prop>` +
+			`<D:resourcetype><D:collection/></D:resourcetype>` +
+			`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>` +
+			// File entry — ETag changes between polls, size stays constant.
+			`<D:response><D:href>/` + fileName + `</D:href>` +
+			`<D:propstat><D:prop>` +
+			`<D:resourcetype/>` +
+			`<D:getcontentlength>10</D:getcontentlength>` +
+			`<D:getlastmodified>` + mt.UTC().Format(http.TimeFormat) + `</D:getlastmodified>` +
+			`<D:getetag>"` + etag + `"</D:getetag>` +
+			`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>` +
+			`</D:multistatus>`
+	}
+
+	// depth1CallCount counts Depth:1 PROPFIND requests (List calls).
+	// Call 1 (buildSnapshot) sets the snapshot; call 2+ trigger MetadataChanged.
+	var depth1CallCount atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != testUser || pass != testPass {
+			w.Header().Set("WWW-Authenticate", `Basic realm="webdav"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != "PROPFIND" {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.WriteHeader(http.StatusMultiStatus)
+		switch r.Header.Get("Depth") {
+		case "0":
+			// Connect probe — return root collection only.
+			_, _ = w.Write([]byte(propfindResp207))
+		default:
+			// Depth:1 — Watch polling.
+			n := depth1CallCount.Add(1)
+			if n <= 1 {
+				// First call (buildSnapshot): establish snapshot with etag1.
+				_, _ = w.Write([]byte(buildListResp(etag1, modTime1)))
+			} else {
+				// Subsequent calls: etag2 with same size → MetadataChanged.
+				_, _ = w.Write([]byte(buildListResp(etag2, modTime2)))
+			}
+		}
+	}))
+	defer srv.Close()
+
+	b := New()
+	require.NoError(t, b.Connect(plugins.BackendConfig{
+		Params: map[string]string{
+			"url":          srv.URL,
+			"username":     testUser,
+			"password":     testPass,
+			"authType":     "basic",
+			"pollInterval": testPollInterval,
+		},
+	}))
+	t.Cleanup(func() { _ = b.Disconnect() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ch, err := b.Watch(ctx, "/")
+	require.NoError(t, err)
+
+	// The first List (inside buildSnapshot) captures etag1.  Every subsequent
+	// poll returns etag2 with the same size → Watch must emit MetadataChanged.
+	deadline := time.After(4 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			require.True(t, ok, "Watch channel must not close prematurely")
+			if ev.Type == plugins.FileEventMetadataChanged {
+				assert.True(t, ev.MetadataOnly,
+					"MetadataOnly must be true for FileEventMetadataChanged (#130)")
+				assert.False(t, ev.ModTime.IsZero(),
+					"FileEvent.ModTime must not be zero for MetadataChanged (#130)")
+				assert.False(t, ev.PreviousModTime.IsZero(),
+					"FileEvent.PreviousModTime must not be zero when file was in snapshot (#130)")
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for FileEventMetadataChanged with ETag-only change (#130)")
+		}
+	}
+}
+
+// TestWatchModified verifies that Watch emits FileEventModified (not
+// FileEventMetadataChanged) with MetadataOnly=false when a file's content
+// size changes.  A size change is the definitive signal that file content was
+// modified, not just metadata (#130).
+func TestWatchModified(t *testing.T) {
+	serverURL, cleanup := newTestServer(t)
+	defer cleanup()
+	b := newTestBackend(t, serverURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Upload the initial file BEFORE Watch so it is in the baseline snapshot.
+	smallContent := []byte("small-initial") // 13 bytes
+	src1 := writeTempFile(t, smallContent)
+	require.NoError(t, b.Upload(ctx, src1, "/size-change.txt", nil))
+
+	ch, err := b.Watch(ctx, "/")
+	require.NoError(t, err)
+
+	// Allow the watcher to build its baseline snapshot.
+	time.Sleep(100 * time.Millisecond)
+
+	// Re-upload with larger content so the size changes → FileEventModified.
+	largeContent := []byte("much-larger-content-triggers-file-modified-event") // 48 bytes
+	src2 := writeTempFile(t, largeContent)
+	go func() {
+		_ = b.Upload(context.Background(), src2, "/size-change.txt", nil)
+	}()
+
+	deadline := time.After(8 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			require.True(t, ok, "Watch channel must not close prematurely")
+			if ev.Type == plugins.FileEventModified {
+				assert.False(t, ev.MetadataOnly,
+					"MetadataOnly must be false for FileEventModified when size changed (#130)")
+				assert.False(t, ev.ModTime.IsZero(),
+					"FileEvent.ModTime must not be zero for FileEventModified (#130)")
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for FileEventModified with MetadataOnly=false (#130)")
+		}
+	}
 }

@@ -3,6 +3,8 @@
 package placeholder
 
 import (
+	"strings"
+
 	"github.com/CCoupel/GhostDrive/plugins"
 )
 
@@ -15,20 +17,60 @@ type routeResult struct {
 	relPath string
 }
 
-// route resolves a FUSE path to the single backend mounted on this drive
-// (per-backend drives, v1.1.x+).  The path is forwarded as-is: "/" routes to
-// the backend root, "/foo/bar" routes to that path within the backend.
-// Returns nil when no backend is registered.
+// route resolves a FUSE path to the backend that owns it and the relative path
+// within that backend (v2.0 multi-backend unified drive).
+//
+// The first segment of the path identifies the backend by name (case-insensitive):
+//
+//	"/MonNAS"           → {backend: MonNAS, relPath: "/"}
+//	"/MonNAS/docs/f.txt" → {backend: MonNAS, relPath: "/docs/f.txt"}
+//	"/WebDAV/"          → {backend: WebDAV, relPath: "/"}
+//
+// Returns nil when no backend matches the first segment (→ ENOENT to FUSE).
 // Callers (Getattr, Readdir) handle the virtual root "/" and virtual files
-// before invoking route, so this function never needs to return nil for "/".
+// (desktop.ini, ghostdrive.ico) BEFORE invoking route, so this function is
+// never called for "/" or those virtual paths.
 func (fs *GhostFileSystem) route(path string) *routeResult {
-	if len(fs.backends) == 0 {
+	// Snapshot backends under RLock.  The slice is replaced atomically by
+	// UpdateBackends (never modified in place), so the snapshot remains valid
+	// after the unlock for the entire duration of this call.
+	fs.backendsMu.RLock()
+	backends := fs.backends
+	fs.backendsMu.RUnlock()
+
+	if len(backends) == 0 {
 		return nil
 	}
-	mb := fs.backends[0]
-	return &routeResult{
-		backend: mb.Backend,
-		config:  mb.Config,
-		relPath: path,
+
+	// Strip leading slash and split into at most 2 parts:
+	// [backendName, rest-of-path].
+	trimmed := strings.TrimLeft(path, "/")
+	if trimmed == "" {
+		// Pure root — handled by callers before route() is invoked.
+		return nil
 	}
+
+	parts := strings.SplitN(trimmed, "/", 2)
+	backendName := parts[0]
+
+	var relPath string
+	if len(parts) == 2 && parts[1] != "" {
+		relPath = "/" + parts[1]
+	} else {
+		relPath = "/"
+	}
+
+	// Search for the backend whose Name matches backendName (case-insensitive).
+	for _, mb := range backends {
+		if strings.EqualFold(mb.Name, backendName) {
+			return &routeResult{
+				backend: mb.Backend,
+				config:  mb.Config,
+				relPath: relPath,
+			}
+		}
+	}
+
+	// No backend matches the first path segment.
+	return nil
 }

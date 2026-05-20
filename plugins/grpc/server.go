@@ -245,6 +245,24 @@ func (s *GRPCBackendServer) GetQuota(ctx context.Context, _ *storagepb.QuotaRequ
 	return &storagepb.QuotaResponse{Free: free, Total: total}, nil
 }
 
+// ── Range reads ───────────────────────────────────────────────────────────────
+
+// ReadAt implements the ReadAt RPC: reads up to req.Length bytes from the
+// remote file at req.Offset and returns them in the response Data field.
+func (s *GRPCBackendServer) ReadAt(ctx context.Context, req *storagepb.ReadAtRequest) (*storagepb.ReadAtResponse, error) {
+	data, err := s.Impl.ReadAt(ctx, req.GetRemotePath(), req.GetOffset(), req.GetLength())
+	if err != nil {
+		return nil, mapBackendError(err)
+	}
+	return &storagepb.ReadAtResponse{Data: data}, nil
+}
+
+// ChunkSize implements the ChunkSize RPC: returns the backend's natural I/O
+// granularity so the client can align chunk-cache reads accordingly.
+func (s *GRPCBackendServer) ChunkSize(_ context.Context, _ *storagepb.ChunkSizeRequest) (*storagepb.ChunkSizeResponse, error) {
+	return &storagepb.ChunkSizeResponse{ChunkSize: s.Impl.ChunkSize()}, nil
+}
+
 // ── Describe ─────────────────────────────────────────────────────────────────
 
 // Describe returns the plugin's static descriptor. Callable before Connect.
@@ -332,17 +350,21 @@ func fileInfoToProto(fi plugins.FileInfo) *storagepb.FileInfoProto {
 		Etag:          fi.ETag,
 		IsPlaceholder: fi.IsPlaceholder,
 		IsCached:      fi.IsCached,
+		Version:       fi.Version, // opaque version token (#131)
 	}
 }
 
 // fileEventToProto converts plugins.FileEvent to its proto representation.
 func fileEventToProto(ev plugins.FileEvent) *storagepb.FileEventProto {
 	return &storagepb.FileEventProto{
-		EventType:     string(ev.Type),
-		Path:          ev.Path,
-		OldPath:       ev.OldPath,
-		TimestampUnix: ev.Timestamp.Unix(),
-		Source:        ev.Source,
+		EventType:           string(ev.Type),
+		Path:                ev.Path,
+		OldPath:             ev.OldPath,
+		TimestampUnix:       ev.Timestamp.Unix(),
+		Source:              ev.Source,
+		ModTimeUnix:         ev.ModTime.Unix(),         // time.Time{}.Unix() round-trips correctly via time.Unix() (#130)
+		PreviousModTimeUnix: ev.PreviousModTime.Unix(), // zero when newly created / unknown
+		MetadataOnly:        ev.MetadataOnly,           // true iff FileEventMetadataChanged
 	}
 }
 

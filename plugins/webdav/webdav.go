@@ -544,6 +544,7 @@ func fileInfoFromResponse(resp propResponse, remotePath string) plugins.FileInfo
 			fi.ModTime, _ = http.ParseTime(p.LastModified)
 		}
 		fi.ETag = strings.Trim(p.ETag, `"`)
+		fi.Version = fi.ETag // Version == ETag for WebDAV (#131)
 	}
 
 	return fi
@@ -915,19 +916,27 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 				for p, fi := range currentMap {
 					old, exists := snapshot[p]
 					var evType plugins.FileEventType
+					var metadataOnly bool
 					if !exists {
 						evType = plugins.FileEventCreated
-					} else if fi.ModTime != old.ModTime || fi.Size != old.Size {
+					} else if fi.ETag != "" && fi.ETag != old.ETag && fi.Size == old.Size {
+						// ETag changed but size is stable → metadata-only change (#130).
+						evType = plugins.FileEventMetadataChanged
+						metadataOnly = true
+					} else if fi.ModTime != old.ModTime || fi.Size != old.Size || fi.Version != old.Version {
 						evType = plugins.FileEventModified
 					}
 					if evType != "" {
 						changed = true
 						select {
 						case ch <- plugins.FileEvent{
-							Type:      evType,
-							Path:      p,
-							Timestamp: time.Now(),
-							Source:    "remote",
+							Type:            evType,
+							Path:            p,
+							Timestamp:       time.Now(),
+							Source:          "remote",
+							ModTime:         fi.ModTime,
+							PreviousModTime: old.ModTime, // zero when !exists (Created)
+							MetadataOnly:    metadataOnly,
 						}:
 						case <-ctx.Done():
 							return
@@ -1032,6 +1041,60 @@ func (b *Backend) GetQuota(ctx context.Context) (free, total int64, err error) {
 	}
 	return -1, -1, nil
 }
+
+// ─── Range reads ──────────────────────────────────────────────────────────────
+
+// ReadAt reads up to length bytes from the remote file at byte offset using an
+// HTTP Range header (RFC 7233).  If the server returns 200 (no range support),
+// the full body is downloaded and the requested slice is extracted.
+// Returns ErrFileNotFound (wrapped) when remote does not exist.
+// Pre-condition: IsConnected() == true, else returns nil, ErrNotConnected.
+func (b *Backend) ReadAt(ctx context.Context, remote string, offset, length int64) ([]byte, error) {
+	if !b.IsConnected() {
+		return nil, ErrNotConnected
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", b.remoteURL(remote), nil)
+	if err != nil {
+		return nil, fmt.Errorf("webdav: readAt %s: build request: %w", remote, err)
+	}
+	// Request the byte range [offset, offset+length-1].
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+
+	resp, err := b.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("webdav: readAt %s: %w", remote, err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("webdav: readAt %s: %w", remote, ErrFileNotFound)
+	case http.StatusPartialContent:
+		// Server honoured the Range header — read exactly what was sent.
+		return io.ReadAll(resp.Body)
+	case http.StatusOK:
+		// Server ignored Range — download entire body and slice.
+		all, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("webdav: readAt %s: read body: %w", remote, readErr)
+		}
+		if offset >= int64(len(all)) {
+			return []byte{}, nil // offset past EOF
+		}
+		end := offset + length
+		if end > int64(len(all)) {
+			end = int64(len(all))
+		}
+		return all[offset:end], nil
+	default:
+		return nil, fmt.Errorf("webdav: readAt %s: server returned %d", remote, resp.StatusCode)
+	}
+}
+
+// ChunkSize returns 0 for WebDAV — no native chunk boundary; the caller uses
+// the global default chunk size.
+func (b *Backend) ChunkSize() int64 { return 0 }
 
 // ─── Progress helpers ─────────────────────────────────────────────────────────
 

@@ -44,6 +44,10 @@ func DefaultConfig() AppConfig {
 		CacheSizeMaxMB: 512,
 		StartMinimized: false,
 		AutoStart:      false,
+		// MountPoint default for the unified GhD: drive (v2.0).
+		// Prefer "G:" (GhostDrive mnemonic); the actual letter is assigned at
+		// first startup via AssignAvailableLetter if "G:" is already in use.
+		MountPoint: "G:",
 	}
 }
 

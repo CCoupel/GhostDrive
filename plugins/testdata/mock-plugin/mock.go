@@ -104,6 +104,16 @@ func (m *MockPlugin) GetQuota(_ context.Context) (free, total int64, err error) 
 	return -1, -1, nil
 }
 
+// ── Range reads ───────────────────────────────────────────────────────────────
+
+// ReadAt is a no-op that returns nil, nil (success with empty data).
+func (m *MockPlugin) ReadAt(_ context.Context, _ string, _, _ int64) ([]byte, error) {
+	return nil, nil
+}
+
+// ChunkSize returns 0 (no native chunk size).
+func (m *MockPlugin) ChunkSize() int64 { return 0 }
+
 // ── Descriptor ────────────────────────────────────────────────────────────────
 
 // Describe returns a minimal PluginDescriptor for the mock backend.

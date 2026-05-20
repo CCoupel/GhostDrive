@@ -21,6 +21,18 @@ func injectEntry(dm *DriveManager, id, name string) {
 	dm.drives[id] = driveEntry{drive: New(), id: id, name: name}
 }
 
+// injectUnifiedEntry injects a NullDrive entry at the canonical "unified" key
+// directly, bypassing MountUnified (which fails on non-Windows).
+func injectUnifiedEntry(dm *DriveManager) {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	dm.drives[unifiedDriveKey] = driveEntry{
+		drive: New(),
+		id:    unifiedDriveKey,
+		name:  "GhostDrive",
+	}
+}
+
 // ─── AvailableDriveLetters ────────────────────────────────────────────────────
 
 // TestAvailableDriveLetters_NonWindows verifies that AvailableDriveLetters
@@ -304,4 +316,94 @@ func TestDriveBackendEmitter_SyncError_DefaultMessage(t *testing.T) {
 	s, ok := dm.GetStatus("be-5")
 	require.True(t, ok)
 	assert.NotEmpty(t, s.SyncError, "SyncError must have a fallback message even with nil payload (#118)")
+}
+
+// ─── v2.0 Unified Drive API ───────────────────────────────────────────────────
+
+// TestDriveManager_GetUnifiedStatus_NotMounted_ReturnsFalse verifies that
+// GetUnifiedStatus returns (_, false) when no unified drive is registered.
+func TestDriveManager_GetUnifiedStatus_NotMounted_ReturnsFalse(t *testing.T) {
+	dm := NewDriveManager(nil)
+	_, ok := dm.GetUnifiedStatus()
+	assert.False(t, ok, "GetUnifiedStatus must return false when no unified drive is mounted")
+}
+
+// TestDriveManager_UnmountUnified_NotMounted_IsNoop verifies that
+// UnmountUnified returns nil when no unified drive is registered (idempotent).
+func TestDriveManager_UnmountUnified_NotMounted_IsNoop(t *testing.T) {
+	dm := NewDriveManager(nil)
+	assert.NoError(t, dm.UnmountUnified(), "UnmountUnified must be idempotent when no drive is mounted")
+}
+
+// TestDriveManager_UpdateBackends_NotMounted_ReturnsError verifies that
+// UpdateBackends returns an error when the unified drive is not mounted.
+func TestDriveManager_UpdateBackends_NotMounted_ReturnsError(t *testing.T) {
+	dm := NewDriveManager(nil)
+	err := dm.UpdateBackends([]MountedBackend{})
+	require.Error(t, err, "UpdateBackends must return an error when unified drive is not mounted")
+	assert.Contains(t, err.Error(), "not mounted", "error must mention 'not mounted'")
+}
+
+// TestDriveManager_GetUnifiedStatus_WithEntry verifies that GetUnifiedStatus
+// returns correct BackendID and BackendName for an injected unified entry.
+func TestDriveManager_GetUnifiedStatus_WithEntry(t *testing.T) {
+	dm := NewDriveManager(nil)
+	injectUnifiedEntry(dm)
+
+	s, ok := dm.GetUnifiedStatus()
+	require.True(t, ok, "GetUnifiedStatus must return true for a registered unified drive")
+	assert.Equal(t, "unified", s.BackendID, "BackendID must be 'unified'")
+	assert.Equal(t, "GhostDrive", s.BackendName, "BackendName must be 'GhostDrive'")
+}
+
+// TestDriveManager_MountUnified_NonWindows_ReturnsError verifies that
+// MountUnified returns an error on non-Windows (NullDrive) and does NOT
+// register the unified drive in the pool.
+func TestDriveManager_MountUnified_NonWindows_ReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("non-Windows specific test — WinFsp not available")
+	}
+	dm := NewDriveManager(nil)
+	mb := MountedBackend{ID: "b1", Name: "NAS"}
+	err := dm.MountUnified("G:", []MountedBackend{mb})
+	require.Error(t, err, "MountUnified must return error on non-Windows (NullDrive)")
+
+	// Failed mount must NOT register the unified entry.
+	_, ok := dm.GetUnifiedStatus()
+	assert.False(t, ok, "GetUnifiedStatus must be false after a failed MountUnified")
+}
+
+// TestDriveManager_UnmountUnified_ClearsEntry verifies that UnmountUnified
+// removes the unified drive from the pool.
+func TestDriveManager_UnmountUnified_ClearsEntry(t *testing.T) {
+	dm := NewDriveManager(nil)
+	injectUnifiedEntry(dm)
+
+	_, ok := dm.GetUnifiedStatus()
+	require.True(t, ok, "unified entry must be present before unmount")
+
+	require.NoError(t, dm.UnmountUnified(), "UnmountUnified on a NullDrive entry must not error")
+
+	_, ok = dm.GetUnifiedStatus()
+	assert.False(t, ok, "GetUnifiedStatus must be false after UnmountUnified")
+}
+
+// TestDriveManager_SetSyncError_UnifiedDrive verifies that SetSyncError works
+// on the unified drive entry (keyed by "unified") and is reflected in
+// GetUnifiedStatus.
+func TestDriveManager_SetSyncError_UnifiedDrive(t *testing.T) {
+	dm := NewDriveManager(nil)
+	injectUnifiedEntry(dm)
+
+	dm.SetSyncError(unifiedDriveKey, "connection lost")
+
+	s, ok := dm.GetUnifiedStatus()
+	require.True(t, ok)
+	assert.Equal(t, "connection lost", s.SyncError,
+		"SetSyncError must be visible in GetUnifiedStatus (#117b)")
+
+	// Clear it.
+	dm.SetSyncError(unifiedDriveKey, "")
+	s, _ = dm.GetUnifiedStatus()
+	assert.Empty(t, s.SyncError, "cleared SyncError must be empty in GetUnifiedStatus")
 }

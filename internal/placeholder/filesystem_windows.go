@@ -49,7 +49,20 @@ type MetaUpdatedEvent struct {
 // appropriate StorageBackend based on the path prefix /<BackendName>/...
 type GhostFileSystem struct {
 	fuse.FileSystemBase
-	backends []MountedBackend
+
+	// backendsMu guards backends, watchContexts and watchBaseCtx.
+	// FUSE callbacks acquire a read-lock and snapshot the slice; UpdateBackends
+	// acquires the write-lock.  Never hold backendsMu while performing backend
+	// I/O — only use it to snapshot the slice header.
+	backendsMu gosync.RWMutex
+	backends   []MountedBackend
+
+	// watchBaseCtx is the root context passed to startWatchLoops by Mount().
+	// Child contexts are derived from it in updateWatchLoops, one per backend.
+	watchBaseCtx context.Context
+	// watchContexts maps backendID → cancel function for its watchLoop goroutine.
+	// Protected by backendsMu.
+	watchContexts map[string]context.CancelFunc
 
 	// host is the WinFsp FileSystemHost that owns this filesystem instance.
 	// Set once by WinFspDrive.Mount() immediately after fuse.NewFileSystemHost()
@@ -101,6 +114,7 @@ func newGhostFileSystem(backends []MountedBackend, emitter syncdispatch.EventEmi
 
 	return &GhostFileSystem{
 		backends:      backends,
+		watchContexts: make(map[string]context.CancelFunc),
 		handles:       make(map[uint64]*openEntry),
 		desktopIni:    diniContent,
 		desktopIniTmp: diniTmp,
@@ -213,6 +227,28 @@ func (fs *GhostFileSystem) Getattr(path string, stat *fuse.Stat_t, _ uint64) int
 		return 0
 	}
 
+	// Virtual backend root directory: "/<backendName>" maps to a synthetic
+	// S_IFDIR that does not exist on the backend itself.
+	// This check runs before route() so that Getattr("/<name>") always
+	// returns a valid directory stat even before any file inside it is listed.
+	trimmed := strings.TrimLeft(path, "/")
+	if !strings.Contains(trimmed, "/") && trimmed != "" {
+		// Snapshot backends under RLock — safe to iterate after unlock because
+		// UpdateBackends always replaces the slice (never modifies in place).
+		fs.backendsMu.RLock()
+		backends := fs.backends
+		fs.backendsMu.RUnlock()
+		for _, mb := range backends {
+			if strings.EqualFold(mb.Name, trimmed) {
+				stat.Mode = fuse.S_IFDIR | 0755
+				stat.Nlink = 2
+				stat.Atim, stat.Mtim, stat.Ctim = now, now, now
+				return 0
+			}
+		}
+		// Unknown first-level name — fall through to backend or ENOENT.
+	}
+
 	r := fs.route(path)
 	if r == nil {
 		return -fuse.ENOENT
@@ -267,7 +303,9 @@ func (fs *GhostFileSystem) Readdir(path string,
 	fill(".", nil, 0)
 	fill("..", nil, 0)
 
-	// Root lists virtual files plus the backend's own root content.
+	// Root lists virtual files plus one synthetic sub-directory per backend.
+	// In v2.0 the drive root never exposes backend file contents directly;
+	// every backend is accessible under its own named sub-folder.
 	if path == "/" {
 		now := nowTs()
 		// Virtual desktop.ini and ghostdrive.ico for Windows Explorer drive icon.
@@ -279,27 +317,15 @@ func (fs *GhostFileSystem) Readdir(path string,
 		icoSt := &fuse.Stat_t{Mode: fuse.S_IFREG | 0444, Nlink: 1, Size: int64(len(driveIconICO))}
 		icoSt.Atim, icoSt.Mtim, icoSt.Ctim = now, now, now
 		fill("ghostdrive.ico", icoSt, 0)
-		if len(fs.backends) == 0 {
-			return 0
-		}
-		entries, err := fs.backends[0].Backend.List(context.Background(), "/")
-		if err != nil {
-			logger.Error("placeholder: Readdir /: %v", err)
-			return -fuse.EIO
-		}
-		for _, e := range entries {
-			st := &fuse.Stat_t{}
-			mts := tsFromTime(e.ModTime)
-			if e.IsDir {
-				st.Mode = fuse.S_IFDIR | 0755
-				st.Nlink = 2
-			} else {
-				st.Mode = fuse.S_IFREG | 0644
-				st.Nlink = 1
-				st.Size = e.Size
-			}
-			st.Atim, st.Mtim, st.Ctim = mts, mts, now
-			if !fill(e.Name, st, 0) {
+		// One virtual S_IFDIR per registered backend.
+		// Snapshot under RLock — safe to iterate after unlock (slice is replaced, not mutated).
+		fs.backendsMu.RLock()
+		backends := fs.backends
+		fs.backendsMu.RUnlock()
+		for _, mb := range backends {
+			dirSt := &fuse.Stat_t{Mode: fuse.S_IFDIR | 0755, Nlink: 2}
+			dirSt.Atim, dirSt.Mtim, dirSt.Ctim = now, now, now
+			if !fill(mb.Name, dirSt, 0) {
 				break
 			}
 		}
@@ -487,6 +513,49 @@ func (fs *GhostFileSystem) notifyUpload(path string) {
 		logger.Debug("placeholder: notifyUpload: Notify(%s) sent", path)
 	} else {
 		logger.Warn("placeholder: notifyUpload: Notify(%s) failed (WinFsp notify unavailable)", path)
+	}
+}
+
+// notifyRootChanged sends WinFsp NOTIFY_UNLINK / NOTIFY_CREATE notifications
+// for backends that were removed from or added to the unified drive root after
+// an UpdateBackends() call.  This causes Windows Explorer to refresh GhD:\
+// automatically without requiring an F5 from the user (#132).
+//
+// Uses the same host.Notify() mechanism as notifyUpload and handleWatchEvent
+// — no additional imports required.  Non-fatal: if the host is unavailable
+// the routing table is still up-to-date; the user can press F5.
+func (fs *GhostFileSystem) notifyRootChanged(oldBackends, newBackends []MountedBackend) {
+	if fs.host == nil {
+		return
+	}
+
+	oldIDs := make(map[string]bool, len(oldBackends))
+	for _, mb := range oldBackends {
+		oldIDs[mb.ID] = true
+	}
+	newIDs := make(map[string]bool, len(newBackends))
+	for _, mb := range newBackends {
+		newIDs[mb.ID] = true
+	}
+
+	// NOTIFY_UNLINK for backends removed from the root — Explorer removes the
+	// sub-folder from its directory listing.
+	for _, mb := range oldBackends {
+		if !newIDs[mb.ID] {
+			path := "/" + mb.Name
+			ok := fs.host.Notify(path, fuse.NOTIFY_UNLINK)
+			logger.Debug("placeholder: notifyRootChanged: UNLINK %s ok=%v", path, ok)
+		}
+	}
+
+	// NOTIFY_CREATE for backends newly added to the root — Explorer adds the
+	// sub-folder to its directory listing.
+	for _, mb := range newBackends {
+		if !oldIDs[mb.ID] {
+			path := "/" + mb.Name
+			ok := fs.host.Notify(path, fuse.NOTIFY_CREATE)
+			logger.Debug("placeholder: notifyRootChanged: CREATE %s ok=%v", path, ok)
+		}
 	}
 }
 
@@ -708,12 +777,14 @@ func (fs *GhostFileSystem) Mkdir(path string, _ uint32) int {
 	return 0
 }
 
-func (fs *GhostFileSystem) Statfs(path string, stat *fuse.Statfs_t) int {
-	if len(fs.backends) == 0 {
-		return -fuse.EIO
-	}
-	free, total, err := fs.backends[0].Backend.GetQuota(context.Background())
-	if err != nil || total == 0 {
+func (fs *GhostFileSystem) Statfs(_ string, stat *fuse.Statfs_t) int {
+	// Snapshot under RLock — safe to iterate after unlock (slice replaced, not mutated).
+	fs.backendsMu.RLock()
+	backends := fs.backends
+	fs.backendsMu.RUnlock()
+
+	if len(backends) == 0 {
+		// No backends: report a large but finite virtual filesystem.
 		stat.Bsize = 4096
 		stat.Frsize = 4096
 		stat.Blocks = 1 << 40 / 4096
@@ -721,24 +792,107 @@ func (fs *GhostFileSystem) Statfs(path string, stat *fuse.Statfs_t) int {
 		stat.Bavail = stat.Bfree
 		return 0
 	}
+
+	// Aggregate free/total across all backends.
+	var totalFree, totalTotal int64
+	anyValid := false
+	for _, mb := range backends {
+		free, total, err := mb.Backend.GetQuota(context.Background())
+		if err != nil || total <= 0 {
+			continue
+		}
+		totalFree += free
+		totalTotal += total
+		anyValid = true
+	}
+
+	if !anyValid {
+		stat.Bsize = 4096
+		stat.Frsize = 4096
+		stat.Blocks = 1 << 40 / 4096
+		stat.Bfree = 1 << 39 / 4096
+		stat.Bavail = stat.Bfree
+		return 0
+	}
+
 	bsize := uint64(4096)
 	stat.Bsize = bsize
 	stat.Frsize = bsize
-	stat.Blocks = uint64(total) / bsize
-	stat.Bfree = uint64(free) / bsize
+	stat.Blocks = uint64(totalTotal) / bsize
+	stat.Bfree = uint64(totalFree) / bsize
 	stat.Bavail = stat.Bfree
 	return 0
 }
 
 // ── Watch-based push invalidation ────────────────────────────────────────────
 
-// startWatchLoops starts one watchLoop goroutine per mounted backend.
-// Each goroutine listens on the channel returned by backend.Watch() and
-// invalidates the metadata cache on each received FileEvent.
-// The goroutines stop when ctx is cancelled (called in WinFspDrive.Unmount).
+// startWatchLoops records ctx as the root context for all watchLoop goroutines
+// and starts one goroutine per backend already in fs.backends.
+// Called once by WinFspDrive.Mount() before FUSE dispatch starts.
 func (fs *GhostFileSystem) startWatchLoops(ctx context.Context) {
-	for _, mb := range fs.backends {
-		go fs.watchLoop(ctx, mb)
+	fs.backendsMu.Lock()
+	fs.watchBaseCtx = ctx
+	backends := make([]MountedBackend, len(fs.backends))
+	copy(backends, fs.backends)
+	fs.backendsMu.Unlock()
+
+	// updateWatchLoops with an empty old list starts goroutines for all backends.
+	fs.updateWatchLoops(nil, backends)
+}
+
+// updateWatchLoops diffs oldBackends vs newBackends and:
+//   - cancels watchLoop goroutines for backends removed from the list,
+//   - starts new watchLoop goroutines for backends that were just added.
+//
+// Must be called AFTER fs.backends has already been updated with newBackends.
+// Safe to call from any goroutine; holds backendsMu only while manipulating
+// the watchContexts map (not during backend I/O or goroutine startup).
+func (fs *GhostFileSystem) updateWatchLoops(oldBackends, newBackends []MountedBackend) {
+	oldIDs := make(map[string]bool, len(oldBackends))
+	for _, mb := range oldBackends {
+		oldIDs[mb.ID] = true
+	}
+	newIDs := make(map[string]bool, len(newBackends))
+	for _, mb := range newBackends {
+		newIDs[mb.ID] = true
+	}
+
+	// pendingStart collects (backend, context) pairs for goroutines that must
+	// be started OUTSIDE the lock to avoid lock-order inversion.
+	type pendingStart struct {
+		mb  MountedBackend
+		ctx context.Context
+	}
+	var toStart []pendingStart
+
+	fs.backendsMu.Lock()
+	// Cancel goroutines for backends no longer in the list.
+	for _, mb := range oldBackends {
+		if !newIDs[mb.ID] {
+			if cancel, ok := fs.watchContexts[mb.ID]; ok {
+				cancel()
+				delete(fs.watchContexts, mb.ID)
+			}
+		}
+	}
+	// Create child contexts for newly added backends.
+	for _, mb := range newBackends {
+		if !oldIDs[mb.ID] {
+			if fs.watchBaseCtx == nil {
+				// Mount has not been called yet — goroutine will be started by
+				// startWatchLoops; nothing to do here.
+				continue
+			}
+			ctx, cancel := context.WithCancel(fs.watchBaseCtx)
+			fs.watchContexts[mb.ID] = cancel
+			toStart = append(toStart, pendingStart{mb, ctx})
+		}
+	}
+	fs.backendsMu.Unlock()
+
+	// Start goroutines outside the lock.
+	for _, p := range toStart {
+		go fs.watchLoop(p.ctx, p.mb)
 	}
 }
 

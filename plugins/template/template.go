@@ -189,6 +189,17 @@ func (b *Backend) GetQuota(_ context.Context) (int64, int64, error) {
 	return -1, -1, nil
 }
 
+// ─── Range reads ──────────────────────────────────────────────────────────────
+
+// ReadAt is not implemented in the template; replace with real logic.
+func (b *Backend) ReadAt(_ context.Context, _ string, _, _ int64) ([]byte, error) {
+	return nil, errors.New("template: ReadAt not implemented")
+}
+
+// ChunkSize returns 0 (use global default). Override with the backend's native
+// chunk size when applicable (e.g. 67_108_864 for MooseFS-style systems).
+func (b *Backend) ChunkSize() int64 { return 0 }
+
 // Watch starts monitoring path for changes. The returned channel is closed
 // when ctx is cancelled. Buffer size must be at least 64.
 func (b *Backend) Watch(ctx context.Context, path string) (<-chan plugins.FileEvent, error) {

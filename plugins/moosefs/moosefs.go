@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -817,6 +818,7 @@ func (b *Backend) List(ctx context.Context, dirPath string) ([]plugins.FileInfo,
 			} else {
 				fi.Size = int64(attr.Size)
 				fi.ModTime = time.Unix(int64(attr.MTime), 0)
+				fi.Version = strconv.FormatUint(uint64(attr.CTime), 10) // ctime as opaque version token (#131)
 			}
 			result = append(result, fi)
 		}
@@ -866,6 +868,7 @@ func (b *Backend) Stat(ctx context.Context, filePath string) (*plugins.FileInfo,
 			IsDir:   isDir,
 			Size:    int64(attr.Size),
 			ModTime: time.Unix(int64(attr.MTime), 0),
+			Version: strconv.FormatUint(uint64(attr.CTime), 10), // ctime as opaque version token (#131)
 		}, nil
 	}
 	return nil, ErrNotConnected
@@ -957,8 +960,13 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 				for p, fi := range currentMap {
 					old, exists := snapshot[p]
 					var evType plugins.FileEventType
+					var metadataOnly bool
 					if !exists {
 						evType = plugins.FileEventCreated
+					} else if fi.ModTime != old.ModTime && fi.Size == old.Size {
+						// mtime changed, size stable → attribute/permission change (#130).
+						evType = plugins.FileEventMetadataChanged
+						metadataOnly = true
 					} else if fi.ModTime != old.ModTime || fi.Size != old.Size {
 						evType = plugins.FileEventModified
 					}
@@ -966,10 +974,13 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 						changed = true
 						select {
 						case ch <- plugins.FileEvent{
-							Type:      evType,
-							Path:      p,
-							Timestamp: time.Now(),
-							Source:    "remote",
+							Type:            evType,
+							Path:            p,
+							Timestamp:       time.Now(),
+							Source:          "remote",
+							ModTime:         fi.ModTime,
+							PreviousModTime: old.ModTime, // zero when !exists (Created)
+							MetadataOnly:    metadataOnly,
 						}:
 						case <-ctx.Done():
 							return
@@ -1065,3 +1076,49 @@ func (b *Backend) GetQuota(_ context.Context) (free, total int64, err error) {
 	logger.Error("getquota: free=%d total=%d err=%v", free, total, ErrNotConnected)
 	return 0, 0, ErrNotConnected
 }
+
+// ─── Range reads ──────────────────────────────────────────────────────────────
+
+// moosefsChunkSize is the native chunk size of MooseFS (64 MiB).
+const moosefsChunkSize = 67_108_864
+
+// ReadAt reads up to length bytes from the remote file at the given byte offset
+// using the mfsclient Read primitive (native chunk-aware I/O).
+// Returns ErrFileNotFound (wrapped) when remote does not exist.
+// Pre-condition: IsConnected() == true, else returns nil, ErrNotConnected.
+func (b *Backend) ReadAt(ctx context.Context, remote string, offset, length int64) ([]byte, error) {
+	connected, c, subDir := b.state()
+	if !connected {
+		return nil, ErrNotConnected
+	}
+
+	nodeID, err := resolvePath(ctx, c, subDir, remote)
+	if err != nil {
+		return nil, fmt.Errorf("moosefs: readAt %s: %w", remote, err)
+	}
+
+	if length <= 0 {
+		return []byte{}, nil
+	}
+
+	// Guard against silent uint32 wrap-around: the mfsclient Read primitive
+	// accepts a uint32 byte count, so a length > 4 GiB would silently truncate.
+	// Callers must chunk requests to at most ChunkSize() bytes.
+	if length > math.MaxUint32 {
+		return nil, fmt.Errorf("moosefs: readAt %s: length %d exceeds uint32 max (%d) — chunk read required",
+			remote, length, math.MaxUint32)
+	}
+
+	// Safe cast: length <= math.MaxUint32 verified above.
+	size := uint32(length)
+	data, err := c.Read(nodeID, uint64(offset), size)
+	if err != nil {
+		return nil, fmt.Errorf("moosefs: readAt %s offset=%d: %w", remote, offset, err)
+	}
+	return data, nil
+}
+
+// ChunkSize returns 67_108_864 (64 MiB) — the native chunk size of MooseFS.
+// The chunk cache should align range reads to this boundary for optimal
+// performance on MooseFS chunk servers.
+func (b *Backend) ChunkSize() int64 { return moosefsChunkSize }

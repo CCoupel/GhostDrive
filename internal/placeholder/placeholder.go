@@ -31,6 +31,13 @@ type VirtualDrive interface {
 	// emit Wails events (e.g. "meta:updated"). Must be called before Mount().
 	// Pass nil to disable event emission (no-op emitter is used internally).
 	SetEmitter(e syncdispatch.EventEmitter)
+
+	// UpdateBackends atomically replaces the list of mounted backends on the
+	// unified drive without unmounting/remounting.  The FUSE filesystem will
+	// immediately start serving the new list of backends from Readdir("/").
+	// Returns ErrNotSupported on non-Windows platforms (NullDrive).
+	// Returns an error if the drive is not mounted.
+	UpdateBackends(backends []MountedBackend) error
 }
 
 // MountedBackend pairs a StorageBackend with its identity and config.

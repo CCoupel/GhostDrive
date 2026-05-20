@@ -337,6 +337,35 @@ func (b *GRPCBackend) GetQuota(ctx context.Context) (free, total int64, err erro
 	return resp.GetFree(), resp.GetTotal(), nil
 }
 
+// ── Range reads ───────────────────────────────────────────────────────────────
+
+// ReadAt implements plugins.StorageBackend.
+// Delegates to the remote plugin's ReadAt RPC.
+func (b *GRPCBackend) ReadAt(ctx context.Context, remote string, offset, length int64) ([]byte, error) {
+	resp, err := b.client.ReadAt(ctx, &storagepb.ReadAtRequest{
+		RemotePath: remote,
+		Offset:     offset,
+		Length:     length,
+	})
+	if err != nil {
+		return nil, mapGRPCError("grpc: ReadAt", err)
+	}
+	if resp.GetError() != "" {
+		return nil, fmt.Errorf("grpc: ReadAt: %s", resp.GetError())
+	}
+	return resp.GetData(), nil
+}
+
+// ChunkSize implements plugins.StorageBackend.
+// Delegates to the remote plugin's ChunkSize RPC.
+func (b *GRPCBackend) ChunkSize() int64 {
+	resp, err := b.client.ChunkSize(context.Background(), &storagepb.ChunkSizeRequest{})
+	if err != nil {
+		return 0
+	}
+	return resp.GetChunkSize()
+}
+
 // ── Describe ─────────────────────────────────────────────────────────────────
 
 // Describe implements plugins.StorageBackend.
@@ -414,7 +443,27 @@ func fileInfoFromProto(pf *storagepb.FileInfoProto) plugins.FileInfo {
 		ETag:          pf.GetEtag(),
 		IsPlaceholder: pf.GetIsPlaceholder(),
 		IsCached:      pf.GetIsCached(),
+		Version:       pf.GetVersion(), // opaque version token (#131)
 	}
+}
+
+// protoTimeToGo converts a proto Unix timestamp to a Go time.Time.
+//
+// Proto3 int64 fields default to 0 when absent or unset. time.Unix(0, 0) is
+// 1970-01-01 UTC and IsZero() returns false — that is NOT what callers expect
+// for "unset / unavailable" timestamps (e.g. FileEvent.PreviousModTime on a
+// newly created file). This helper maps 0 → time.Time{} so that callers can
+// rely on t.IsZero() to detect absent values.
+//
+// Trade-off: a plugin that intentionally sends the Unix epoch (1970-01-01) as
+// a modtime will be silently mapped to time.Time{}.  In practice, modtimes of
+// exactly 0 are artefacts of absent fields rather than real file timestamps.
+// Callers that need to distinguish the two cases must compare .Unix() == 0.
+func protoTimeToGo(unixSec int64) time.Time {
+	if unixSec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(unixSec, 0)
 }
 
 // fileEventFromProto converts a FileEventProto to plugins.FileEvent.
@@ -423,11 +472,16 @@ func fileEventFromProto(pe *storagepb.FileEventProto) plugins.FileEvent {
 		return plugins.FileEvent{}
 	}
 	return plugins.FileEvent{
-		Type:      plugins.FileEventType(pe.GetEventType()),
-		Path:      pe.GetPath(),
-		OldPath:   pe.GetOldPath(),
-		Timestamp: time.Unix(pe.GetTimestampUnix(), 0),
-		Source:    pe.GetSource(),
+		Type:            plugins.FileEventType(pe.GetEventType()),
+		Path:            pe.GetPath(),
+		OldPath:         pe.GetOldPath(),
+		Timestamp:       time.Unix(pe.GetTimestampUnix(), 0),
+		Source:          pe.GetSource(),
+		// protoTimeToGo maps absent field (proto default 0) to time.Time{} so
+		// callers can use IsZero() to detect "unset". See protoTimeToGo doc.
+		ModTime:         protoTimeToGo(pe.GetModTimeUnix()),
+		PreviousModTime: protoTimeToGo(pe.GetPreviousModTimeUnix()),
+		MetadataOnly:    pe.GetMetadataOnly(), // true iff FileEventMetadataChanged
 	}
 }
 
