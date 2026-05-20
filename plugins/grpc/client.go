@@ -447,6 +447,25 @@ func fileInfoFromProto(pf *storagepb.FileInfoProto) plugins.FileInfo {
 	}
 }
 
+// protoTimeToGo converts a proto Unix timestamp to a Go time.Time.
+//
+// Proto3 int64 fields default to 0 when absent or unset. time.Unix(0, 0) is
+// 1970-01-01 UTC and IsZero() returns false — that is NOT what callers expect
+// for "unset / unavailable" timestamps (e.g. FileEvent.PreviousModTime on a
+// newly created file). This helper maps 0 → time.Time{} so that callers can
+// rely on t.IsZero() to detect absent values.
+//
+// Trade-off: a plugin that intentionally sends the Unix epoch (1970-01-01) as
+// a modtime will be silently mapped to time.Time{}.  In practice, modtimes of
+// exactly 0 are artefacts of absent fields rather than real file timestamps.
+// Callers that need to distinguish the two cases must compare .Unix() == 0.
+func protoTimeToGo(unixSec int64) time.Time {
+	if unixSec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(unixSec, 0)
+}
+
 // fileEventFromProto converts a FileEventProto to plugins.FileEvent.
 func fileEventFromProto(pe *storagepb.FileEventProto) plugins.FileEvent {
 	if pe == nil {
@@ -458,9 +477,11 @@ func fileEventFromProto(pe *storagepb.FileEventProto) plugins.FileEvent {
 		OldPath:         pe.GetOldPath(),
 		Timestamp:       time.Unix(pe.GetTimestampUnix(), 0),
 		Source:          pe.GetSource(),
-		ModTime:         time.Unix(pe.GetModTimeUnix(), 0),         // IsZero() == true when field was 0 (#130)
-		PreviousModTime: time.Unix(pe.GetPreviousModTimeUnix(), 0), // IsZero() == true when field was 0
-		MetadataOnly:    pe.GetMetadataOnly(),                      // true iff FileEventMetadataChanged
+		// protoTimeToGo maps absent field (proto default 0) to time.Time{} so
+		// callers can use IsZero() to detect "unset". See protoTimeToGo doc.
+		ModTime:         protoTimeToGo(pe.GetModTimeUnix()),
+		PreviousModTime: protoTimeToGo(pe.GetPreviousModTimeUnix()),
+		MetadataOnly:    pe.GetMetadataOnly(), // true iff FileEventMetadataChanged
 	}
 }
 

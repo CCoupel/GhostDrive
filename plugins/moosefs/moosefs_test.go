@@ -540,9 +540,16 @@ func (s *integFakeServer) svrGetAttr(conn net.Conn, payload []byte) {
 	msgid := binary.BigEndian.Uint32(payload[0:4])
 	nodeID := binary.BigEndian.Uint32(payload[4:8])
 
+	// Take a value copy of the node under the lock so that buildIntegAttrs can
+	// read n.modTime safely after the lock is released, preventing a data race
+	// with concurrent modTime writes from the test goroutine (#130 regression).
 	s.mu.Lock()
-	n, ok := s.nodes[nodeID]
+	ptr, ok := s.nodes[nodeID]
 	shouldFail := s.getAttrErrIDs[nodeID]
+	var nodeCopy integNode
+	if ok {
+		nodeCopy = *ptr // shallow copy under lock — avoids race on modTime
+	}
 	s.mu.Unlock()
 
 	if shouldFail || !ok {
@@ -550,7 +557,7 @@ func (s *integFakeServer) svrGetAttr(conn net.Conn, payload []byte) {
 		return
 	}
 
-	attrs := buildIntegAttrs(n)
+	attrs := buildIntegAttrs(&nodeCopy)
 	integWriteSuccess(conn, mfsclient.MatoclFuseGetAttr, msgid, attrs)
 }
 
