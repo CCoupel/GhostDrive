@@ -32,7 +32,7 @@ GhostDrive est un client Windows libre qui transforme n'importe quel backend de 
 
 ## Fonctionnalites
 
-### V1 — Disponible (v0.3.0)
+### V1 — Disponible (v1.7.0)
 - Synchronisation bidirectionnelle de dossiers locaux vers backends distants
 - Placeholders Windows (Cloud Filter API) — Files On-Demand
 - Cache local activable par point de sync

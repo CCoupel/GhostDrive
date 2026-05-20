@@ -18,6 +18,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.1] — 2026-05-20
+
+### Added
+
+- **FileInfo.Version** : jeton de version opaque par backend — WebDAV = ETag, MooseFS = CTime Unix (décimal), local = "" (non disponible) — permet une invalidation de cache plus précise sans re-Stat() (#131)
+- **FileEvent enrichi** : champs `ModTime`, `PreviousModTime`, `MetadataOnly` — permet de détecter les changements de metadata sans modification de contenu (ex: permissions, ETag) sans appel I/O supplémentaire (#130)
+- **FileEventMetadataChanged** : nouveau type d'événement émis quand seule la metadata change (ETag/mtime) sans modification de taille — cache layer peut invalider les metadata sans éviction des chunks de contenu (#130)
+- **WebDAV Watch — détection MetadataChanged** : ETag change + taille stable → FileEventMetadataChanged avec ModTime + PreviousModTime (#130)
+- **MooseFS Watch — détection MetadataChanged** : mtime change + taille stable → FileEventMetadataChanged avec ModTime + PreviousModTime (#130)
+- **gRPC round-trip** : round-trip proto pour `FileInfo.Version`, `FileEvent.ModTime`, `FileEvent.PreviousModTime`, `FileEvent.MetadataOnly` — plugins dynamiques supportent les nouveaux champs (#130 #131)
+
+### Fixed
+
+- **protoTimeToGo() — préservation IsZero() sémantique** : mapping `int64(0) → time.Time{}` (zéro-value Go) au lieu de `1970-01-01` — conserve la distinction entre "non disponible" et "1970" (#130)
+
+### Notes
+
+- Aucun BREAKING CHANGE — tous les champs sont optionnels (zero-value compatible)
+- `FileInfo.Version == ""` valide — fallback obligatoire sur `ModTime`
+- Consommé par cache de chunks v2.1 (#124) pour invalidation à granularité plus fine
+
+---
+
+## [2.0.0] — 2026-05-17
+
+### BREAKING CHANGES
+
+- **StorageBackend interface** : deux nouvelles méthodes obligatoires ajoutées — `ReadAt(ctx, remote, offset, length) ([]byte, error)` et `ChunkSize() int64`. Tout plugin externe doit être mis à jour. (#121)
+- **VFS unifiée : un seul drive GhD:** au lieu de drives distincts par backend (E:, F:, G:...). Les chemins `BackendConfig.MountPoint` sont dépréciés et ignorés — utiliser `AppConfig.MountPoint` (défaut: `"G:"`) (#120)
+- **GetDriveStatuses() binding** : retourne une seule entrée `map["unified"]DriveStatus` au lieu de `map[backendID]DriveStatus`. Clés de `BackendPaths` = sous-dossiers dans `GhD:\` (ex: `G:\MonNAS\`, `G:\WebDAV\`) (#120)
+- **BackendConfig.MountPoint** : déprécié — ignoré pour la VFS ; conservé en JSON pour compatibilité ascendante (#120)
+
+### Added
+
+- **ReadAt() sur tous les plugins** : hydratation progressive des fichiers avec range reads optimisés — WebDAV via HTTP Range header (206), MooseFS via offset natif (64 MiB chunk), Local via `os.File.ReadAt` (#121)
+- **ChunkSize() sur tous les plugins** : retourne la granularité naturelle — 0 pour WebDAV/Local (défaut global), 67_108_864 (64 MiB) pour MooseFS (#121)
+- **Drive WinFsp unifié** : un seul drive `GhD:` exposant chaque backend comme sous-dossier virtuel `GhD:\MonNAS\`, `GhD:\WebDAV\`, etc. Montage/démontage automatique au démarrage ; ajout/retrait backends via `UpdateBackends()` sans remontage (#120)
+- **Routeur multi-backend** : `router_windows.go` résout les chemins FUSE vers le backend propriétaire via le premier segment du chemin (case-insensitive) (#120)
+- **VirtualDrive.UpdateBackends()** : met à jour atomiquement la liste des backends sur le drive unifié — utilisé lors de l'activation/désactivation de backends dans l'UI (#120)
+- **DriveManager v2.0 API** : `MountUnified(mountPoint, backends)`, `UpdateBackends(backends)`, `UnmountUnified()`, `GetUnifiedStatus()` — déprécie les anciennes méthodes par-backend (#120)
+- **GhostFileSystem multi-backends** : `Readdir("/")` liste maintenant les dossiers virtuels de tous les backends activés ; `Statfs()` agrège les quotas (#120)
+
+### Changed
+
+- **Startup (app.go)** : migration v2.0 — appelle `MountUnified` avec tous les backends au démarrage au lieu de monter chacun individuellement (#120)
+- **app.SetBackendEnabled** : utilise `UpdateBackends()` pour mettre à jour la VFS atomiquement au lieu de Mount/Unmount par backend (#120)
+- **Métadonnées ListResult** : `GetAttr` appelé par entrée dans `List()` — affiche la taille réelle et la date de modification dans GhD: (#116)
+
+### Fixed
+
+- **Data race RWMutex GhostFileSystem.backends** : protection thread-safe des opérations de lecture/écriture sur la liste des backends en v2.0 (#120)
+- **watchLoop dynamique** : relancé automatiquement quand un backend est ajouté via `UpdateBackends()` ; stoppé à la désactivation (#120)
+- **Guard overflow uint32 MooseFS ReadAt** : vérification `length > math.MaxUint32` avant conversion — retourne erreur explicite au lieu de plantage (#121)
+- **SHChangeNotify — rafraîchissement Explorateur Windows** : appel à `SHChangeNotify(SHCNE_UPDATEDIR)` lors de l'activation/désactivation d'un backend via `UpdateBackends()` — explore.exe rafraîchit automatiquement la liste des dossiers dans GhD: (#132)
+
+### Deprecated
+
+- `GetDriveStatus()` binding Wails (v1.7) — remplacé par `GetDriveStatuses()` qui retourne une map unifié
+- `BackendConfig.MountPoint` — ignoré pour la VFS ; utiliser `AppConfig.MountPoint`
+- Anciennes méthodes `DriveManager.Mount(backendID, ...)`, `Unmount(backendID)`, `GetStatus(backendID)` — remplacées par `MountUnified`, `UpdateBackends`, `GetUnifiedStatus`
+
+### Tests
+
+- 8 tests routeur multi-backend (`router_test.go`) : routage par segment, case-insensitive, multi-backends, ENOENT
+- 8 tests manager unified drive (`manager_whitebox_test.go`) : MountUnified, UpdateBackends, GetUnifiedStatus, cohérence UI/drive
+- 15 tests ReadAt/ChunkSize (5 par plugin × 3) : WebDAV (HTTP Range + fallback 200), MooseFS (offset natif), Local (os.File.ReadAt)
+- `go test ./... -race` : 0 data race ; coverage ≥ 70% sur tous les packages modifiés (placeholder 89.1%, plugins 74-82%, app 49.4% Windows-only)
+
+---
+
 ## [1.7.0] — 2026-05-13
 
 ### Added

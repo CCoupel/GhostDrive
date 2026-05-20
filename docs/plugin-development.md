@@ -214,6 +214,28 @@ return errors.New("myplugin: not connected")
 |---------|-----------|---------|
 | `GetQuota()` | `GetQuota(ctx context.Context) (free, total int64, err error)` | Retourne l'espace libre et total (en octets) du backend. Les plugins qui ne supportent pas la quota doivent retourner `(-1, -1, nil)` plutôt qu'une erreur. Retourne `ErrNotConnected` si pas connecté. |
 
+#### Range reads (v2.0+)
+
+| Méthode | Signature | Contrat |
+|---------|-----------|---------|
+| `ReadAt()` | `ReadAt(ctx context.Context, remote string, offset, length int64) ([]byte, error)` | Lit jusqu'à `length` octets du fichier distant `remote` à partir de l'octet `offset`. Retourne les octets lus ; `len(data) ≤ length` (peut être < `length` en fin de fichier). Utilisé pour l'hydratation progressive et le cache de chunks. Retourne `ErrFileNotFound` (wrapped) si le fichier n'existe pas. Pré-condition : `IsConnected() == true`, sinon retourne `ErrNotConnected`. |
+| `ChunkSize()` | `ChunkSize() int64` | Retourne la granularité naturelle d'I/O du backend en octets. Les valeurs typiques : 0 (défaut global — pas de granularité native), ou 67_108_864 (64 MiB pour MooseFS). Immutable ; peut être appelé avant `Connect()` ; ne doit pas effectuer d'I/O. |
+
+**Valeurs de ChunkSize() par plugin** :
+
+| Plugin | ChunkSize | Justification |
+|--------|-----------|---------------|
+| webdav | 0 | Pas de granularité native — l'offset HTTP Range est libre |
+| moosefs | 67_108_864 (64 MiB) | Taille de chunk natif MooseFS |
+| local | 0 | Lecture POSIX libre |
+| mock | 0 | No-op |
+
+**Implémentation WebDAV ReadAt** : utiliser l'en-tête HTTP `Range: bytes=offset-offset+length-1` (RFC 7233). Le serveur peut répondre avec `206 Partial Content` (lire le body) ou `200 OK` (fallback : lire et trancher) ; certains serveurs WebDAV ne supportent pas Range.
+
+**Implémentation MooseFS ReadAt** : utiliser `mfsclient.Read(nodeID, uint64(offset), uint32(length))` natif — optimisé pour les lectures partielles dans les chunks.
+
+**Implémentation Local ReadAt** : utiliser `os.File.ReadAt(buf, offset)` standard POSIX.
+
 #### Introspection du plugin
 
 | Méthode | Signature | Contrat |
@@ -774,6 +796,11 @@ func TestUpload(t *testing.T) {
 | `TestMove_Rename` | Renommage simple `oldPath` → `newPath` |
 | `TestMove_Overwrite` | Overwrite si `newPath` existe |
 | `TestWatch_ContextCancelled` | Le canal se ferme quand le context est annulé |
+| `TestReadAt_Success` | Lecture partielle (v2.0+) — vérifier que les bytes correct sont retournés |
+| `TestReadAt_PartialFile` | Lecture near EOF — `len(data) < length` accepté |
+| `TestReadAt_NotConnected` | ReadAt sans connexion → `ErrNotConnected` |
+| `TestReadAt_FileNotFound` | ReadAt sur fichier inexistant → `ErrFileNotFound` (wrapped) |
+| `TestChunkSize_Returns` | ChunkSize() retourne la valeur documentée (0 ou backend-spécifique) |
 
 Lancez vos tests avec :
 
@@ -793,9 +820,11 @@ Visez une couverture minimale de **70%** sur votre plugin.
 - [ ] `make build-linux` (Linux) produit un binaire sans extension
 - [ ] Binaire testé avec `GRPCLoader` — vérifié que le handshake réussit
 - [ ] `Name()` retourne une valeur immutable et distincte
+- [ ] `ReadAt()` + `ChunkSize()` implémentés (v2.0+) — tests couvrant les cas partiels, EOF, ErrNotConnected, ErrFileNotFound
+- [ ] `ChunkSize()` retourne une valeur documentée (0 pour défaut global, ou backend-spécifique)
 - [ ] Pas de goroutines en fuite après `Disconnect()`
 - [ ] Erreurs wrappées avec les sentinelles `plugins.ErrNotConnected` / `plugins.ErrFileNotFound`
-- [ ] Commentaires godoc sur chaque méthode
+- [ ] Commentaires godoc sur chaque méthode (incluant `ReadAt` et `ChunkSize`)
 - [ ] `contracts/backend-config.md` — section du plugin avec les Params obligatoires
 - [ ] Branche : `feat/myplugin` ou équivalent
 
@@ -822,6 +851,8 @@ plugins/webdav/
 - **TLS** : paramètre `tlsSkipVerify` pour désactiver la vérification de certificat
 - **Watch** : polling PROPFIND avec intervalle configurable en millisecondes (`pollInterval`)
 - **GetQuota** : retourne gracieusement `(-1, -1, nil)` si le serveur WebDAV ne supporte pas la quota
+- **ReadAt (v2.0+)** : utilise HTTP Range header (RFC 7233) — `206 Partial Content` pour range supportées, fallback `200 OK` + slice pour serveurs sans support
+- **ChunkSize (v2.0+)** : retourne `0` (pas de granularité native — offset libre)
 - **Compatibility** : testée avec Synology, TrueNAS, Nextcloud
 
 ### Exemple de Connect

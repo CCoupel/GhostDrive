@@ -124,3 +124,5 @@ TEMPLATE_claude/
 .claude/CLAUDE_TEMPLATE.md
 .claude/INITIALIZATION.md
 .claude/templates/
+# POC env (credentials)
+poc/.env
