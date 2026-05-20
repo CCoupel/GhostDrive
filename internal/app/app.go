@@ -504,6 +504,7 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 	a.cfg.Backends[idx].Enabled = enabled
 	bc := a.cfg.Backends[idx]
 	path := a.cfgPath
+	mountPoint := a.cfg.MountPoint // captured for Shell notification (#132)
 	a.mu.Unlock()
 
 	if !enabled {
@@ -514,6 +515,8 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 			log.Printf("app: SetBackendEnabled UpdateBackends (disable) %s: %v", bc.Name, updateErr)
 			// Non-fatal: proceed with disconnect even if VFS update failed.
 		}
+		// Notify Windows Explorer so GhD:\ refreshes without requiring F5 (#132).
+		notifyShellDirChanged(mountPoint)
 
 		// Persist first (state is definitive), then side-effects.
 		a.mu.RLock()
@@ -582,6 +585,8 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 				"mounted":      s.Mounted,
 			})
 		}
+		// Notify Windows Explorer so GhD:\ refreshes without requiring F5 (#132).
+		notifyShellDirChanged(mountPoint)
 
 		a.mu.RLock()
 		cfg := a.cfg
