@@ -576,3 +576,118 @@ func TestGRPCBackend_Download_FileNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found",
 		"error message must mention 'not found'")
 }
+
+// ── Version and Watch field round-trip tests (#130 #131) ─────────────────────
+
+// versionFileInfoBackend is a mock StorageBackend whose Stat() returns a
+// FileInfo with a specific opaque Version token.  Used by TestFileInfoVersionRoundTrip.
+type versionFileInfoBackend struct {
+	mockBackend
+}
+
+func (v *versionFileInfoBackend) Stat(_ context.Context, path string) (*plugins.FileInfo, error) {
+	return &plugins.FileInfo{
+		Name:    "file.txt",
+		Path:    path,
+		Size:    42,
+		ModTime: time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC),
+		ETag:    "deadbeef",
+		Version: "deadbeef", // WebDAV semantics: Version == ETag (stripped quotes)
+	}, nil
+}
+
+// TestFileInfoVersionRoundTrip verifies that FileInfo.Version is preserved
+// faithfully when serialised to proto by the server bridge and deserialised
+// back by the client bridge (fileInfoToProto → fileInfoFromProto) (#131).
+func TestFileInfoVersionRoundTrip(t *testing.T) {
+	mb := &versionFileInfoBackend{
+		mockBackend: mockBackend{connected: true, files: make(map[string][]byte)},
+	}
+	backend, cleanup := newTestPair(t, mb)
+	defer cleanup()
+
+	fi, err := backend.Stat(context.Background(), "/file.txt")
+	require.NoError(t, err)
+	require.NotNil(t, fi)
+
+	assert.Equal(t, "deadbeef", fi.Version,
+		"FileInfo.Version must round-trip through the gRPC bridge unchanged (#131)")
+	assert.Equal(t, "deadbeef", fi.ETag,
+		"FileInfo.ETag must also round-trip through the gRPC bridge unchanged")
+}
+
+// enrichedWatchBackend is a mock StorageBackend whose Watch() sends a single
+// pre-configured FileEvent (with ModTime, PreviousModTime, MetadataOnly set)
+// and then waits for context cancellation.
+type enrichedWatchBackend struct {
+	mockBackend
+	event plugins.FileEvent
+}
+
+func (e *enrichedWatchBackend) Watch(ctx context.Context, _ string) (<-chan plugins.FileEvent, error) {
+	ch := make(chan plugins.FileEvent, 1)
+	go func() {
+		defer close(ch)
+		select {
+		case ch <- e.event:
+		case <-ctx.Done():
+			return
+		}
+		<-ctx.Done()
+	}()
+	return ch, nil
+}
+
+// TestFileEventNewFieldsRoundTrip verifies that the three new FileEvent fields
+// — ModTime, PreviousModTime, MetadataOnly — survive a full gRPC round-trip
+// through fileEventToProto (server) and fileEventFromProto (client) (#130).
+//
+// Timestamps are serialised as Unix seconds (int64), so the assertion uses
+// Unix() equality rather than time.Time equality to avoid nanosecond drift.
+func TestFileEventNewFieldsRoundTrip(t *testing.T) {
+	// Use second-aligned timestamps to avoid sub-second truncation artefacts.
+	modTime := time.Date(2025, 6, 15, 10, 30, 0, 0, time.UTC)
+	prevModTime := time.Date(2025, 6, 14, 10, 30, 0, 0, time.UTC) // one day earlier
+
+	mb := &enrichedWatchBackend{
+		mockBackend: mockBackend{connected: true, files: make(map[string][]byte)},
+		event: plugins.FileEvent{
+			Type:            plugins.FileEventMetadataChanged,
+			Path:            "/roundtrip/meta.txt",
+			Timestamp:       time.Date(2025, 6, 15, 10, 31, 0, 0, time.UTC),
+			Source:          "remote",
+			ModTime:         modTime,
+			PreviousModTime: prevModTime,
+			MetadataOnly:    true,
+		},
+	}
+
+	backend, cleanup := newTestPair(t, mb)
+	defer cleanup()
+	_ = backend.Connect(plugins.BackendConfig{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	ch, err := backend.Watch(ctx, "/")
+	require.NoError(t, err)
+
+	select {
+	case ev, ok := <-ch:
+		require.True(t, ok, "Watch channel must not close before the enriched event is received")
+
+		assert.Equal(t, plugins.FileEventMetadataChanged, ev.Type,
+			"FileEvent.Type must round-trip unchanged (#130)")
+		assert.True(t, ev.MetadataOnly,
+			"FileEvent.MetadataOnly must be true after gRPC round-trip (#130)")
+
+		// Timestamps are serialised at second precision via Unix int64.
+		assert.Equal(t, modTime.Unix(), ev.ModTime.Unix(),
+			"FileEvent.ModTime must round-trip at second precision (#130)")
+		assert.Equal(t, prevModTime.Unix(), ev.PreviousModTime.Unix(),
+			"FileEvent.PreviousModTime must round-trip at second precision (#130)")
+
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for enriched Watch event via gRPC (#130)")
+	}
+}

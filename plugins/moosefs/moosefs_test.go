@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1819,4 +1820,159 @@ func TestReadAt_OffsetBeyondEOF(t *testing.T) {
 		"ReadAt at offset past EOF must not return an error for MooseFS")
 	assert.Empty(t, data,
 		"ReadAt at offset past EOF must return empty slice for MooseFS")
+}
+
+// ─── Version and Watch enrichment tests (#130 #131) ──────────────────────────
+
+// TestStatVersionFromCTime verifies that Stat() populates FileInfo.Version as
+// the decimal string representation of the file's ctime (change time).  In the
+// fake server ctime == mtime, so Version must equal
+// strconv.FormatUint(uint64(fi.ModTime.Unix()), 10) (#131).
+func TestStatVersionFromCTime(t *testing.T) {
+	b := newTestBackend(t, startFakeServer(t))
+	ctx := context.Background()
+
+	content := []byte("stat-version-ctime-test-content")
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/stat_version.txt", nil))
+
+	fi, err := b.Stat(ctx, "/stat_version.txt")
+	require.NoError(t, err)
+	require.NotNil(t, fi)
+
+	assert.NotEmpty(t, fi.Version, "FileInfo.Version must not be empty for MooseFS (#131)")
+	// In the fake server ctime is stored identically to mtime (buildIntegAttrs
+	// sets both fields to n.modTime).  Version = decimal(ctime) = decimal(mtime.Unix()).
+	assert.Equal(t,
+		strconv.FormatUint(uint64(fi.ModTime.Unix()), 10),
+		fi.Version,
+		"FileInfo.Version must equal decimal ctime (ctime==mtime in fake server) (#131)",
+	)
+}
+
+// TestListVersionFromCTime verifies that List() populates FileInfo.Version for
+// each returned entry using the file's ctime encoded as a decimal string.
+// Non-regression for the contract requirement that Version is populated in
+// both List() and Stat() (#131).
+func TestListVersionFromCTime(t *testing.T) {
+	b := newTestBackend(t, startFakeServer(t))
+	ctx := context.Background()
+
+	content := []byte("list-version-ctime-test-content")
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/list_version.txt", nil))
+
+	entries, err := b.List(ctx, "/")
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "exactly one file must be present")
+
+	fi := entries[0]
+	assert.NotEmpty(t, fi.Version, "List() FileInfo.Version must not be empty (#131)")
+	// In the fake server ctime == mtime.
+	assert.Equal(t,
+		strconv.FormatUint(uint64(fi.ModTime.Unix()), 10),
+		fi.Version,
+		"List() FileInfo.Version must equal decimal ctime (ctime==mtime in fake server) (#131)",
+	)
+}
+
+// TestWatchEmitsPreviousModTime verifies that Watch populates
+// FileEvent.PreviousModTime with a non-zero value (the mtime from the baseline
+// snapshot) when a FileEventModified event is emitted for a file that was
+// already present when Watch started (#130).
+func TestWatchEmitsPreviousModTime(t *testing.T) {
+	b := newTestBackend(t, startFakeServer(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Upload the file BEFORE Watch so the baseline snapshot captures it.
+	content1 := []byte("prev-modtime-initial-content") // 28 bytes
+	src1 := writeTempFile(t, content1)
+	require.NoError(t, b.Upload(ctx, src1, "/prev_modtime.txt", nil))
+
+	ch, err := b.Watch(ctx, "/")
+	require.NoError(t, err)
+
+	// Let the watcher build its baseline snapshot.
+	time.Sleep(100 * time.Millisecond)
+
+	// Upload larger content so FileEventModified is emitted (size changes).
+	content2 := []byte("prev-modtime-updated-with-significantly-more-content") // 52 bytes
+	src2 := writeTempFile(t, content2)
+	go func() {
+		_ = b.Upload(context.Background(), src2, "/prev_modtime.txt", nil)
+	}()
+
+	deadline := time.After(8 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			require.True(t, ok, "Watch channel must not close prematurely")
+			if ev.Type == plugins.FileEventModified {
+				assert.False(t, ev.PreviousModTime.IsZero(),
+					"FileEvent.PreviousModTime must not be zero when file was in the baseline snapshot (#130)")
+				assert.False(t, ev.ModTime.IsZero(),
+					"FileEvent.ModTime must not be zero for FileEventModified (#130)")
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for FileEventModified with non-zero PreviousModTime (#130)")
+		}
+	}
+}
+
+// TestWatchMetadataChangedMooseFS verifies that Watch emits
+// FileEventMetadataChanged with MetadataOnly=true when a file's mtime changes
+// but its size remains stable.  The test directly modifies the fake server
+// node's mtime to simulate a metadata-only change (e.g. a chmod) without
+// altering file content (#130).
+func TestWatchMetadataChangedMooseFS(t *testing.T) {
+	srv := newIntegFakeServer()
+	addr := srv.start(t)
+	b := newTestBackend(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Upload the file BEFORE Watch so the baseline snapshot captures it.
+	content := []byte("metadata-only-constant-content") // 30 bytes — size stays constant
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/meta_only.txt", nil))
+
+	ch, err := b.Watch(ctx, "/")
+	require.NoError(t, err)
+
+	// Let the watcher build its baseline snapshot.
+	time.Sleep(100 * time.Millisecond)
+
+	// Advance the node's mtime directly without touching content, simulating a
+	// metadata-only change (permission update, utimes syscall, etc.).
+	// Using +5s guarantees a different second even on fast machines.
+	srv.mu.Lock()
+	for _, n := range srv.nodes {
+		if n.name == "meta_only.txt" {
+			n.modTime = time.Now().Unix() + 5
+			break
+		}
+	}
+	srv.mu.Unlock()
+
+	// Watch must detect: mtime changed AND size stable → FileEventMetadataChanged.
+	deadline := time.After(8 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			require.True(t, ok, "Watch channel must not close prematurely")
+			if ev.Type == plugins.FileEventMetadataChanged {
+				assert.True(t, ev.MetadataOnly,
+					"MetadataOnly must be true for FileEventMetadataChanged (#130)")
+				assert.False(t, ev.ModTime.IsZero(),
+					"FileEvent.ModTime must not be zero for MetadataChanged (#130)")
+				assert.False(t, ev.PreviousModTime.IsZero(),
+					"FileEvent.PreviousModTime must not be zero when file was in baseline snapshot (#130)")
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for FileEventMetadataChanged from MooseFS Watch (#130)")
+		}
+	}
 }
