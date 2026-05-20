@@ -350,17 +350,21 @@ func fileInfoToProto(fi plugins.FileInfo) *storagepb.FileInfoProto {
 		Etag:          fi.ETag,
 		IsPlaceholder: fi.IsPlaceholder,
 		IsCached:      fi.IsCached,
+		Version:       fi.Version, // opaque version token (#131)
 	}
 }
 
 // fileEventToProto converts plugins.FileEvent to its proto representation.
 func fileEventToProto(ev plugins.FileEvent) *storagepb.FileEventProto {
 	return &storagepb.FileEventProto{
-		EventType:     string(ev.Type),
-		Path:          ev.Path,
-		OldPath:       ev.OldPath,
-		TimestampUnix: ev.Timestamp.Unix(),
-		Source:        ev.Source,
+		EventType:           string(ev.Type),
+		Path:                ev.Path,
+		OldPath:             ev.OldPath,
+		TimestampUnix:       ev.Timestamp.Unix(),
+		Source:              ev.Source,
+		ModTimeUnix:         ev.ModTime.Unix(),         // time.Time{}.Unix() round-trips correctly via time.Unix() (#130)
+		PreviousModTimeUnix: ev.PreviousModTime.Unix(), // zero when newly created / unknown
+		MetadataOnly:        ev.MetadataOnly,           // true iff FileEventMetadataChanged
 	}
 }
 

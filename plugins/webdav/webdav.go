@@ -544,6 +544,7 @@ func fileInfoFromResponse(resp propResponse, remotePath string) plugins.FileInfo
 			fi.ModTime, _ = http.ParseTime(p.LastModified)
 		}
 		fi.ETag = strings.Trim(p.ETag, `"`)
+		fi.Version = fi.ETag // Version == ETag for WebDAV (#131)
 	}
 
 	return fi
@@ -915,19 +916,27 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 				for p, fi := range currentMap {
 					old, exists := snapshot[p]
 					var evType plugins.FileEventType
+					var metadataOnly bool
 					if !exists {
 						evType = plugins.FileEventCreated
-					} else if fi.ModTime != old.ModTime || fi.Size != old.Size {
+					} else if fi.ETag != "" && fi.ETag != old.ETag && fi.Size == old.Size {
+						// ETag changed but size is stable → metadata-only change (#130).
+						evType = plugins.FileEventMetadataChanged
+						metadataOnly = true
+					} else if fi.ModTime != old.ModTime || fi.Size != old.Size || fi.Version != old.Version {
 						evType = plugins.FileEventModified
 					}
 					if evType != "" {
 						changed = true
 						select {
 						case ch <- plugins.FileEvent{
-							Type:      evType,
-							Path:      p,
-							Timestamp: time.Now(),
-							Source:    "remote",
+							Type:            evType,
+							Path:            p,
+							Timestamp:       time.Now(),
+							Source:          "remote",
+							ModTime:         fi.ModTime,
+							PreviousModTime: old.ModTime, // zero when !exists (Created)
+							MetadataOnly:    metadataOnly,
 						}:
 						case <-ctx.Done():
 							return

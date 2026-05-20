@@ -77,6 +77,14 @@ type FileInfo struct {
 	IsPlaceholder bool `json:"isPlaceholder"`
 	// IsCached indicates that the file content is present in the local cache.
 	IsCached bool `json:"isCached"`
+	// Version is an opaque backend-provided version token used for cache
+	// invalidation. Semantics are backend-specific:
+	//   - WebDAV  : same value as ETag (HTTP entity tag, quotes stripped)
+	//   - MooseFS : Unix ctime as decimal string — changes on any attribute
+	//               or content modification (more precise than mtime alone)
+	//   - local   : "" — no native versioning; callers fall back to ModTime
+	// An empty Version is always valid; consumers must fall back to ModTime.
+	Version string `json:"version,omitempty"`
 }
 
 // FileEventType categorises a change detected on a watched path.
@@ -103,6 +111,12 @@ const (
 	// The engine translates it back to SyncIdle state (#115b).
 	// It is never emitted to the frontend as a file-change event.
 	FileEventBackendOnline FileEventType = "backend:online"
+
+	// FileEventMetadataChanged fires when only metadata changed (mtime/ETag)
+	// without a content change (size is stable). Consumers should update
+	// cached metadata without invalidating content chunks.
+	// MetadataOnly is always true when this type is emitted.
+	FileEventMetadataChanged FileEventType = "metadata_changed"
 )
 
 // FileEvent represents a detected change emitted by Watch.
@@ -120,6 +134,21 @@ type FileEvent struct {
 	// Source is "local" when the change originates on the local filesystem,
 	// or "remote" when detected on the backend.
 	Source string `json:"source"` // "local" | "remote"
+	// ModTime is the file's new modification time as reported by the backend
+	// at the moment the change was detected. Zero value when not available
+	// (e.g. for FileEventDeleted or FileEventRenamed).
+	// Allows consumers to skip a Stat() call after receiving a Watch event.
+	ModTime time.Time `json:"modTime,omitempty"`
+	// PreviousModTime is the file's modification time from the previous
+	// snapshot, allowing detection of a modification without an additional
+	// Stat() call. Zero when the file is newly created or the previous mtime
+	// is unknown.
+	PreviousModTime time.Time `json:"previousModTime,omitempty"`
+	// MetadataOnly is true when only the file's metadata changed (ETag/mtime)
+	// without a content change (size is unchanged). When true, the cache layer
+	// may invalidate metadata-only entries without evicting content chunks.
+	// True if and only if Type == FileEventMetadataChanged.
+	MetadataOnly bool `json:"metadataOnly,omitempty"`
 }
 
 // BackendConfig carries the configuration for a single backend instance.

@@ -443,6 +443,7 @@ func fileInfoFromProto(pf *storagepb.FileInfoProto) plugins.FileInfo {
 		ETag:          pf.GetEtag(),
 		IsPlaceholder: pf.GetIsPlaceholder(),
 		IsCached:      pf.GetIsCached(),
+		Version:       pf.GetVersion(), // opaque version token (#131)
 	}
 }
 
@@ -452,11 +453,14 @@ func fileEventFromProto(pe *storagepb.FileEventProto) plugins.FileEvent {
 		return plugins.FileEvent{}
 	}
 	return plugins.FileEvent{
-		Type:      plugins.FileEventType(pe.GetEventType()),
-		Path:      pe.GetPath(),
-		OldPath:   pe.GetOldPath(),
-		Timestamp: time.Unix(pe.GetTimestampUnix(), 0),
-		Source:    pe.GetSource(),
+		Type:            plugins.FileEventType(pe.GetEventType()),
+		Path:            pe.GetPath(),
+		OldPath:         pe.GetOldPath(),
+		Timestamp:       time.Unix(pe.GetTimestampUnix(), 0),
+		Source:          pe.GetSource(),
+		ModTime:         time.Unix(pe.GetModTimeUnix(), 0),         // IsZero() == true when field was 0 (#130)
+		PreviousModTime: time.Unix(pe.GetPreviousModTimeUnix(), 0), // IsZero() == true when field was 0
+		MetadataOnly:    pe.GetMetadataOnly(),                      // true iff FileEventMetadataChanged
 	}
 }
 

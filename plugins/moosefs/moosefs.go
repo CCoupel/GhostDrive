@@ -818,6 +818,7 @@ func (b *Backend) List(ctx context.Context, dirPath string) ([]plugins.FileInfo,
 			} else {
 				fi.Size = int64(attr.Size)
 				fi.ModTime = time.Unix(int64(attr.MTime), 0)
+				fi.Version = strconv.FormatUint(uint64(attr.CTime), 10) // ctime as opaque version token (#131)
 			}
 			result = append(result, fi)
 		}
@@ -867,6 +868,7 @@ func (b *Backend) Stat(ctx context.Context, filePath string) (*plugins.FileInfo,
 			IsDir:   isDir,
 			Size:    int64(attr.Size),
 			ModTime: time.Unix(int64(attr.MTime), 0),
+			Version: strconv.FormatUint(uint64(attr.CTime), 10), // ctime as opaque version token (#131)
 		}, nil
 	}
 	return nil, ErrNotConnected
@@ -958,8 +960,13 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 				for p, fi := range currentMap {
 					old, exists := snapshot[p]
 					var evType plugins.FileEventType
+					var metadataOnly bool
 					if !exists {
 						evType = plugins.FileEventCreated
+					} else if fi.ModTime != old.ModTime && fi.Size == old.Size {
+						// mtime changed, size stable → attribute/permission change (#130).
+						evType = plugins.FileEventMetadataChanged
+						metadataOnly = true
 					} else if fi.ModTime != old.ModTime || fi.Size != old.Size {
 						evType = plugins.FileEventModified
 					}
@@ -967,10 +974,13 @@ func (b *Backend) Watch(ctx context.Context, watchPath string) (<-chan plugins.F
 						changed = true
 						select {
 						case ch <- plugins.FileEvent{
-							Type:      evType,
-							Path:      p,
-							Timestamp: time.Now(),
-							Source:    "remote",
+							Type:            evType,
+							Path:            p,
+							Timestamp:       time.Now(),
+							Source:          "remote",
+							ModTime:         fi.ModTime,
+							PreviousModTime: old.ModTime, // zero when !exists (Created)
+							MetadataOnly:    metadataOnly,
 						}:
 						case <-ctx.Done():
 							return

@@ -40,15 +40,19 @@ message FileInfoProto {
   // Fields 9–19 are reserved for future FileInfo extensions (e.g. permissions,
   // checksum). Do not reuse these numbers.
   reserved 9 to 19;
+  string version        = 20; // opaque version token (#131): ETag for WebDAV, ctime decimal for MooseFS, "" otherwise
 }
 
 // FileEventProto carries a change notification from Watch.
 message FileEventProto {
-  string event_type    = 1; // "created" | "modified" | "deleted" | "renamed"
-  string path          = 2;
-  string old_path      = 3;
-  int64  timestamp_unix = 4;
-  string source        = 5; // "local" | "remote"
+  string event_type             = 1; // "created" | "modified" | "deleted" | "renamed" | "metadata_changed"
+  string path                   = 2;
+  string old_path               = 3;
+  int64  timestamp_unix         = 4;
+  string source                 = 5; // "local" | "remote"
+  int64  mod_time_unix          = 6; // file's new modtime at detection time; 0 when unavailable (#130)
+  int64  previous_mod_time_unix = 7; // file's previous modtime; 0 when unknown/created (#130)
+  bool   metadata_only          = 8; // true when only metadata changed, size stable (#130)
 }
 
 // ─── Upload (client-streaming) ───────────────────────────────────────────────
