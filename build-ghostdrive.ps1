@@ -41,30 +41,48 @@ $libcldapi  = "$mingwLib\libcldapi.a"
 $defOut     = "$env:TEMP\cldapi.def"
 
 if (-not (Test-Path $libcldapi)) {
-    Write-Host "[build] libcldapi.a not found — generating from cldapi.dll..." -ForegroundColor Yellow
+    Write-Host "[build] libcldapi.a not found — generating..." -ForegroundColor Yellow
 
-    $gendef  = "$mingwBin\gendef.exe"
-    $dlltool = "$mingwBin\dlltool.exe"
+    $dlltool     = "$mingwBin\dlltool.exe"
+    $gendef      = "$mingwBin\gendef.exe"
+    $bundledDef  = Join-Path $PSScriptRoot "internal\cfapi\cldapi.def"
+    $generated   = $false
 
-    if (-not (Test-Path $gendef)) {
-        Write-Error "gendef.exe not found at $gendef. Install MinGW-w64 binutils."
-        exit 1
+    # --- Strategy 1: gendef from live cldapi.dll (preferred on Windows) ---
+    if ((Test-Path $gendef) -and (Test-Path $cldapiDll)) {
+        Write-Host "[build] Strategy 1 — gendef from $cldapiDll" -ForegroundColor DarkGray
+        & $gendef $cldapiDll
+        if ($LASTEXITCODE -eq 0) {
+            Move-Item "cldapi.def" $defOut -Force
+            & $dlltool -D $cldapiDll -d $defOut -l $libcldapi
+            if ($LASTEXITCODE -eq 0) {
+                $generated = $true
+                Write-Host "[build] libcldapi.a generated via gendef at $libcldapi" -ForegroundColor Green
+            } else {
+                Write-Warning "dlltool failed after gendef — falling back to bundled .def"
+            }
+        } else {
+            Write-Warning "gendef failed — falling back to bundled .def"
+        }
+    } else {
+        Write-Host "[build] gendef or cldapi.dll not available — using bundled .def" -ForegroundColor DarkGray
     }
-    if (-not (Test-Path $cldapiDll)) {
-        Write-Error "cldapi.dll not found at $cldapiDll. Windows 10 1809+ required."
-        exit 1
+
+    # --- Strategy 2: bundled cldapi.def (fallback — no gendef / CI Linux runner) ---
+    if (-not $generated) {
+        if (-not (Test-Path $bundledDef)) {
+            Write-Error "Bundled .def not found at $bundledDef. Cannot generate libcldapi.a."
+            exit 1
+        }
+        if (-not (Test-Path $dlltool)) {
+            Write-Error "dlltool.exe not found at $dlltool. Install MinGW-w64 binutils."
+            exit 1
+        }
+        Write-Host "[build] Strategy 2 — dlltool from bundled $bundledDef" -ForegroundColor DarkGray
+        & $dlltool -d $bundledDef -l $libcldapi
+        if ($LASTEXITCODE -ne 0) { Write-Error "dlltool failed with bundled .def"; exit $LASTEXITCODE }
+        Write-Host "[build] libcldapi.a generated from bundled .def at $libcldapi" -ForegroundColor Green
     }
-
-    # gendef writes cldapi.def to the current directory.
-    & $gendef $cldapiDll
-    if ($LASTEXITCODE -ne 0) { Write-Error "gendef failed"; exit $LASTEXITCODE }
-
-    Move-Item "cldapi.def" $defOut -Force
-
-    & $dlltool -D $cldapiDll -d $defOut -l $libcldapi
-    if ($LASTEXITCODE -ne 0) { Write-Error "dlltool failed"; exit $LASTEXITCODE }
-
-    Write-Host "[build] libcldapi.a generated at $libcldapi" -ForegroundColor Green
 } else {
     Write-Host "[build] libcldapi.a found at $libcldapi" -ForegroundColor DarkGray
 }

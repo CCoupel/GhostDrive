@@ -96,7 +96,7 @@ jobs:
         if: matrix.target == 'windows-amd64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64
+          sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
 
       - name: Install WinFsp FUSE headers for cgofuse cross-compilation
         if: matrix.target == 'windows-amd64'
@@ -134,6 +134,14 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm install && npm run build
+
+      - name: Generate libcldapi.a from bundled .def
+        if: matrix.target == 'windows-amd64'
+        run: |
+          x86_64-w64-mingw32-dlltool \
+            -d internal/cfapi/cldapi.def \
+            -l /usr/x86_64-w64-mingw32/lib/libcldapi.a
+          echo "✅ libcldapi.a generated at /usr/x86_64-w64-mingw32/lib/libcldapi.a"
 
       - name: Wails cross-compile
         env:
