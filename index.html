@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="GhostDrive — Client de synchronisation Windows libre vers vos backends de stockage privés. Fin du vendor lock-in." />
-  <meta name="keywords" content="GhostDrive, sync, Windows, WebDAV, MooseFS, Files On-Demand, NAS, stockage privé, open source" />
-  <meta property="og:title" content="GhostDrive — Votre stockage privé, comme OneDrive" />
-  <meta property="og:description" content="Client de synchronisation Windows libre et open source vers vos backends de stockage privés." />
+  <meta name="description" content="GhostDrive v2.1.0 — Client de synchronisation Windows libre avec Files On-Demand natif via Cloud Filter API. Fin du vendor lock-in." />
+  <meta name="keywords" content="GhostDrive, sync, Windows, WebDAV, MooseFS, Files On-Demand, Cloud Filter API, NAS, stockage privé, open source" />
+  <meta property="og:title" content="GhostDrive v2.1.0 — Files On-Demand pour votre stockage privé" />
+  <meta property="og:description" content="Client de synchronisation Windows libre avec Files On-Demand natif via Cloud Filter API. Vos données, votre infrastructure." />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://ccoupel.github.io/GhostDrive/" />
   <meta name="theme-color" content="#0d1117" />
@@ -15,6 +15,84 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="assets/style.css" />
+  <style>
+    .badge-delivered {
+      background: rgba(34,197,94,0.15);
+      color: #22c55e;
+      border: 1px solid rgba(34,197,94,0.3);
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .badge-wip {
+      background: rgba(59,130,246,0.15);
+      color: #3b82f6;
+      border: 1px solid rgba(59,130,246,0.3);
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .badge-new {
+      background: rgba(245,158,11,0.15);
+      color: #f59e0b;
+      border: 1px solid rgba(245,158,11,0.3);
+      font-size: 0.68rem;
+      font-weight: 700;
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      white-space: nowrap;
+      letter-spacing: 0.02em;
+    }
+    .card-header-feat {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .rm-entry.delivered .rm-dot { background: #22c55e; }
+    .rm-entry.delivered .rm-card { border-color: rgba(34,197,94,0.2); }
+    .rm-entry.highlight .rm-dot { background: #f59e0b; box-shadow: 0 0 0 4px rgba(245,158,11,0.15); }
+    .rm-entry.highlight .rm-card { border-color: rgba(245,158,11,0.3); background: rgba(245,158,11,0.04); }
+    .rm-version-status { display: flex; align-items: center; gap: 0.4rem; }
+    .download-block {
+      background: var(--card-bg, #161b22);
+      border: 1px solid rgba(34,197,94,0.3);
+      border-radius: 12px;
+      padding: 1.5rem 1.75rem;
+      margin-bottom: 1.5rem;
+    }
+    .download-block h3 { margin: 0 0 1rem; font-size: 1rem; }
+    .download-table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+    .download-table td { padding: 0.5rem 0.75rem; font-size: 0.9rem; }
+    .download-table tr:not(:last-child) td { border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .btn-download {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      background: #22c55e;
+      color: #000;
+      font-weight: 700;
+      padding: 0.45rem 1rem;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 0.85rem;
+      transition: background 0.15s;
+    }
+    .btn-download:hover { background: #16a34a; }
+    .install-note-sdk {
+      background: rgba(59,130,246,0.08);
+      border: 1px solid rgba(59,130,246,0.2);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      font-size: 0.85rem;
+      color: var(--text-secondary, #8b949e);
+      margin-top: 1rem;
+    }
+  </style>
 </head>
 <body>
 
@@ -70,32 +148,35 @@
     <div class="container">
 
       <div class="hero-badges">
-        <span class="badge badge-active">
-          <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 2s infinite;" aria-hidden="true"></span>
-          <span data-i18n="hero.badge">En développement actif</span>
-        </span>
-        <span class="badge badge-version" data-i18n="hero.version">v0.1.0</span>
+        <span class="badge badge-version" data-i18n="hero.badge">v2.1.0 livré — 2026-05-22</span>
+        <span class="badge-new" data-i18n="features.badge.new">Nouveau — v2.1</span>
       </div>
 
       <h1 id="hero-title" class="hero-title" data-i18n="hero.title">GhostDrive</h1>
       <p class="hero-subtitle" data-i18n="hero.subtitle">Votre stockage privé, comme OneDrive</p>
       <p class="hero-desc" data-i18n="hero.description">
         Client de synchronisation Windows libre et open source vers vos backends de stockage privés.
-        Fin du vendor lock-in, vos données restent chez vous.
+        Files On-Demand natif via Cloud Filter API — fin du vendor lock-in, vos données restent chez vous.
       </p>
 
       <div class="hero-actions">
-        <a href="https://github.com/CCoupel/GhostDrive"
+        <a href="https://github.com/CCoupel/GhostDrive/releases/tag/v2.1.0"
            target="_blank"
            rel="noopener noreferrer"
            class="btn btn-primary">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M7.47 11.78a.75.75 0 001.06 0l4.25-4.25a.75.75 0 00-1.06-1.06L8.75 9.44V2a.75.75 0 00-1.5 0v7.44L4.28 6.47a.75.75 0 00-1.06 1.06l4.25 4.25zM1.5 13.25a.75.75 0 000 1.5h13a.75.75 0 000-1.5h-13z"/>
+          </svg>
+          <span data-i18n="hero.cta.download">Télécharger v2.1.0</span>
+        </a>
+        <a href="https://github.com/CCoupel/GhostDrive"
+           target="_blank"
+           rel="noopener noreferrer"
+           class="btn btn-secondary">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
             <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
           </svg>
           <span data-i18n="hero.cta.github">Voir sur GitHub</span>
-        </a>
-        <a href="#install" class="btn btn-secondary">
-          <span data-i18n="hero.cta.install">Installer depuis les sources</span>
         </a>
       </div>
 
@@ -217,18 +298,33 @@
       <div class="grid-3">
 
         <article class="card">
-          <div class="card-icon blue" aria-hidden="true">&#128196;</div>
+          <div class="card-header-feat">
+            <div class="card-icon blue" aria-hidden="true" style="margin:0">&#128196;</div>
+            <span class="badge-new" data-i18n="features.badge.new">Nouveau — v2.1</span>
+          </div>
           <h3 data-i18n="features.1.title">Files On-Demand</h3>
           <p data-i18n="features.1.desc">
-            Les fichiers apparaissent dans l'Explorateur sans être téléchargés.
-            Accédez-y à la demande via Cloud Filter API — exactement comme OneDrive.
+            Les fichiers distants apparaissent dans l'Explorateur Windows sans occuper d'espace disque.
+            Accédez-y à la demande — GhostDrive les télécharge automatiquement au premier accès.
+          </p>
+        </article>
+
+        <article class="card">
+          <div class="card-header-feat">
+            <div class="card-icon purple" aria-hidden="true" style="margin:0">&#9749;</div>
+            <span class="badge-new" data-i18n="features.badge.new">Nouveau — v2.1</span>
+          </div>
+          <h3 data-i18n="features.2.title">Cloud Filter API native</h3>
+          <p data-i18n="features.2.desc">
+            Intégration profonde avec Windows via Cloud Filter API. Fusion transparente des dossiers
+            local + remote, badge cloud ☁️ sur les fichiers distants, hydratation progressive par chunks de 4 MiB.
           </p>
         </article>
 
         <article class="card">
           <div class="card-icon green" aria-hidden="true">&#8651;</div>
-          <h3 data-i18n="features.2.title">Sync bidirectionnelle</h3>
-          <p data-i18n="features.2.desc">
+          <h3 data-i18n="features.3.title">Sync bidirectionnelle</h3>
+          <p data-i18n="features.3.desc">
             Les modifications locales se propagent vers le backend, et vice versa.
             Résolution de conflits intégrée.
           </p>
@@ -236,8 +332,8 @@
 
         <article class="card">
           <div class="card-icon purple" aria-hidden="true">&#128190;</div>
-          <h3 data-i18n="features.3.title">Cache local</h3>
-          <p data-i18n="features.3.desc">
+          <h3 data-i18n="features.4.title">Cache local</h3>
+          <p data-i18n="features.4.desc">
             Activez le cache pour accéder à vos fichiers hors ligne.
             Synchronisation automatique à la reconnexion.
           </p>
@@ -245,8 +341,8 @@
 
         <article class="card">
           <div class="card-icon orange" aria-hidden="true">&#9883;</div>
-          <h3 data-i18n="features.4.title">Architecture plugin</h3>
-          <p data-i18n="features.4.desc">
+          <h3 data-i18n="features.5.title">Architecture plugin</h3>
+          <p data-i18n="features.5.desc">
             Chaque backend de stockage est un plugin Go compilé. Ajoutez WebDAV, MooseFS, S3,
             ou implémentez le vôtre via l'interface StorageBackend.
           </p>
@@ -254,8 +350,8 @@
 
         <article class="card">
           <div class="card-icon blue" aria-hidden="true">&#128230;</div>
-          <h3 data-i18n="features.5.title">Distribution simple</h3>
-          <p data-i18n="features.5.desc">
+          <h3 data-i18n="features.6.title">Distribution simple</h3>
+          <p data-i18n="features.6.desc">
             Un binaire Windows, pas d'installation complexe.
             Prérequis : WinFsp pour les placeholders système.
           </p>
@@ -279,156 +375,53 @@
       <!-- Progress summary -->
       <div class="rm-summary">
         <div class="rm-stat">
-          <span class="rm-stat-value rm-stat-active">1</span>
-          <span class="rm-stat-label" data-i18n="roadmap.stat.active">En cours</span>
+          <span class="rm-stat-value rm-stat-active">3</span>
+          <span class="rm-stat-label" data-i18n="roadmap.stat.delivered">Livrés</span>
         </div>
         <div class="rm-progress-wrap">
           <div class="rm-progress-meta">
-            <span data-i18n="roadmap.group.v0.title">Fondations</span>
-            <span class="rm-progress-count">1 / 3</span>
+            <span data-i18n="roadmap.group.v2.title">Files On-Demand &amp; VFS</span>
+            <span class="rm-progress-count">2 / 5</span>
           </div>
-          <div class="rm-progress-track" role="progressbar" aria-valuenow="33" aria-valuemin="0" aria-valuemax="100">
-            <div class="rm-progress-fill" style="width:33.3%"></div>
+          <div class="rm-progress-track" role="progressbar" aria-valuenow="40" aria-valuemin="0" aria-valuemax="100">
+            <div class="rm-progress-fill" style="width:40%"></div>
           </div>
-          <p class="rm-progress-caption" data-i18n="roadmap.progress.caption">V0 — 1 milestone livré sur 3</p>
+          <p class="rm-progress-caption" data-i18n="roadmap.progress.caption">V2 — 2 milestones livrés sur 5</p>
         </div>
         <div class="rm-stat">
-          <span class="rm-stat-value">9</span>
+          <span class="rm-stat-value">6</span>
           <span class="rm-stat-label" data-i18n="roadmap.stat.planned">Planifiés</span>
         </div>
       </div>
 
       <div class="rm-timeline">
 
-        <!-- ── V0 ──────────────────────────────────────── -->
-        <div class="rm-group">
-          <div class="rm-group-header">
-            <div class="rm-group-badge grey">V0</div>
-            <div class="rm-group-meta">
-              <strong data-i18n="roadmap.group.v0.title">Fondations</strong>
-              <span data-i18n="roadmap.group.v0.desc">Moteur, interface et pipeline de release — les briques invisibles</span>
-            </div>
-            <div class="rm-group-count">3 milestones</div>
-          </div>
-
-          <div class="rm-rail">
-
-            <div class="rm-entry active">
-              <div class="rm-dot-col">
-                <div class="rm-dot active" aria-hidden="true"></div>
-                <div class="rm-line"></div>
-              </div>
-              <div class="rm-card active">
-                <div class="rm-card-header">
-                  <code class="rm-version">v0.1.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v010.title">Sync Engine</h4>
-                  <span class="badge badge-active" data-i18n="roadmap.v010.status">En cours</span>
-                </div>
-                <p class="rm-desc" data-i18n="roadmap.v010.desc">Moteur de synchronisation bidirectionnelle — file watcher, queue, upload/download, gestion des conflits</p>
-              </div>
-            </div>
-
-            <div class="rm-entry">
-              <div class="rm-dot-col">
-                <div class="rm-dot"></div>
-                <div class="rm-line"></div>
-              </div>
-              <div class="rm-card">
-                <div class="rm-card-header">
-                  <code class="rm-version">v0.2.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v020.title">UI Systray</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v020.status">Planifié</span>
-                </div>
-                <p class="rm-desc" data-i18n="roadmap.v020.desc">Interface Windows native — icône systray, configuration backends, points de synchronisation, état temps réel</p>
-              </div>
-            </div>
-
-            <div class="rm-entry last">
-              <div class="rm-dot-col">
-                <div class="rm-dot"></div>
-              </div>
-              <div class="rm-card">
-                <div class="rm-card-header">
-                  <code class="rm-version">v0.3.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v030.title">CI/CD & Distribution</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v030.status">Planifié</span>
-                </div>
-                <p class="rm-desc" data-i18n="roadmap.v030.desc">GitHub Actions — build automatisé Windows AMD64 + Linux ARM64, publication sur GitHub Releases</p>
-              </div>
-            </div>
-
-          </div>
-        </div>
-
         <!-- ── V1 ──────────────────────────────────────── -->
         <div class="rm-group">
           <div class="rm-group-header">
             <div class="rm-group-badge green">V1</div>
             <div class="rm-group-meta">
-              <strong data-i18n="roadmap.group.v1.title">Première version fonctionnelle</strong>
-              <span data-i18n="roadmap.group.v1.desc">Un backend opérationnel, sync end-to-end, Files On-Demand</span>
+              <strong data-i18n="roadmap.group.v1.title">Synchronisation &amp; Backends</strong>
+              <span data-i18n="roadmap.group.v1.desc">Sync bidirectionnelle, WebDAV, MooseFS, Cache local — première version utilisable</span>
             </div>
-            <div class="rm-group-count">4 milestones</div>
+            <div class="rm-group-count">1 milestone</div>
           </div>
 
           <div class="rm-rail">
 
-            <div class="rm-entry">
+            <div class="rm-entry delivered last">
               <div class="rm-dot-col">
-                <div class="rm-dot"></div>
-                <div class="rm-line"></div>
+                <div class="rm-dot" aria-hidden="true"></div>
               </div>
               <div class="rm-card">
                 <div class="rm-card-header">
-                  <code class="rm-version">v1.0.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v100.title">Plugin WebDAV</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v100.status">Planifié</span>
+                  <div class="rm-version-status">
+                    <code class="rm-version">v1.7.0</code>
+                    <span class="badge-delivered" data-i18n="roadmap.v1x.status">Livré</span>
+                  </div>
+                  <h4 class="rm-title" data-i18n="roadmap.v1x.title">V1 — Synchronisation complète</h4>
                 </div>
-                <p class="rm-desc" data-i18n="roadmap.v100.desc">Première version utilisable — sync bidirectionnelle vers NAS (Synology, TrueNAS, Nextcloud) via WebDAV</p>
-              </div>
-            </div>
-
-            <div class="rm-entry">
-              <div class="rm-dot-col">
-                <div class="rm-dot"></div>
-                <div class="rm-line"></div>
-              </div>
-              <div class="rm-card">
-                <div class="rm-card-header">
-                  <code class="rm-version">v1.1.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v110.title">Placeholders Files On-Demand</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v110.status">Planifié</span>
-                </div>
-                <p class="rm-desc" data-i18n="roadmap.v110.desc">Cloud Filter API + WinFsp — fichiers visibles dans l'Explorateur sans occupation disque, hydratation à la demande</p>
-              </div>
-            </div>
-
-            <div class="rm-entry">
-              <div class="rm-dot-col">
-                <div class="rm-dot"></div>
-                <div class="rm-line"></div>
-              </div>
-              <div class="rm-card">
-                <div class="rm-card-header">
-                  <code class="rm-version">v1.2.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v120.title">Plugin MooseFS</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v120.status">Planifié</span>
-                </div>
-                <p class="rm-desc" data-i18n="roadmap.v120.desc">Deuxième backend — client MooseFS natif Go pour les infrastructures de stockage distribué</p>
-              </div>
-            </div>
-
-            <div class="rm-entry last">
-              <div class="rm-dot-col">
-                <div class="rm-dot"></div>
-              </div>
-              <div class="rm-card">
-                <div class="rm-card-header">
-                  <code class="rm-version">v1.3.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v130.title">Cache locale</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v130.status">Planifié</span>
-                </div>
-                <p class="rm-desc" data-i18n="roadmap.v130.desc">Architecture LRU, activable par point de sync — accès hors-ligne aux fichiers fréquemment utilisés</p>
+                <p class="rm-desc" data-i18n="roadmap.v1x.desc">Sync bidirectionnelle, 2 backends (WebDAV + MooseFS), cache local LRU, interface systray Windows, plugins dynamiques gRPC, drive virtuel GhD: via WinFsp.</p>
               </div>
             </div>
 
@@ -440,26 +433,99 @@
           <div class="rm-group-header">
             <div class="rm-group-badge blue">V2</div>
             <div class="rm-group-meta">
-              <strong data-i18n="roadmap.group.v2.title">Multi-client</strong>
-              <span data-i18n="roadmap.group.v2.desc">Synchronisation de plusieurs machines vers le même backend</span>
+              <strong data-i18n="roadmap.group.v2.title">Files On-Demand &amp; VFS</strong>
+              <span data-i18n="roadmap.group.v2.desc">Placeholders Windows natifs, hydratation progressive, workflow complet</span>
             </div>
-            <div class="rm-group-count">1 milestone</div>
+            <div class="rm-group-count">5 milestones</div>
           </div>
 
           <div class="rm-rail">
+
+            <div class="rm-entry delivered">
+              <div class="rm-dot-col">
+                <div class="rm-dot" aria-hidden="true"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <div class="rm-version-status">
+                    <code class="rm-version">v2.0.0</code>
+                    <span class="badge-delivered" data-i18n="roadmap.v200.status">Livré</span>
+                  </div>
+                  <h4 class="rm-title" data-i18n="roadmap.v200.title">v2.0 — VFS Foundation</h4>
+                </div>
+                <p class="rm-desc" data-i18n="roadmap.v200.desc">Drive unifié GhD: exposant tous les backends comme sous-dossiers, ReadAt/ChunkSize pour lectures par plage optimisées.</p>
+              </div>
+            </div>
+
+            <div class="rm-entry highlight">
+              <div class="rm-dot-col">
+                <div class="rm-dot" aria-hidden="true"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <div class="rm-version-status">
+                    <code class="rm-version">v2.1.0</code>
+                    <span class="badge-delivered" data-i18n="roadmap.v210.status">Livré</span>
+                    <span class="badge-new" data-i18n="features.badge.new">Nouveau — v2.1</span>
+                  </div>
+                  <h4 class="rm-title" data-i18n="roadmap.v210.title">v2.1 — Files On-Demand</h4>
+                </div>
+                <p class="rm-desc" data-i18n="roadmap.v210.desc">Cloud Filter API native : CfRegisterSyncRoot, placeholders légers, hydratation progressive par chunks 4 MiB, fusion dossiers local + remote.</p>
+              </div>
+            </div>
+
+            <div class="rm-entry">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <div class="rm-version-status">
+                    <code class="rm-version">v2.2</code>
+                    <span class="badge-wip" data-i18n="roadmap.v220.status">Q3 2026</span>
+                  </div>
+                  <h4 class="rm-title" data-i18n="roadmap.v220.title">v2.2 — Workflow Objets</h4>
+                </div>
+                <p class="rm-desc" data-i18n="roadmap.v220.desc">Rename/move natifs sur placeholders, copier état complet, data-loss fixes (Supprimer L, Désépingler L), avertissement Conflict.</p>
+              </div>
+            </div>
+
+            <div class="rm-entry">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <div class="rm-version-status">
+                    <code class="rm-version">v2.3</code>
+                    <span class="badge-wip" data-i18n="roadmap.v230.status">Q3 2026</span>
+                  </div>
+                  <h4 class="rm-title" data-i18n="roadmap.v230.title">v2.3 — Sync bidirectionnelle complète</h4>
+                </div>
+                <p class="rm-desc" data-i18n="roadmap.v230.desc">Badges ☁️ complets via sparse MSIX, UI de gestion des conflits, cache états persistant, retry exponentiel adaptatif.</p>
+              </div>
+            </div>
+
             <div class="rm-entry last">
               <div class="rm-dot-col">
                 <div class="rm-dot"></div>
               </div>
               <div class="rm-card">
                 <div class="rm-card-header">
-                  <code class="rm-version">v2.0.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v200.title">Multi-client</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v200.status">Planifié</span>
+                  <div class="rm-version-status">
+                    <code class="rm-version">v2.4</code>
+                    <span class="badge-planned" data-i18n="roadmap.v240.status">Q4 2026</span>
+                  </div>
+                  <h4 class="rm-title" data-i18n="roadmap.v240.title">v2.4 — Cache avancé &amp; Offline</h4>
                 </div>
-                <p class="rm-desc" data-i18n="roadmap.v200.desc">Protocole de lock distribué, gestion des conflits multi-appareils, tableau de bord d'état centralisé</p>
+                <p class="rm-desc" data-i18n="roadmap.v240.desc">Mode offline complet, cache intelligent par backend, synchronisation opportuniste lors de reconnexion.</p>
               </div>
             </div>
+
           </div>
         </div>
 
@@ -468,10 +534,10 @@
           <div class="rm-group-header">
             <div class="rm-group-badge purple">V3</div>
             <div class="rm-group-meta">
-              <strong data-i18n="roadmap.group.v3.title">Sécurité avancée</strong>
-              <span data-i18n="roadmap.group.v3.desc">Chiffrement zero-knowledge et versioning des fichiers</span>
+              <strong data-i18n="roadmap.group.v3.title">Multi-client &amp; Sécurité</strong>
+              <span data-i18n="roadmap.group.v3.desc">Plusieurs machines synchronisées, chiffrement zero-knowledge, versioning</span>
             </div>
-            <div class="rm-group-count">2 milestones</div>
+            <div class="rm-group-count">3 milestones</div>
           </div>
 
           <div class="rm-rail">
@@ -483,11 +549,30 @@
               </div>
               <div class="rm-card">
                 <div class="rm-card-header">
-                  <code class="rm-version">v3.0.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v300.title">Chiffrement zero-knowledge</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v300.status">Planifié</span>
+                  <div class="rm-version-status">
+                    <code class="rm-version">V3 — 2027</code>
+                    <span class="badge badge-planned" data-i18n="roadmap.v300.status">2027</span>
+                  </div>
+                  <h4 class="rm-title" data-i18n="roadmap.v300.title">Multi-client</h4>
                 </div>
-                <p class="rm-desc" data-i18n="roadmap.v300.desc">AES-256-GCM + Argon2id, clés dans Windows Credential Manager — le backend ne voit jamais vos données en clair</p>
+                <p class="rm-desc" data-i18n="roadmap.v300.desc">Synchronisation de plusieurs machines Windows vers le même backend avec résolution des conflits multi-appareils.</p>
+              </div>
+            </div>
+
+            <div class="rm-entry">
+              <div class="rm-dot-col">
+                <div class="rm-dot"></div>
+                <div class="rm-line"></div>
+              </div>
+              <div class="rm-card">
+                <div class="rm-card-header">
+                  <div class="rm-version-status">
+                    <code class="rm-version">V3 — 2027+</code>
+                    <span class="badge badge-planned" data-i18n="roadmap.v310.status">2027+</span>
+                  </div>
+                  <h4 class="rm-title" data-i18n="roadmap.v310.title">Chiffrement zero-knowledge</h4>
+                </div>
+                <p class="rm-desc" data-i18n="roadmap.v310.desc">AES-256-GCM + Argon2id, clés dans Windows Credential Manager — le backend ne voit jamais vos données en clair.</p>
               </div>
             </div>
 
@@ -497,11 +582,13 @@
               </div>
               <div class="rm-card">
                 <div class="rm-card-header">
-                  <code class="rm-version">v3.1.0</code>
-                  <h4 class="rm-title" data-i18n="roadmap.v310.title">Versioning des fichiers</h4>
-                  <span class="badge badge-planned" data-i18n="roadmap.v310.status">Planifié</span>
+                  <div class="rm-version-status">
+                    <code class="rm-version">V3 — 2027+</code>
+                    <span class="badge badge-planned" data-i18n="roadmap.v320.status">2027+</span>
+                  </div>
+                  <h4 class="rm-title" data-i18n="roadmap.v320.title">Versioning des fichiers</h4>
                 </div>
-                <p class="rm-desc" data-i18n="roadmap.v310.desc">Historique versionné par fichier, restauration d'une version antérieure depuis l'interface systray</p>
+                <p class="rm-desc" data-i18n="roadmap.v320.desc">Historique versionné par fichier, restauration d'une version antérieure depuis l'interface systray.</p>
               </div>
             </div>
 
@@ -518,14 +605,48 @@
   <section id="install" class="section" aria-labelledby="install-title">
     <div class="container">
       <span class="section-label">Démarrer</span>
-      <h2 class="section-title" id="install-title" data-i18n="install.title">Installation depuis les sources</h2>
+      <h2 class="section-title" id="install-title" data-i18n="install.title">Installation</h2>
       <p class="section-subtitle" data-i18n="install.subtitle">
-        Aucun binaire publié pour l'instant — le projet est en développement actif
+        Binaires précompilés disponibles sur GitHub Releases
       </p>
 
-      <!-- Prérequis -->
+      <!-- Download block -->
+      <div class="download-block">
+        <h3 data-i18n="install.download.title">Depuis les releases binaires (recommandé)</h3>
+
+        <table class="download-table">
+          <tbody>
+            <tr>
+              <td>&#127759; Windows (x64)</td>
+              <td><code>ghostdrive-v2.1.0-windows-amd64.exe</code></td>
+              <td>
+                <a href="https://github.com/CCoupel/GhostDrive/releases/tag/v2.1.0"
+                   target="_blank"
+                   rel="noopener noreferrer"
+                   class="btn-download">
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                    <path d="M7.47 11.78a.75.75 0 001.06 0l4.25-4.25a.75.75 0 00-1.06-1.06L8.75 9.44V2a.75.75 0 00-1.5 0v7.44L4.28 6.47a.75.75 0 00-1.06 1.06l4.25 4.25zM1.5 13.25a.75.75 0 000 1.5h13a.75.75 0 000-1.5h-13z"/>
+                  </svg>
+                  <span data-i18n="install.download.btn">Télécharger v2.1.0</span>
+                </a>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="install-note-sdk">
+          &#9432; <span data-i18n="install.download.prereq">Prérequis : WinFsp 2.0+ — requis pour les placeholders Files On-Demand</span>.
+          <a href="https://winfsp.dev/rel/" target="_blank" rel="noopener noreferrer">Télécharger WinFsp</a>
+        </div>
+      </div>
+
+      <!-- Source install -->
       <h3 style="margin-bottom:1rem;color:var(--text-secondary);font-size:0.9rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;"
-          data-i18n="install.prereq.title">Prérequis</h3>
+          data-i18n="install.source.title">Depuis les sources</h3>
+
+      <!-- Prérequis -->
+      <h4 style="margin-bottom:0.75rem;color:var(--text-secondary);font-size:0.85rem;font-weight:600;"
+          data-i18n="install.prereq.title">Prérequis</h4>
       <div class="prereq-grid">
         <span class="prereq-item" data-i18n="install.prereq.go">Go 1.21+</span>
         <span class="prereq-item" data-i18n="install.prereq.wails">Wails v2</span>
@@ -580,12 +701,12 @@
       <div class="install-note" role="note">
         <span class="install-note-icon" aria-hidden="true">&#8505;</span>
         <span>
-          <span data-i18n="install.note">Les binaires précompilés seront disponibles à la release V1 via GitHub Releases.</span>
+          <span data-i18n="install.note">Windows SDK ≥ 10.0.17763.0 requis pour la Cloud Filter API.</span>
           &nbsp;
           <a href="https://github.com/CCoupel/GhostDrive/releases"
              target="_blank"
              rel="noopener noreferrer"
-             data-i18n="install.releases">Suivre les releases sur GitHub</a>
+             data-i18n="install.releases">Toutes les releases sur GitHub</a>
         </span>
       </div>
 
@@ -647,8 +768,8 @@
               <td><strong>GhostDrive</strong></td>
               <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span></span></td>
               <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span></span></td>
-              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span> <small style="color:var(--text-muted)">(V1)</small></span></td>
-              <td><span class="chip-planned" data-i18n="comparison.planned">V2</span></td>
+              <td><span class="chip-yes">&#10003; <span data-i18n="comparison.yes">Oui</span> <small style="color:var(--text-muted)">(v2.1)</small></span></td>
+              <td><span class="chip-planned" data-i18n="comparison.planned">V3</span></td>
             </tr>
           </tbody>
         </table>
