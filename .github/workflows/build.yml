@@ -147,6 +147,7 @@ jobs:
         env:
           CGO_ENABLED: 1
           CC: ${{ matrix.cc }}
+          CGO_LDFLAGS: "-lcldapi -lole32"
         run: |
           VERSION="${{ needs.version.outputs.version }}"
           COMMIT="${GITHUB_SHA::7}"
