@@ -18,6 +18,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.1.0] — 2026-05-22
+
+### Added
+
+- **feat(cfapi): Cloud Filter API foundation** — `CfRegisterSyncRoot`, `CfConnectSyncRoot` registration et lifecycle management — GhostDrive enregistre chaque backend comme sync root Windows natif (#122)
+- **feat(cfapi): Placeholder creation** — `CfCreatePlaceholders` avec `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` — crée les fichiers/répertoires distants comme placeholders légers au démarrage du backend (#123)
+- **feat(cfapi): File hydration** — `OnFetchData` callback, `CfExecute` TRANSFER_DATA, `ReportProgress` — hydratation progressive par chunks de 4 MiB, fichier accessible dès le premier chunk reçu (#124)
+- Nouveau champ config : `cloudProviderID` (GUID stable CF, auto-généré si absent) et `chunkCacheTTLHours` (défaut 24h)
+- Nouveaux bindings Wails : `PinFile(backendID, localPath, pin bool)`, `GetCacheStats()`, `ClearCache()`
+
+### Fixed
+
+- **fix(cfapi): 8 CF API bugs** — normalisation des chemins volume-relative, correction `BaseDirectoryPath`, gestion `ALREADY_EXISTS` non-fatale, fusion des répertoires via `CfConvertToPlaceholder`, ajout `CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION` (#133)
+- **fix(cfapi): WinRT StorageProviderSyncRootManager via COM C ABI** — accès natif au registre Windows pour les badges shell ; fallback registry pour compatibilité anciennes versions — partiellement résolu pour #129 (badges restent v2.2)
+
+### Changed
+
+- CF API opère sur `LocalPath` NTFS ; `GhD:` WinFsp reste inchangé et coexiste sans modification
+
+### Chore
+
+- cfapi.h bundled (MinGW-compatible) — incluse dans `internal/cfapi/`
+- libcldapi.a auto-générée dans `build-ghostdrive.ps1` — build Windows inclut la Cloud Filter API library
+
+### Notes
+
+- Windows SDK ≥ 10.0.17763.0 requis pour la CF API
+- Overlay badges partiels (#129) — badge distant Cloud présent ; badges ☁️ ✓✓ ⟳ natifs Windows requis sparse package MSIX (v2.2)
+- `PinFile` binding disponible mais UI React non câblée (v2.2)
+
+---
+
 ## [2.0.1] — 2026-05-20
 
 ### Added

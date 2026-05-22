@@ -32,6 +32,13 @@ type AppConfig struct {
 	// It can be a drive letter (e.g. "G:") or a directory path (e.g. `C:\GhostDrive\GhD\`).
 	// Empty means use the default (`C:\GhostDrive\GhD\` on Windows).
 	MountPoint string `json:"mountPoint,omitempty"`
+	// CloudProviderID is the stable GUID used to identify GhostDrive to the
+	// Windows Cloud Filter API (CfRegisterSyncRoot).  Generated automatically
+	// on first startup if empty.
+	CloudProviderID string `json:"cloudProviderID,omitempty"`
+	// ChunkCacheTTLHours is the number of hours a cached chunk remains valid
+	// before it is lazily expired on next access.  Defaults to 24.
+	ChunkCacheTTLHours int `json:"chunkCacheTTLHours,omitempty"`
 }
 
 // DefaultConfig returns a new AppConfig with sensible defaults.
@@ -47,7 +54,8 @@ func DefaultConfig() AppConfig {
 		// MountPoint default for the unified GhD: drive (v2.0).
 		// Prefer "G:" (GhostDrive mnemonic); the actual letter is assigned at
 		// first startup via AssignAvailableLetter if "G:" is already in use.
-		MountPoint: "G:",
+		MountPoint:         "G:",
+		ChunkCacheTTLHours: 24,
 	}
 }
 
@@ -108,6 +116,9 @@ func Load(path string) (AppConfig, error) {
 	// Apply defaults for zero values
 	if cfg.CacheSizeMaxMB == 0 {
 		cfg.CacheSizeMaxMB = 512
+	}
+	if cfg.ChunkCacheTTLHours == 0 {
+		cfg.ChunkCacheTTLHours = 24
 	}
 	if cfg.Backends == nil {
 		cfg.Backends = []plugins.BackendConfig{}

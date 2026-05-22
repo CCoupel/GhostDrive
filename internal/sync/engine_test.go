@@ -41,7 +41,7 @@ func newTestEngine(t *testing.T, backend plugins.StorageBackend, localDir string
 	t.Helper()
 	emitter := &captureEmitter{}
 	cfg := config.DefaultConfig()
-	engine := NewEngine(backend, localDir, "/remote", cfg, emitter)
+	engine := NewEngine("test-backend", backend, localDir, "/remote", cfg, emitter)
 	return engine, emitter
 }
 

@@ -4,6 +4,7 @@ import {plugins} from '../models';
 import {context} from '../models';
 import {types} from '../models';
 import {app} from '../models';
+import {cache} from '../models';
 import {config} from '../models';
 import {placeholder} from '../models';
 import {logging} from '../models';
@@ -30,7 +31,7 @@ export function GetBackendStatuses():Promise<Array<types.BackendStatus>>;
 
 export function GetBuildInfo():Promise<app.BuildInfo>;
 
-export function GetCacheStats():Promise<types.CacheStats>;
+export function GetCacheStats():Promise<Record<string, cache.CacheStats>>;
 
 export function GetConfig():Promise<config.AppConfig>;
 
@@ -57,6 +58,8 @@ export function ListFiles(arg1:string,arg2:string):Promise<Array<plugins.FileInf
 export function OpenSyncFolder(arg1:string):Promise<void>;
 
 export function PauseSync(arg1:string):Promise<void>;
+
+export function PinFile(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 
 export function Quit():Promise<void>;
 

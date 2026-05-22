@@ -7,11 +7,13 @@ toolchain go1.24.2
 require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/getlantern/systray v1.2.2
+	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/stretchr/testify v1.10.0
 	github.com/wailsapp/wails/v2 v2.12.0
 	github.com/winfsp/cgofuse v1.6.0
+	go.etcd.io/bbolt v1.4.3
 	golang.org/x/net v0.49.0
 	golang.org/x/sys v0.40.0
 	google.golang.org/grpc v1.80.0
@@ -33,7 +35,6 @@ require (
 	github.com/go-stack/stack v1.8.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/jchv/go-winloader v0.0.0-20210711035445-715c2860da7e // indirect

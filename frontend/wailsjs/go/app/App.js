@@ -102,6 +102,10 @@ export function PauseSync(arg1) {
   return window['go']['app']['App']['PauseSync'](arg1);
 }
 
+export function PinFile(arg1, arg2, arg3) {
+  return window['go']['app']['App']['PinFile'](arg1, arg2, arg3);
+}
+
 export function Quit() {
   return window['go']['app']['App']['Quit']();
 }

@@ -49,6 +49,8 @@ export namespace config {
 	    autoStart: boolean;
 	    ghostDriveRoot?: string;
 	    mountPoint?: string;
+	    cloudProviderID?: string;
+	    chunkCacheTTLHours?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppConfig(source);
@@ -65,6 +67,8 @@ export namespace config {
 	        this.autoStart = source["autoStart"];
 	        this.ghostDriveRoot = source["ghostDriveRoot"];
 	        this.mountPoint = source["mountPoint"];
+	        this.cloudProviderID = source["cloudProviderID"];
+	        this.chunkCacheTTLHours = source["chunkCacheTTLHours"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -157,6 +161,7 @@ export namespace plugins {
 	    etag: string;
 	    isPlaceholder: boolean;
 	    isCached: boolean;
+	    version?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new FileInfo(source);
@@ -172,6 +177,7 @@ export namespace plugins {
 	        this.etag = source["etag"];
 	        this.isPlaceholder = source["isPlaceholder"];
 	        this.isCached = source["isCached"];
+	        this.version = source["version"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -362,22 +368,6 @@ export namespace types {
 		    }
 		    return a;
 		}
-	}
-	export class CacheStats {
-	    sizeMB: number;
-	    fileCount: number;
-	    maxSizeMB: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new CacheStats(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.sizeMB = source["sizeMB"];
-	        this.fileCount = source["fileCount"];
-	        this.maxSizeMB = source["maxSizeMB"];
-	    }
 	}
 	export class ProgressEvent {
 	    path: string;

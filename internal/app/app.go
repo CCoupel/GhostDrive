@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/CCoupel/GhostDrive/internal/backends"
+	"github.com/CCoupel/GhostDrive/internal/cache"
+	"github.com/CCoupel/GhostDrive/internal/cfapi"
 	"github.com/CCoupel/GhostDrive/internal/config"
 	"github.com/CCoupel/GhostDrive/internal/logging"
 	"github.com/CCoupel/GhostDrive/internal/logger"
@@ -25,6 +27,7 @@ import (
 	grpcbridge "github.com/CCoupel/GhostDrive/plugins/grpc"
 	"github.com/CCoupel/GhostDrive/plugins/local"
 	pluginsregistry "github.com/CCoupel/GhostDrive/plugins/registry"
+	"github.com/google/uuid"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -37,12 +40,14 @@ type App struct {
 	mu                   gosync.RWMutex
 	manager              *backends.BackendManager
 	engines              map[string]*sync.Engine
-	driveManager         *placeholder.DriveManager          // v1.1.x per-backend drive pool
-	dynRegistry          *pluginsregistry.DynamicRegistry   // v0.6.x dynamic plugin loader
-	descriptors          map[string]plugins.PluginDescriptor // cached plugin descriptors by type
-	localCleanup         func()                              // cleanup for ServeInProcess local backend
-	logStore             *logging.Store                      // in-process log capture for the Logs UI tab
-	backendConnectErrors map[string]string                   // backends that failed to connect (startup or enable); protected by mu (#117)
+	driveManager         *placeholder.DriveManager           // v1.1.x per-backend drive pool
+	cfManager            *cfapi.CFManager                    // v2.1 Cloud Filter API manager
+	chunkCaches          map[string]cache.ChunkCache          // v2.1 per-backend chunk caches
+	dynRegistry          *pluginsregistry.DynamicRegistry    // v0.6.x dynamic plugin loader
+	descriptors          map[string]plugins.PluginDescriptor  // cached plugin descriptors by type
+	localCleanup         func()                               // cleanup for ServeInProcess local backend
+	logStore             *logging.Store                       // in-process log capture for the Logs UI tab
+	backendConnectErrors map[string]string                    // backends that failed to connect (startup or enable); protected by mu (#117)
 }
 
 // NewApp creates a new App. Configuration is loaded in Startup once the
@@ -61,6 +66,7 @@ func NewApp(cfgPath string) *App {
 		descriptors:          make(map[string]plugins.PluginDescriptor),
 		logStore:             logging.NewStore(),
 		backendConnectErrors: make(map[string]string),
+		chunkCaches:          make(map[string]cache.ChunkCache),
 	}
 	// driveManager needs an emitter; App.Emit() satisfies sync.EventEmitter.
 	// The driveManager is created here so it's available before Startup is called.
@@ -123,6 +129,11 @@ func (a *App) Startup(ctx context.Context) {
 	if a.backendConnectErrors == nil {
 		a.backendConnectErrors = make(map[string]string)
 	}
+	if a.chunkCaches == nil {
+		a.chunkCaches = make(map[string]cache.ChunkCache)
+	}
+	// v2.1 — Create CFManager; it is started after MountUnified in the startup sequence.
+	a.cfManager = cfapi.NewCFManager(&a.cfg, a)
 	a.mu.Unlock()
 
 	// #58 — Auto-create GhostDrive root directory on startup.
@@ -196,16 +207,27 @@ func (a *App) Startup(ctx context.Context) {
 			a.cfg.MountPoint = letter
 			needsSave = true
 		}
+		// v2.1 — Generate a stable CloudProviderID GUID if not yet set.
+		if a.cfg.CloudProviderID == "" {
+			a.cfg.CloudProviderID = "{" + uuid.New().String() + "}"
+			needsSave = true
+		}
 		migratedCfg := a.cfg
 		migrationPath := a.cfgPath
 		a.mu.Unlock()
 
 		if needsSave {
 			if saveErr := config.Save(migratedCfg, migrationPath); saveErr != nil {
-				log.Printf("app: save MountPoint migration: %v", saveErr)
+				log.Printf("app: save config migration: %v", saveErr)
 			}
 		}
 	}
+
+	// v2.1 — Initialise per-backend chunk caches before connecting backends.
+	a.mu.RLock()
+	cfgForCache := a.cfg
+	a.mu.RUnlock()
+	a.initChunkCaches(cfgForCache)
 
 	// Reconnect saved backends, auto-start sync, then mount the unified drive.
 	a.mu.RLock()
@@ -269,6 +291,23 @@ func (a *App) Startup(ctx context.Context) {
 		}
 	}
 
+	// v2.1 — Start CF sync roots for all enabled backends (after MountUnified).
+	if a.cfManager != nil && len(unifiedBackends) > 0 {
+		a.mu.RLock()
+		caches := a.chunkCaches
+		a.mu.RUnlock()
+		cfEntries := mountedBackendsToCFEntries(unifiedBackends)
+		cfCaches := make(map[string]cache.ChunkCache, len(cfEntries))
+		for _, e := range cfEntries {
+			if ch, ok := caches[e.ID]; ok {
+				cfCaches[e.ID] = ch
+			}
+		}
+		if err := a.cfManager.StartAll(cfEntries, cfCaches); err != nil {
+			log.Printf("app: startup cfManager.StartAll: %v", err)
+		}
+	}
+
 	a.emit("app:ready", map[string]any{
 		"version":       cfg.Version,
 		"backendsCount": len(cfg.Backends),
@@ -277,6 +316,23 @@ func (a *App) Startup(ctx context.Context) {
 
 // shutdown is called by Wails when the application is about to quit.
 func (a *App) Shutdown(ctx context.Context) {
+	// v2.1 — Stop CF sync roots before unmounting the drive.
+	if a.cfManager != nil {
+		if err := a.cfManager.StopAll(); err != nil {
+			log.Printf("app: shutdown cfManager.StopAll: %v", err)
+		}
+	}
+
+	// Close per-backend chunk caches.
+	a.mu.Lock()
+	for id, ch := range a.chunkCaches {
+		if err := ch.Close(); err != nil {
+			log.Printf("app: shutdown close cache %s: %v", id, err)
+		}
+	}
+	a.chunkCaches = make(map[string]cache.ChunkCache)
+	a.mu.Unlock()
+
 	// v2.0 — Unmount the unified drive before stopping sync engines.
 	if a.driveManager != nil {
 		if err := a.driveManager.UnmountUnified(); err != nil {
@@ -518,6 +574,13 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 		// Notify Windows Explorer so GhD:\ refreshes without requiring F5 (#132).
 		notifyShellDirChanged(mountPoint)
 
+		// v2.1 — Stop CF sync root for this backend.
+		if a.cfManager != nil {
+			if err := a.cfManager.Stop(id); err != nil {
+				log.Printf("app: SetBackendEnabled cfManager.Stop %s: %v", bc.Name, err)
+			}
+		}
+
 		// Persist first (state is definitive), then side-effects.
 		a.mu.RLock()
 		cfg := a.cfg
@@ -587,6 +650,23 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 		}
 		// Notify Windows Explorer so GhD:\ refreshes without requiring F5 (#132).
 		notifyShellDirChanged(mountPoint)
+
+		// v2.1 — Start CF sync root for newly enabled backend.
+		if a.cfManager != nil {
+			b2, _ := a.manager.Get(id)
+			a.mu.RLock()
+			ch := a.chunkCaches[id]
+			a.mu.RUnlock()
+			entry := cfapi.BackendEntry{
+				ID:        bc.ID,
+				Name:      bc.Name,
+				Backend:   b2,
+				LocalPath: bc.LocalPath,
+			}
+			if err := a.cfManager.Start(entry, b2, ch); err != nil {
+				log.Printf("app: SetBackendEnabled cfManager.Start %s: %v", bc.Name, err)
+			}
+		}
 
 		a.mu.RLock()
 		cfg := a.cfg
@@ -927,14 +1007,49 @@ func (a *App) DownloadFile(backendID string, remotePath string) error {
 	return b.Download(context.Background(), remotePath, localPath, progress)
 }
 
-// GetCacheStats returns local cache statistics (stub — cache implemented in v1).
-func (a *App) GetCacheStats() types.CacheStats {
-	return types.CacheStats{}
+// GetCacheStats returns per-backend chunk cache statistics.
+// Wails binding: window.go.App.GetCacheStats()
+func (a *App) GetCacheStats() map[string]cache.CacheStats {
+	a.mu.RLock()
+	caches := make(map[string]cache.ChunkCache, len(a.chunkCaches))
+	for k, v := range a.chunkCaches {
+		caches[k] = v
+	}
+	a.mu.RUnlock()
+
+	result := make(map[string]cache.CacheStats, len(caches))
+	for id, ch := range caches {
+		result[id] = ch.Stats()
+	}
+	return result
 }
 
-// ClearCache empties the local cache (stub — cache implemented in v1).
+// ClearCache invalidates all chunk caches for all backends.
 func (a *App) ClearCache() error {
+	a.mu.RLock()
+	caches := make(map[string]cache.ChunkCache, len(a.chunkCaches))
+	for k, v := range a.chunkCaches {
+		caches[k] = v
+	}
+	a.mu.RUnlock()
+
+	ctx := context.Background()
+	for id, ch := range caches {
+		if err := ch.InvalidateBackend(ctx, id); err != nil {
+			log.Printf("app: ClearCache invalidate %s: %v", id, err)
+		}
+	}
 	return nil
+}
+
+// PinFile sets the CF pin state for a file.
+// pin=true → always local (CF_PIN_STATE_PINNED), pin=false → back to cloud-only.
+// Wails binding: window.go.App.PinFile()
+func (a *App) PinFile(backendID, localPath string, pin bool) error {
+	if a.cfManager == nil {
+		return nil
+	}
+	return a.cfManager.PinFile(backendID, localPath, pin)
 }
 
 // OpenSyncFolder opens the local sync directory in the system file manager.
@@ -1059,7 +1174,11 @@ func (a *App) StartSync(backendID string) error {
 	// bridged to DriveManager.SyncError, making GetDriveStatuses() reflect runtime
 	// sync state alongside mount state (#117b).
 	emitter := &backendEmitter{backendID: backendID, app: a}
-	engine := sync.NewEngine(b, bc.SyncDir, bc.RemotePath, cfg, emitter)
+	engine := sync.NewEngine(backendID, b, bc.SyncDir, bc.RemotePath, cfg, emitter)
+	// v2.1 — Wire cfManager into the engine for post-sync badge updates.
+	if a.cfManager != nil {
+		engine.SetCFManager(a.cfManager)
+	}
 	a.engines[backendID] = engine
 	a.mu.Unlock() // release before Start to avoid holding lock during I/O
 	return engine.Start(a.ctx)
@@ -1438,6 +1557,66 @@ func (a *App) validateBackendConfig(bc plugins.BackendConfig) (warning string, e
 	}
 
 	return warning, nil
+}
+
+// ─── v2.1 helpers ────────────────────────────────────────────────────────────
+
+// initChunkCaches creates one ChunkCache per backend based on AppConfig.
+// BoltDB caches are created when CacheEnabled=true; noop caches otherwise.
+func (a *App) initChunkCaches(cfg config.AppConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	cacheDir := cfg.CacheDir
+	if cacheDir == "" {
+		// Default: %LOCALAPPDATA%\GhostDrive\cache\ on Windows; ~/.cache/ghostdrive on Linux.
+		if appdata := os.Getenv("LOCALAPPDATA"); appdata != "" {
+			cacheDir = filepath.Join(appdata, "GhostDrive", "cache")
+		} else if home, err := os.UserHomeDir(); err == nil {
+			cacheDir = filepath.Join(home, ".cache", "ghostdrive")
+		} else {
+			cacheDir = filepath.Join(os.TempDir(), "ghostdrive-cache")
+		}
+	}
+
+	ttlHours := cfg.ChunkCacheTTLHours
+	if ttlHours <= 0 {
+		ttlHours = 24
+	}
+	ttl := time.Duration(ttlHours) * time.Hour
+	maxBytes := int64(cfg.CacheSizeMaxMB) * 1024 * 1024
+
+	for _, bc := range cfg.Backends {
+		if _, exists := a.chunkCaches[bc.ID]; exists {
+			continue // already initialised
+		}
+		if cfg.CacheEnabled {
+			dbPath := filepath.Join(cacheDir, bc.ID, "chunks.db")
+			ch, err := cache.NewBoltCache(dbPath, ttl, maxBytes)
+			if err != nil {
+				log.Printf("app: initChunkCaches %s: %v — using noop", bc.Name, err)
+				a.chunkCaches[bc.ID] = cache.NewNoopCache()
+			} else {
+				a.chunkCaches[bc.ID] = ch
+			}
+		} else {
+			a.chunkCaches[bc.ID] = cache.NewNoopCache()
+		}
+	}
+}
+
+// mountedBackendsToCFEntries converts []placeholder.MountedBackend to []cfapi.BackendEntry.
+func mountedBackendsToCFEntries(mbs []placeholder.MountedBackend) []cfapi.BackendEntry {
+	entries := make([]cfapi.BackendEntry, len(mbs))
+	for i, mb := range mbs {
+		entries[i] = cfapi.BackendEntry{
+			ID:        mb.ID,
+			Name:      mb.Name,
+			Backend:   mb.Backend,
+			LocalPath: mb.Config.LocalPath,
+		}
+	}
+	return entries
 }
 
 // openFolder opens a directory in the OS file manager.

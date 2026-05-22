@@ -921,6 +921,109 @@ Consultez `plugins/webdav/webdav.go` pour une implémentation de référence com
 
 ---
 
+## 8. Intégration Cloud Filter API (Windows v2.1+)
+
+### Vue d'ensemble
+
+À partir de v2.1, GhostDrive supporte **Files On-Demand** via la Cloud Filter API Windows (CFAPI). Cette fonctionnalité permet aux utilisateurs de créer des placeholders légers pour les fichiers distants, qui sont hydratés à la demande.
+
+**Point clé** : la Cloud Filter API est gérée **entièrement par GhostDrive core** (`internal/cfapi/`, `internal/cache/`). **Vos plugins n'ont rien à faire de spécial** — ils doivent simplement implémenter correctement `ReadAt()` et `ChunkSize()`.
+
+### Comment vos plugins alimentent CFAPI
+
+#### 1. `ReadAt()` — Lectures par plage (Range Reads)
+
+```go
+// ReadAt(ctx, remote, offset, length) doit retourner jusqu'à `length` octets
+// à partir de l'offset `offset` dans le fichier distant.
+func (p *MyPlugin) ReadAt(ctx context.Context, remote string, offset, length int64) ([]byte, error)
+```
+
+**Comment CFAPI l'utilise** :
+- Quand l'utilisateur accède un placeholder, CFAPI déclenche un callback FETCH_DATA
+- GhostDrive core appelle `ReadAt(ctx, remote, 0, ChunkSize())` pour hydroter le premier chunk
+- Puis appelle `ReadAt(ctx, remote, ChunkSize, ChunkSize)` pour le suivant, etc.
+- Les chunks sont cachés localement via BoltDB (TTL configurable, défaut 24h)
+
+**Implémentation**:
+- **WebDAV** : utilise HTTP Range header (RFC 7233) `Range: bytes=offset-offset+length-1`
+- **MooseFS** : positionne le file descriptor et lit
+- **Autres** : implémentez le support ou retournez une erreur `NotImplemented` (fallback : Download complet)
+
+#### 2. `ChunkSize()` — Granularité de lecture
+
+```go
+// ChunkSize() retourne la taille naturelle de chunk pour ce backend.
+// Retourner 0 = taille libre (CFAPI utilisera une taille par défaut ~4 MiB)
+func (p *MyPlugin) ChunkSize() int64
+```
+
+**Valeurs recommandées** :
+- **WebDAV** : `0` (HTTP supporte n'importe quel offset/length)
+- **MooseFS** : `16384` ou `65536` (blocs MooseFS)
+- **S3** : `5242880` (5 MiB min pour multipart, mais CFAPI ignorera si vous retournez `0`)
+- **Filesystem local** : `0`
+
+### Exemple : WebDAV avec ReadAt
+
+```go
+import (
+    "context"
+    "fmt"
+    "io"
+    "net/http"
+)
+
+// ReadAt pour WebDAV
+func (w *WebDAVBackend) ReadAt(ctx context.Context, remote string, offset, length int64) ([]byte, error) {
+    if !w.connected {
+        return nil, fmt.Errorf("webdav: %w", plugins.ErrNotConnected)
+    }
+    
+    url := w.buildURL(remote)
+    req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+    if err != nil {
+        return nil, fmt.Errorf("webdav: ReadAt: %w", err)
+    }
+    
+    // Ajouter le header Range pour demander seulement la plage voulue
+    req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+    
+    resp, err := w.client.Do(req)
+    if err != nil {
+        return nil, fmt.Errorf("webdav: ReadAt: %w", err)
+    }
+    defer resp.Body.Close()
+    
+    // 206 = Partial Content (range supporté)
+    // 200 = OK (range non supporté — serveur retourne tout le fichier)
+    if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+        return nil, fmt.Errorf("webdav: ReadAt: status %d", resp.StatusCode)
+    }
+    
+    data, err := io.ReadAll(resp.Body)
+    if err != nil {
+        return nil, fmt.Errorf("webdav: ReadAt: read failed: %w", err)
+    }
+    
+    return data, nil
+}
+
+// ChunkSize pour WebDAV (taille libre)
+func (w *WebDAVBackend) ChunkSize() int64 {
+    return 0  // WebDAV supporte n'importe quel offset/length
+}
+```
+
+### Limitations & Notes
+
+- **Linux** : CFAPI est Windows uniquement. Votre plugin compile sur Linux sans changement — GhostDrive utilise un fallback "sync complet" (aucune hydration progressive).
+- **Cache** : les chunks sont cachés par GhostDrive core, **pas par le plugin**. Implémentez `ReadAt()` de manière simple et sans cache interne.
+- **Erreurs** : retournez `ErrFileNotFound` si le fichier est supprimé pendant la lecture ; GhostDrive invalidera le placeholder.
+- **Concurrence** : `ReadAt()` peut être appelé de plusieurs goroutines en parallèle. Soyez thread-safe.
+
+---
+
 ## Notes
 
 - **Quota non-supportée** : si votre backend ne supporte pas la quota, retournez `(-1, -1, nil)`.

@@ -21,6 +21,8 @@ type Engine struct {
 	remotePath string
 	cfg        config.AppConfig
 	emitter    EventEmitter
+	backendID  string         // stable backend UUID — used for CF state updates
+	cfManager  CFStateManager // optional; nil → no CF badge updates
 
 	mu         gosync.RWMutex
 	state      types.SyncState
@@ -29,10 +31,12 @@ type Engine struct {
 }
 
 // NewEngine creates a new SyncEngine.
+// backendID is the stable backend UUID (from BackendConfig.ID) used for CF state updates.
 // localDir is the local synchronization directory.
 // remotePath is the root path on the backend.
 // emitter is used to emit Wails events; pass nil to use NoopEmitter.
 func NewEngine(
+	backendID string,
 	backend plugins.StorageBackend,
 	localDir, remotePath string,
 	cfg config.AppConfig,
@@ -42,6 +46,7 @@ func NewEngine(
 		emitter = &NoopEmitter{}
 	}
 	return &Engine{
+		backendID:  backendID,
 		backend:    backend,
 		localDir:   localDir,
 		remotePath: remotePath,
@@ -54,6 +59,14 @@ func NewEngine(
 			ActiveTransfers: []types.ProgressEvent{},
 		},
 	}
+}
+
+// SetCFManager injects a CFStateManager so the engine can update Windows file
+// badges after sync operations.  Must be called before Start().
+func (e *Engine) SetCFManager(m CFStateManager) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfManager = m
 }
 
 // Start begins the sync engine: initial full reconciliation + watcher loop.
@@ -250,6 +263,15 @@ func (e *Engine) runFullSync(ctx context.Context) error {
 	reconciler := NewReconciler(e.backend, e.localDir, logPath)
 	dispatcher := NewDispatcher(e.backend, e.emitter, e.localDir)
 
+	// Phase 4 — wire CF state manager so per-file badges are updated.
+	e.mu.RLock()
+	cfMgr := e.cfManager
+	backendID := e.backendID
+	e.mu.RUnlock()
+	if cfMgr != nil && backendID != "" {
+		dispatcher.SetCFManager(backendID, cfMgr)
+	}
+
 	actions, err := reconciler.Reconcile(ctx, e.remotePath)
 	if err != nil {
 		e.setState(types.SyncState{
@@ -269,6 +291,11 @@ func (e *Engine) runFullSync(ctx context.Context) error {
 		e.recordError("", err.Error())
 	}
 
+	// Phase 4 — mark the sync root as in-sync after full reconciliation.
+	if cfMgr != nil && backendID != "" {
+		_ = cfMgr.SetSyncState(backendID, e.localDir, CFSyncStateSynced)
+	}
+
 	now := time.Now()
 	e.setState(types.SyncState{
 		Status:   types.SyncIdle,
@@ -282,6 +309,13 @@ func (e *Engine) runFullSync(ctx context.Context) error {
 
 func (e *Engine) handleLocalEvent(ctx context.Context, evt plugins.FileEvent) error {
 	dispatcher := NewDispatcher(e.backend, e.emitter, e.localDir)
+	e.mu.RLock()
+	cfMgr := e.cfManager
+	backendID := e.backendID
+	e.mu.RUnlock()
+	if cfMgr != nil && backendID != "" {
+		dispatcher.SetCFManager(backendID, cfMgr)
+	}
 	remotePath := path.Join(e.remotePath, evt.Path)
 
 	switch evt.Type {
@@ -303,6 +337,13 @@ func (e *Engine) handleLocalEvent(ctx context.Context, evt plugins.FileEvent) er
 
 func (e *Engine) handleRemoteEvent(ctx context.Context, evt plugins.FileEvent) error {
 	dispatcher := NewDispatcher(e.backend, e.emitter, e.localDir)
+	e.mu.RLock()
+	cfMgr := e.cfManager
+	backendID := e.backendID
+	e.mu.RUnlock()
+	if cfMgr != nil && backendID != "" {
+		dispatcher.SetCFManager(backendID, cfMgr)
+	}
 	localPath := filepath.Join(e.localDir, evt.Path)
 
 	switch evt.Type {
