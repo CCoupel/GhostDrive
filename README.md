@@ -32,7 +32,7 @@ GhostDrive est un client Windows libre qui transforme n'importe quel backend de 
 
 ## Fonctionnalites
 
-### V1 — Disponible (v1.7.0)
+### V1 — ✅ Livré (v1.7.0)
 - Synchronisation bidirectionnelle de dossiers locaux vers backends distants
 - Placeholders Windows (Cloud Filter API) — Files On-Demand
 - Cache local activable par point de sync
@@ -42,11 +42,29 @@ GhostDrive est un client Windows libre qui transforme n'importe quel backend de 
 - Points de synchronisation configurables (dossier local ↔ chemin distant) par backend
 - Vue etat de synchronisation en temps reel — barres de progression par fichier, erreurs, historique
 
-### V2 — Roadmap
-- Multi-client — plusieurs machines synchronisees vers le meme backend
+### V2.0 — ✅ Livré (2026-05-17)
+- **VFS Foundation** : architecture WinFsp unifiée, un seul drive GhD: pour tous les backends
+- **ReadAt() & ChunkSize()** : lectures par plage optimisées pour hydratation progressive
+- Breaking change : interface StorageBackend requiert ReadAt() et ChunkSize()
 
-### V3 — Roadmap
-- Chiffrement cote client (zero-knowledge)
+### V2.1 — ✅ Livré (2026-05-22)
+- **Files On-Demand** : Cloud Filter API foundation, placeholders non hydratés, hydratation progressive par chunks
+- **Cache chunks BoltDB** : TTL configurable, invalidation ETag/mtime, éviction LRU
+- **Badges shell Windows** : états CF natifs ☁️ ✓✓ ⟳ ⚡ via CfSetInSyncState/CfSetPinState
+- **8 CF API bugs fixes** : normalisation chemins, BaseDirectoryPath, ALREADY_EXISTS, CfConvertToPlaceholder
+
+### V2.2/V2.3/V2.4 — 🔜 Roadmap
+- **V2.2** : Workflow Objets (rename/move natif, copier état complet, data-loss bugs, avertissement Conflict)
+- **V2.3** : Sync bidirectionnelle complète (badges complets avec sparse MSIX, UI conflits, cache états)
+- **V2.4** : Cache avancé & Offline (à détailler)
+
+Pour la roadmap détaillée, voir [`docs/roadmap.md`](docs/roadmap.md).
+
+### V2 (Multi-client) — 🔜 Roadmap
+- Plusieurs machines synchronisées vers le même backend
+
+### V3 — 🔜 Roadmap
+- Chiffrement côté client (zero-knowledge)
 - Versioning des fichiers
 
 ---

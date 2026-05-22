@@ -19,11 +19,18 @@
 
 ## Roadmap
 
-| Version | Fonctionnalites |
-|---------|-----------------|
-| **V1** | Sync bidirectionnelle + Placeholders Files On-Demand + Cache local (activable) — Backends : WebDAV + MooseFS |
-| **V2** | Multi-client synchronise sur le meme repo backend |
-| **V3** | Chiffrement cote client + Versioning des fichiers |
+| Version | Statut | Contenu |
+|---------|--------|---------|
+| **V1** | ✅ Livré | Sync bidirectionnelle + Placeholders Files On-Demand + Cache local (activable) — Backends : WebDAV + MooseFS |
+| **V2.0** | ✅ Livré (2026-05-17) | VFS Foundation, WinFsp + Cloud Filter API, ReadAt/ChunkSize |
+| **V2.1** | ✅ Livré (2026-05-22) | Files On-Demand, CF API foundation, placeholders, hydratation progressive, 8 bugs CF |
+| **V2.2** | 🔜 Q3 2026 | Workflow Objets (rename/move natif, Copier état, bugs data-loss, avertissement Conflict) |
+| **V2.3** | 🔜 Q3 2026 | Sync bidirectionnelle (badges ☁️, UI conflits, cache états, retry exponentiel) |
+| **V2.4** | 🔜 Q4 2026 | Cache avancé & Offline |
+| **V2 (Major)** | 🔜 2027 | Multi-client synchronisé sur le même repo backend |
+| **V3** | 🔜 2027+ | Chiffrement côté client + Versioning des fichiers |
+
+**Voir aussi** : [`docs/roadmap.md`](docs/roadmap.md) pour la roadmap détaillée.
 
 ---
 
@@ -362,52 +369,25 @@ Tu **coordonnes et dispatches**. Tu n'exécutes aucune tâche technique toi-mêm
 | `Read` (code applicatif) | `code-reviewer`, `planner` |
 | `Glob`, `Grep` (recherche code) | `planner`, `dev-*` |
 
-**`Read` autorisé uniquement pour** : `CLAUDE.md`, `MEMORY.md`, `project-config.json`, `.claude/workflow-state.json`, `_work/handoff/*.md`, `_work/reports/*.md`, `contracts/CHANGELOG.md`
+**`Read` autorisé uniquement pour** : `CLAUDE.md`, `MEMORY.md`, `project-config.json`, `_work/handoff/*.md`, `_work/reports/*.md`, `contracts/CHANGELOG.md`
 
 **Ne jamais** exécuter une tâche technique soi-même — spawner l'agent approprié.
 
-### Dispatch d'une tâche — Protocole PING/PONG
+### Dispatcher une tâche
 
-Consulter `.claude/workflow-state.json` avant tout dispatch :
+Tous les teammates sont spawned au démarrage (`/start-session`) et sont en IDLE.
+**Pendant la session : uniquement `SendMessage` — jamais de spawn.**
 
 ```
-État de l'agent ?
-  absent / failed    → Spawn direct : Task({ name, prompt })
-  spawn_pending      → Attendre ACTIF
-  working            → Attendre DONE
-  idle               → PING/PONG (2 tours)
-  ping_pending       → Attendre PONG (wakeup prévu)
+SendMessage({ to: "<nom-canonique>", content: "<tâche complète>" })
+→ Attendre ACTIF (confirmation) + DONE (références fichiers)
 ```
 
-**Spawn initial (agent absent ou failed) :**
+Plusieurs agents en parallèle — même tour :
 ```
-Task({ name: "<nom-canonique>", prompt: "<prompt de spawn>" })
-→ .claude/workflow-state.json : status: "spawn_pending", spawned_at: <ISO>, task_summary: "<résumé>"
-→ Sur réception ACTIF : status: "working"
-→ Sur réception DONE  : status: "idle"
+SendMessage({ to: "dev-backend",  content: "<tâche>" })
+SendMessage({ to: "dev-frontend", content: "<tâche>" })
 ```
-
-**Réutilisation d'un agent idle — cycle PING/PONG :**
-```
-Tour N :
-  SendMessage({ to: "<agent>", content: "PING" })
-  ScheduleWakeup(60, "PING-check <agent> — PONG reçu → tâche, absent → spawn")
-  .claude/workflow-state.json : status: "ping_pending", pinged_at: <ISO>
-  → Fin du tour
-
-Tour N+1 — PONG reçu :
-  status: "working" → SendMessage({ to: "<agent>", content: "<tâche>" })
-
-Tour N+1 — wakeup, pas de PONG :
-  SendMessage({ to: "<agent>", message: {type: "shutdown_request"} })
-  Bash("sleep 10")
-  Task({ name: "<agent>", prompt: "<même tâche — lue dans workflow-state.json>" })
-  status: "spawn_pending", spawned_at: <ISO>
-```
-
-> Si le PONG arrive avant le wakeup : le wakeup fire mais voit `working` → no-op. Pas de race condition.
-
-**ACK timeout** : si `spawn_pending` depuis > 60s sans ACTIF → respawn au prochain cycle actif.
 
 ### Nommage des Agents — Règle Absolue
 
@@ -420,70 +400,17 @@ planner, dev-backend, dev-frontend, dev-firmware, dev-plugin,
 test-writer, code-reviewer, qa, doc-updater, deployer, security, infra
 ```
 
-### Prompt obligatoire pour tout `Task` de spawn
-
-```
-"Lis .claude/agents/context/TEAMMATES_PROTOCOL.md puis .claude/agents/<nom>.md.
- Tu fais partie de ghostdrive-team sur GhostDrive.
- Ta tâche : <description complète>
- Commence dès que tu as envoyé ACTIF."
-```
-Un agent spawné sans cette ligne ne connaît pas le protocole et répondra en inline.
-
-### Restauration après compactage de contexte
-
-Après un compactage, un hook `UserPromptSubmit` ré-injecte automatiquement `.claude/workflow-state.json`.
-
-**À réception de ce bloc** :
-- Agents `working` : toujours en cours, enverront DONE quand terminés. Rien à faire.
-- Agents `idle` : vivants, en attente. Utiliser PING/PONG avant le prochain dispatch.
-- Agents `spawn_pending` depuis > 60s : ACTIF jamais reçu → respawn avec la même tâche.
-- Agents `ping_pending` depuis > 60s : PONG jamais reçu → shutdown_request + sleep(10s) + Task() → `spawn_pending`.
-- Agents `failed` : décider de respawner ou d'informer l'utilisateur.
-
-### Workflow-state.json — Source de Vérité
-
-Fichier : `.claude/workflow-state.json` — écrire **immédiatement sur disque** à chaque événement (jamais en mémoire) :
-
-| Événement | Mise à jour |
-|-----------|-------------|
-| Spawn | `status: "spawn_pending"`, `spawned_at: <ISO>`, `task_summary: "<résumé>"` |
-| Réception ACTIF | `status: "working"`, `actual_name` si le harness a renommé l'agent |
-| Réception DONE | `status: "idle"` |
-| PING envoyé | `status: "ping_pending"`, `pinged_at: <ISO>` |
-| Réception PONG | `status: "working"` |
-| Wakeup sans PONG | shutdown_request + sleep(10s) + Task() → `status: "spawn_pending"` |
-| Réception FAILED | `status: "failed"` |
-
-**`actual_name`** : si le harness crée `generic-2` au lieu de `generic`, l'ACTIF indique le vrai nom.
-Enregistrer `actual_name` et l'utiliser pour tous les `SendMessage` ultérieurs vers ce rôle.
-
-Format :
-```json
-{
-  "agents": {
-    "generic": {
-      "status": "working",
-      "actual_name": "generic-2",
-      "spawned_at": "<ISO>",
-      "task_summary": "<résumé court de la tâche>"
-    }
-  }
-}
-```
-
 ### Validation des rapports DONE
 
 Un `DONE` valide ne contient **jamais** de contenu inline (code, diff, extraits).  
 Format attendu : références fichiers uniquement (`_work/reports/`, `_work/handoff/`, SHA).
 
-Si un agent envoie du contenu inline → refuser et corriger :
+Si un agent envoie du contenu inline → corriger :
 ```
 SendMessage({
   to: "<agent>",
-  content: "Rapport invalide — aucun contenu inline autorisé. Écris le contenu dans _work/reports/<agent>-<timestamp>.md et renvoie le DONE avec la référence uniquement."
+  content: "Rapport invalide — écris le contenu dans _work/reports/<agent>-<timestamp>.md et renvoie le DONE avec la référence."
 })
 ```
-Ne jamais accepter un DONE inline comme valide.
 
 <!-- END TEAMLEADER_PROTOCOL -->
