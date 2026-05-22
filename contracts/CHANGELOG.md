@@ -5,6 +5,23 @@ Les changements **BREAKING** doivent être validés par le CDP avant implémenta
 
 ---
 
+## [20260520] — v2.1 Files On-Demand (#122 #123 #124 #129)
+
+- **[NEW]** `internal/cfapi.SyncProvider` — package CGO Windows wrappant Cloud Filter API (`CfRegisterSyncRoot`, `CfConnectSyncRoot`, `CfCreatePlaceholders`, `CfSetInSyncState`, `CfSetPinState`, `CfExecute`)
+- **[NEW]** `internal/cfapi.CFManager` — gère les sync roots CF (un par backend) ; lifecycle lié à `app.go`
+- **[NEW]** `internal/cfapi.Hydrator` — bridge callbacks CF ↔ `StorageBackend.ReadAt` + `ChunkCache`
+- **[NEW]** `internal/cache.ChunkCache` interface + `NewBoltCache` (BoltDB) + `NewNoopCache`
+- **[NEW]** `AppConfig.CloudProviderID string` — GUID stable CF (généré si absent)
+- **[NEW]** `AppConfig.ChunkCacheTTLHours int` — TTL chunks (défaut 24h)
+- **[NEW]** Wails event `cf:sync_state` — `{backendID, localPath, state}` (optionnel v2.1)
+- **[NEW]** Wails event `cf:hydration_progress` — `{backendID, localPath, byteDone, byteTotal}` (optionnel v2.1)
+- **[NEW]** Wails binding `GetCacheStats() map[string]CacheStats` (debug)
+- **[NEW]** Wails binding `PinFile(backendID, localPath string, pin bool) error` (optionnel v2.1)
+- **[NEW]** `go.etcd.io/bbolt` ajouté à `go.mod`
+- **[NEW]** Contrat `contracts/PLAN_v2.1.md` — plan d'implémentation complet
+
+---
+
 ## [20260520] — v2.0 Plugin Events (#130 #131)
 
 - **[NEW]** `FileInfo.Version string` — jeton de version opaque fourni par le backend (WebDAV=ETag, MooseFS=CTime décimal, local="") ; zero-value valide → aucun BREAKING CHANGE
