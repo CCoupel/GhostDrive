@@ -138,7 +138,7 @@ jobs:
       - name: Generate libcldapi.a from bundled .def
         if: matrix.target == 'windows-amd64'
         run: |
-          x86_64-w64-mingw32-dlltool \
+          sudo x86_64-w64-mingw32-dlltool \
             -d internal/cfapi/cldapi.def \
             -l /usr/x86_64-w64-mingw32/lib/libcldapi.a
           echo "✅ libcldapi.a generated at /usr/x86_64-w64-mingw32/lib/libcldapi.a"
