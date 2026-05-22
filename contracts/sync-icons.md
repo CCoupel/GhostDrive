@@ -93,3 +93,17 @@ error > conflict > uploading | downloading > pending_upload | pending_download >
 - Les états fichier sont stockés en mémoire (pas en base) — reconstruits depuis `sync:state-changed`
 - L'état `placeholder` n'existe qu'avec Cloud Filter API (v1.2.0) — en v0.x, tous les fichiers sont soit `synced` soit `pending_*`
 - Les icônes Lucide sont importées depuis `lucide-react` — ne pas utiliser d'autres librairies d'icônes
+
+---
+
+## 7. Matrice Actions × États
+
+Pour une vue complète des comportements applicatifs selon l'état du fichier et l'action effectuée (ouvrir, supprimer, renommer, épingler, etc.), consultez la **matrice états × actions** :
+
+📖 **Voir** : `docs/sync-states-actions.md`
+
+Cette matrice documente les transitions d'état et les effets secondaires pour chaque combinaison action/état, notamment :
+- Gestion des téléchargements bloquants (Downloading + Ouvrir)
+- Résolution des conflits
+- Épinglage/Désépinglage (Pin/Unpin) et transformation en placeholders
+- Suppressions et renommages en présence de sync en cours

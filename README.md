@@ -93,6 +93,12 @@ GhostDrive est un client Windows libre qui transforme n'importe quel backend de 
 | CI/CD | GitHub Actions |
 | Distribution | Binaires GitHub Releases |
 
+### États & Synchronisation
+
+Pour comprendre les différents états des fichiers et les actions possibles selon l'état, consultez la **matrice états × actions** :
+
+📖 **[Voir : docs/sync-states-actions.md](docs/sync-states-actions.md)** — matrice complète (9 états × 10 actions)
+
 ---
 
 ## Installation
