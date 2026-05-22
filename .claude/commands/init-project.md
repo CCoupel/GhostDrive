@@ -788,38 +788,18 @@ gh label create "DONE"      --color "0e8a16" --description "Issue livrée et val
 > Si le repo n'a pas encore de remote GitHub configuré, sauter cette étape et noter dans
 > le Message de Fin : "Labels GitHub à créer manuellement ou relancer /init-project après `git remote add`."
 
-#### Hooks Claude Code (PreCompact + UserPromptSubmit — restauration post-compactage)
+#### Settings Claude Code
 
-Les règles critiques du teamleader sont dans `CLAUDE.md` (bloc `TEAMLEADER_PROTOCOL`) — elles survivent aux compactages nativement.  
-Les hooks gèrent la restauration de `workflow-state.json` (état des agents actifs — éphémère, non tracké dans git) :
+Les règles critiques du teamleader sont dans `CLAUDE.md` (bloc `TEAMLEADER_PROTOCOL`) — elles survivent aux compactages nativement via le chargement natif de CLAUDE.md.
 
-- **PreCompact** : affiche `workflow-state.json` dans le résumé + pose le marqueur `.post-compact`
-- **UserPromptSubmit** : si `.post-compact` existe → ré-injecte `workflow-state.json` au premier prompt post-compactage → supprime le marqueur
-
-Ce mécanisme garantit que le teamleader retrouve la liste de ses teammates après un compactage de contexte.
-
-Déployer `TEMPLATE_claude/settings.json` dans `.claude/settings.json`.
-Si `.claude/settings.json` existe déjà, merger uniquement la clé `hooks` sans dupliquer les entrées existantes :
+Déployer `TEMPLATE_claude/settings.json` dans `.claude/settings.json` si absent :
 
 ```bash
 if [ ! -f .claude/settings.json ]; then
   cp TEMPLATE_claude/settings.json .claude/settings.json
   echo "✓ .claude/settings.json créé"
 else
-  jq -s '
-    .[0] as $base | .[1] as $tmpl |
-    reduce ($tmpl.hooks // {} | to_entries[]) as $e (
-      $base;
-      .hooks[$e.key] = (
-        ((.hooks[$e.key] // []) | map(.hooks[0].command)) as $existing_cmds |
-        (.hooks[$e.key] // []) +
-        ($e.value | map(select(.hooks[0].command as $c | $existing_cmds | index($c) == null)))
-      )
-    )
-  ' .claude/settings.json TEMPLATE_claude/settings.json \
-    > .claude/settings.json.tmp \
-    && mv .claude/settings.json.tmp .claude/settings.json
-  echo "✓ .claude/settings.json — hooks PreCompact + UserPromptSubmit ajoutés"
+  echo "  .claude/settings.json déjà présent — non écrasé"
 fi
 ```
 
@@ -938,7 +918,8 @@ Pour rétablir le template, supprimer le fichier .claude/commands/[nom].md et re
 #### Etape d2 — Calculer les noms deployes attendus
 
 ```bash
-# Noms attendus pour les commandes (strip .template)
+# Noms attendus pour les commandes — tous les *.md du top-level (glob non récursif)
+# NB : context-audit.md est une commande normale, pas un fichier du sous-répertoire context/
 EXPECTED_COMMANDS=$(for f in TEMPLATE_claude/commands/*.md; do
   basename "$f" .md
 done)
@@ -952,11 +933,12 @@ done)
 #### Etape d3 — Comparer avec les fichiers deployes
 
 ```bash
-# Commandes template déployées (*.md ou *.template.md legacy — hors context/ et hors init-project)
+# Commandes template déployées (*.md ou *.template.md legacy — hors sous-répertoire context/ et hors init-project)
+# Le filtre exclut le répertoire .claude/commands/context/ uniquement — pas les fichiers nommés context-*.md
 # init-project est le bootstrapper lui-même : jamais traité comme reliquat ni supprimé
 DEPLOYED_COMMANDS=$(
   { ls .claude/commands/*.md 2>/dev/null; ls .claude/commands/*.template.md 2>/dev/null; } \
-  | grep -v '/context/' \
+  | grep -v '/commands/context/' \
   | grep -v 'init-project' \
   | xargs -I{} basename {} \
   | sed 's/\.template\.md$//' | sed 's/\.md$//' \
@@ -1232,29 +1214,16 @@ echo "✓ CLAUDE.md — bloc TEAMLEADER_PROTOCOL mis à jour"
 > Si `CLAUDE.md` ne contient pas encore les marqueurs (projet initialisé avant cette version du template) :
 > ajouter manuellement la section entre marqueurs ou relancer `/init-project` option a (réinitialisation).
 
-#### Etape d6b — Synchroniser les hooks PreCompact + UserPromptSubmit
+#### Etape d6b — Synchroniser settings.json
 
-Merger `TEMPLATE_claude/settings.json` dans `.claude/settings.json` (même logique qu'à l'init, sans duplication) :
+Déployer `TEMPLATE_claude/settings.json` dans `.claude/settings.json` si absent :
 
 ```bash
 if [ ! -f .claude/settings.json ]; then
   cp TEMPLATE_claude/settings.json .claude/settings.json
   echo "✓ .claude/settings.json créé"
 else
-  jq -s '
-    .[0] as $base | .[1] as $tmpl |
-    reduce ($tmpl.hooks // {} | to_entries[]) as $e (
-      $base;
-      .hooks[$e.key] = (
-        ((.hooks[$e.key] // []) | map(.hooks[0].command)) as $existing_cmds |
-        (.hooks[$e.key] // []) +
-        ($e.value | map(select(.hooks[0].command as $c | $existing_cmds | index($c) == null)))
-      )
-    )
-  ' .claude/settings.json TEMPLATE_claude/settings.json \
-    > .claude/settings.json.tmp \
-    && mv .claude/settings.json.tmp .claude/settings.json
-  echo "✓ .claude/settings.json — hooks mis à jour (sans duplication)"
+  echo "  .claude/settings.json déjà présent — non écrasé"
 fi
 ```
 

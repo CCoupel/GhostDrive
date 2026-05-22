@@ -3,7 +3,7 @@
 > **Ce fichier contient les regles obligatoires pour TOUS les agents GhostDrive.**
 > Chaque agent doit referencer ce fichier : `@import COMMON.md`
 >
-> **Protocole teammates** : Voir `context/TEAMMATES_PROTOCOL.md` — ACK, progression, rapports, IDLE/PONG. À lire obligatoirement au démarrage.
+> **Protocole teammates** : Voir `context/TEAMMATES_PROTOCOL.md` — ACK, progression, rapports, IDLE. À lire obligatoirement au démarrage.
 > **Contexte projet** : Voir `context/PROJECT_CONTEXT.md` pour le stack technique, la structure et les commandes.
 
 ---

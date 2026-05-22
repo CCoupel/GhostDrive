@@ -3,6 +3,9 @@
 Centralise tous les patterns `gh` CLI utilises dans les commandes et agents.
 **Toujours reference ce fichier plutot que de dupliquer ces patterns.**
 
+> **Note sync** : Ce fichier (agents/context/) est un sous-ensemble de `commands/context/GITHUB.md`.
+> Toute modification ici doit être répercutée dans `commands/context/GITHUB.md` et vice-versa.
+
 ---
 
 ## 1. Prerequis et Verification
@@ -366,7 +369,7 @@ fi
 | Milestone | Version SemVer | `v1.2.0` |
 | Tag | Prefixe `v` + SemVer | `v1.2.0` |
 | Branche feature | `feature/<nom-court>` | `feature/auth-oauth` |
-| Branche bugfix | `fix/<nom-court>` | `fix/crash-login` |
+| Branche bugfix | `bugfix/<nom-court>` | `bugfix/crash-login` |
 | Branche hotfix | `hotfix/<nom-court>` | `hotfix/security-patch` |
 
 ### 8.2 Labels standards
