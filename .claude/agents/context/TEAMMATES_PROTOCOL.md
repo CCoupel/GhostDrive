@@ -60,3 +60,4 @@ Action requise : [ce dont j'ai besoin]
 - Jamais de communication directe avec l'utilisateur — tout via le teamleader
 - Rester en IDLE après DONE — ne pas fermer ce pane
 - Signaler les jalons en cours de route (EN COURS étape N/M)
+- Si la tâche référence un handoff (`_work/handoff/...`) ou un rapport (`_work/reports/...`) → lire le fichier avant de commencer

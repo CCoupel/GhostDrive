@@ -24,7 +24,9 @@ func (s *stubBackend) Download(_ context.Context, _, _ string, _ ProgressCallbac
 	return nil
 }
 func (s *stubBackend) Delete(_ context.Context, _ string) error { return nil }
-func (s *stubBackend) Move(_ context.Context, _, _ string) error { return nil }
+func (s *stubBackend) Move(_ context.Context, _, _ string) error   { return nil }
+func (s *stubBackend) Rename(_ context.Context, _, _ string) error { return nil }
+func (s *stubBackend) Copy(_ context.Context, _, _ string) error   { return nil }
 func (s *stubBackend) List(_ context.Context, _ string) ([]FileInfo, error) {
 	return nil, nil
 }

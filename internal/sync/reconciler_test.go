@@ -81,6 +81,23 @@ func (m *mockBackend) Move(_ context.Context, old, newPath string) error {
 	return nil
 }
 
+// Rename implements StorageBackend — delegates to Move for tests (#139).
+func (m *mockBackend) Rename(_ context.Context, old, newPath string) error {
+	return m.Move(context.Background(), old, newPath)
+}
+
+// Copy implements StorageBackend — duplicates the file in the mock (#140).
+func (m *mockBackend) Copy(_ context.Context, src, dst string) error {
+	fi, ok := m.files[src]
+	if !ok {
+		return os.ErrNotExist
+	}
+	cp := fi
+	cp.Path = dst
+	m.files[dst] = cp
+	return nil
+}
+
 func (m *mockBackend) List(_ context.Context, path string) ([]plugins.FileInfo, error) {
 	var result []plugins.FileInfo
 	for _, fi := range m.files {

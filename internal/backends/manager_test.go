@@ -34,8 +34,10 @@ func (m *mockBackend) Upload(_ context.Context, _, _ string, _ plugins.ProgressC
 func (m *mockBackend) Download(_ context.Context, _, _ string, _ plugins.ProgressCallback) error {
 	return nil
 }
-func (m *mockBackend) Delete(_ context.Context, _ string) error { return nil }
+func (m *mockBackend) Delete(_ context.Context, _ string) error  { return nil }
 func (m *mockBackend) Move(_ context.Context, _, _ string) error { return nil }
+func (m *mockBackend) Rename(_ context.Context, _, _ string) error { return nil }
+func (m *mockBackend) Copy(_ context.Context, _, _ string) error   { return nil }
 func (m *mockBackend) List(_ context.Context, _ string) ([]plugins.FileInfo, error) {
 	return nil, nil
 }

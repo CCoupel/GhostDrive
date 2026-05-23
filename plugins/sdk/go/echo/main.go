@@ -171,6 +171,28 @@ func (e *EchoPlugin) Move(_ context.Context, oldPath, newPath string) error {
 	return nil
 }
 
+// Rename logs the operation and returns nil (success) (#139).
+// Real plugins should implement atomic server-side rename when available.
+// Return plugins.ErrNotSupported to trigger fallback Upload+Delete.
+func (e *EchoPlugin) Rename(_ context.Context, oldPath, newPath string) error {
+	if !e.connected {
+		return fmt.Errorf("echo: rename: %w", plugins.ErrNotConnected)
+	}
+	log.Printf("rename: %q → %q", oldPath, newPath)
+	return nil
+}
+
+// Copy logs the operation and returns plugins.ErrNotSupported (#140).
+// Real plugins may implement server-side copy (e.g. WebDAV COPY, S3 CopyObject).
+// Returning ErrNotSupported triggers fallback Download+Upload in the Dispatcher.
+func (e *EchoPlugin) Copy(_ context.Context, srcPath, dstPath string) error {
+	if !e.connected {
+		return fmt.Errorf("echo: copy: %w", plugins.ErrNotConnected)
+	}
+	log.Printf("copy: %q → %q (returning ErrNotSupported — fallback will be used)", srcPath, dstPath)
+	return plugins.ErrNotSupported
+}
+
 // ── Navigation ────────────────────────────────────────────────────────────────
 
 // List returns a single static entry ("echo-file.txt") regardless of path.

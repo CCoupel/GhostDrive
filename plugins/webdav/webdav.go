@@ -683,6 +683,44 @@ func (b *Backend) Delete(ctx context.Context, remote string) error {
 	}
 }
 
+// Rename performs an atomic server-side rename via HTTP MOVE (RFC 4918 §9.9).
+// This is semantically equivalent to Move but is the preferred entrypoint for
+// simple same-directory renames dispatched by the sync engine (#139).
+func (b *Backend) Rename(ctx context.Context, oldPath, newPath string) error {
+	return b.Move(ctx, oldPath, newPath)
+}
+
+// Copy duplicates the remote file at srcPath to dstPath via HTTP COPY (RFC 4918 §9.8).
+// Returns ErrFileNotFound (wrapped) when srcPath does not exist.
+func (b *Backend) Copy(ctx context.Context, srcPath, dstPath string) error {
+	if !b.IsConnected() {
+		return ErrNotConnected
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "COPY", b.remoteURL(srcPath), nil)
+	if err != nil {
+		return fmt.Errorf("webdav: copy %s → %s: build request: %w", srcPath, dstPath, err)
+	}
+	req.Header.Set("Destination", b.remoteURL(dstPath))
+	req.Header.Set("Overwrite", "T")
+
+	resp, err := b.do(req)
+	if err != nil {
+		return fmt.Errorf("webdav: copy %s → %s: %w", srcPath, dstPath, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		return fmt.Errorf("webdav: copy %s: %w", srcPath, ErrFileNotFound)
+	case http.StatusCreated, http.StatusNoContent:
+		return nil
+	default:
+		return fmt.Errorf("webdav: copy %s → %s: server returned %d", srcPath, dstPath, resp.StatusCode)
+	}
+}
+
 // Move renames or moves the entry at oldPath to newPath via HTTP MOVE.
 // Returns ErrFileNotFound (wrapped) when oldPath does not exist.
 func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {

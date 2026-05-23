@@ -13,6 +13,10 @@ import (
 	"github.com/CCoupel/GhostDrive/plugins"
 )
 
+// intentConsumeFunc is the signature of cfapi.CFManager.ConsumeIntent, injected
+// into Engine to avoid an import cycle (cfapi → app → sync).
+type intentConsumeFunc func(localPath string) (backendID string, pin bool, ok bool)
+
 // Engine orchestrates bidirectional synchronization between a local directory
 // and a remote backend.
 type Engine struct {
@@ -23,6 +27,17 @@ type Engine struct {
 	emitter    EventEmitter
 	backendID  string         // stable backend UUID — used for CF state updates
 	cfManager  CFStateManager // optional; nil → no CF badge updates
+
+	// fileStates is the per-file synchronization state cache (#136).
+	// Keys are absolute local paths; values are types.FileState.
+	// Uses sync.Map for lock-free concurrent reads/writes from Dispatcher goroutines.
+	fileStates gosync.Map
+
+	// consumeIntent is injected by App to consume pin/unpin intentions after
+	// a file transitions U→S (#143).  nil means no intent queue.
+	consumeIntent intentConsumeFunc
+	// pinFile is injected by App to execute a deferred PinFile after U→S (#143).
+	pinFile func(backendID, localPath string, pin bool) error
 
 	mu         gosync.RWMutex
 	state      types.SyncState
@@ -67,6 +82,67 @@ func (e *Engine) SetCFManager(m CFStateManager) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.cfManager = m
+}
+
+// SetIntentCallbacks injects the pin intent consumer and executor for #143.
+// consumeFn reads and removes a pending PinIntent for a local path.
+// pinFn executes the deferred PinFile operation.
+// Both may be nil (no-op).
+func (e *Engine) SetIntentCallbacks(consumeFn intentConsumeFunc, pinFn func(backendID, localPath string, pin bool) error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.consumeIntent = consumeFn
+	e.pinFile = pinFn
+}
+
+// ─── FileState API (#136) ─────────────────────────────────────────────────────
+
+// GetFileState returns the current synchronization state for a local file path.
+// Returns FileStateUnknown ("") if the path is not tracked.
+func (e *Engine) GetFileState(localPath string) types.FileState {
+	if v, ok := e.fileStates.Load(localPath); ok {
+		if s, ok := v.(types.FileState); ok {
+			return s
+		}
+	}
+	return types.FileStateUnknown
+}
+
+// SetFileState stores the synchronization state for a local file path.
+// If state == FileStateUnknown, the entry is deleted from the map.
+func (e *Engine) SetFileState(localPath string, state types.FileState) {
+	if state == types.FileStateUnknown {
+		e.fileStates.Delete(localPath)
+		return
+	}
+	e.fileStates.Store(localPath, state)
+}
+
+// makeStateUpdater returns a func suitable for Dispatcher.SetStateUpdater.
+// It updates fileStates and emits sync:file-state-changed.
+// When a file transitions to U→S, it consumes any pending pin intent (#143).
+func (e *Engine) makeStateUpdater() func(localPath string, state types.FileState) {
+	return func(localPath string, state types.FileState) {
+		prev := e.GetFileState(localPath)
+		e.SetFileState(localPath, state)
+		e.emitter.Emit("sync:file-state-changed", map[string]string{
+			"backendID": e.backendID,
+			"localPath": localPath,
+			"state":     string(state),
+		})
+		// Consume pending pin/unpin intent when transfer completes (#143).
+		if prev == types.FileStateUploading && state == types.FileStateSynced {
+			e.mu.RLock()
+			consumeFn := e.consumeIntent
+			pinFn := e.pinFile
+			e.mu.RUnlock()
+			if consumeFn != nil {
+				if bid, pin, ok := consumeFn(localPath); ok && pinFn != nil {
+					go func() { _ = pinFn(bid, localPath, pin) }()
+				}
+			}
+		}
+	}
 }
 
 // Start begins the sync engine: initial full reconciliation + watcher loop.
@@ -272,6 +348,18 @@ func (e *Engine) runFullSync(ctx context.Context) error {
 		dispatcher.SetCFManager(backendID, cfMgr)
 	}
 
+	// #136 — wire per-file state updater.
+	stateUpdater := e.makeStateUpdater()
+	dispatcher.SetStateUpdater(stateUpdater)
+	reconciler.SetStateUpdater(stateUpdater)
+
+	// #144 — wire conflict event emitter.
+	bid := backendID
+	reconciler.SetConflictEmitter(func(payload map[string]any) {
+		payload["backendID"] = bid
+		e.emitter.Emit("sync:conflict", payload)
+	})
+
 	actions, err := reconciler.Reconcile(ctx, e.remotePath)
 	if err != nil {
 		e.setState(types.SyncState{
@@ -316,20 +404,46 @@ func (e *Engine) handleLocalEvent(ctx context.Context, evt plugins.FileEvent) er
 	if cfMgr != nil && backendID != "" {
 		dispatcher.SetCFManager(backendID, cfMgr)
 	}
+	// #136 — wire state updater.
+	dispatcher.SetStateUpdater(e.makeStateUpdater())
+
 	remotePath := path.Join(e.remotePath, evt.Path)
+	localPath := filepath.Join(e.localDir, evt.Path)
 
 	switch evt.Type {
 	case plugins.FileEventCreated, plugins.FileEventModified:
 		return dispatcher.Dispatch(ctx, []SyncAction{{
 			Type:       ActionUpload,
-			LocalPath:  filepath.Join(e.localDir, evt.Path),
+			LocalPath:  localPath,
 			RemotePath: remotePath,
 		}})
 	case plugins.FileEventDeleted:
+		// #141 — skip remote ActionDelete for files that only exist locally (never synced).
+		if e.GetFileState(localPath) == types.FileStateLocal {
+			e.fileStates.Delete(localPath)
+			return nil
+		}
 		return dispatcher.Dispatch(ctx, []SyncAction{{
 			Type:       ActionDelete,
-			LocalPath:  filepath.Join(e.localDir, evt.Path),
+			LocalPath:  localPath,
 			RemotePath: remotePath,
+		}})
+	case plugins.FileEventRenamed:
+		// #139 — atomic server-side rename.
+		if evt.OldPath == "" {
+			break // incomplete pair — ignore
+		}
+		srcLocalPath := filepath.Join(e.localDir, evt.OldPath)
+		// Transfer state from old path to new (P→S on success via stateUpdater).
+		oldState := e.GetFileState(srcLocalPath)
+		e.fileStates.Delete(srcLocalPath)
+		e.SetFileState(localPath, oldState)
+		return dispatcher.Dispatch(ctx, []SyncAction{{
+			Type:          ActionRename,
+			LocalPath:     localPath,
+			RemotePath:    remotePath,
+			SrcLocalPath:  srcLocalPath,
+			SrcRemotePath: path.Join(e.remotePath, evt.OldPath),
 		}})
 	}
 	return nil
@@ -344,6 +458,9 @@ func (e *Engine) handleRemoteEvent(ctx context.Context, evt plugins.FileEvent) e
 	if cfMgr != nil && backendID != "" {
 		dispatcher.SetCFManager(backendID, cfMgr)
 	}
+	// #136 — wire state updater.
+	dispatcher.SetStateUpdater(e.makeStateUpdater())
+
 	localPath := filepath.Join(e.localDir, evt.Path)
 
 	switch evt.Type {

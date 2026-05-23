@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/CCoupel/GhostDrive/plugins"
 )
 
@@ -20,13 +21,18 @@ const (
 	ActionDownload ActionType = "download"
 	ActionDelete   ActionType = "delete"
 	ActionMkdir    ActionType = "mkdir"
+	ActionRename   ActionType = "rename" // #139 — atomic server-side rename
+	ActionCopy     ActionType = "copy"   // #140 — server-side copy
 )
 
 // SyncAction represents a single operation the engine must execute.
 type SyncAction struct {
 	Type       ActionType
-	LocalPath  string
-	RemotePath string
+	LocalPath  string  // destination local path (or only path for upload/download)
+	RemotePath string  // destination remote path
+	// Source paths for rename and copy operations (#139, #140).
+	SrcLocalPath  string // source local path
+	SrcRemotePath string // source remote path
 }
 
 // ConflictEntry records a conflict that was resolved by last-write-wins.
@@ -40,9 +46,12 @@ type ConflictEntry struct {
 
 // Reconciler compares local and remote state and generates a list of SyncActions.
 type Reconciler struct {
-	backend  plugins.StorageBackend
-	localDir string
-	logPath  string
+	backend      plugins.StorageBackend
+	localDir     string
+	logPath      string
+	stateUpdater func(localPath string, state types.FileState) // optional; nil → no-op (#136)
+	// conflictEmitter is called with the conflict payload when a conflict is detected (#144).
+	conflictEmitter func(payload map[string]any) // optional; nil → no-op
 }
 
 // NewReconciler creates a Reconciler.
@@ -52,6 +61,24 @@ func NewReconciler(backend plugins.StorageBackend, localDir, logPath string) *Re
 		backend:  backend,
 		localDir: localDir,
 		logPath:  logPath,
+	}
+}
+
+// SetStateUpdater injects a per-file state callback (#136).
+// Called to mark local-only files as L and conflicting files as C.
+func (r *Reconciler) SetStateUpdater(fn func(localPath string, state types.FileState)) {
+	r.stateUpdater = fn
+}
+
+// SetConflictEmitter injects a callback for sync:conflict events (#144).
+func (r *Reconciler) SetConflictEmitter(fn func(payload map[string]any)) {
+	r.conflictEmitter = fn
+}
+
+// updateState calls r.stateUpdater if non-nil.
+func (r *Reconciler) updateState(localPath string, state types.FileState) {
+	if r.stateUpdater != nil && localPath != "" {
+		r.stateUpdater(localPath, state)
 	}
 }
 
@@ -112,7 +139,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, remotePath string) ([]SyncAc
 		}
 
 		if !existsRemote {
-			// Local only → upload
+			// Local only → upload. Mark as L (#136) until Dispatcher transitions P→U→S.
+			r.updateState(localFullPath, types.FileStateLocal)
 			actions = append(actions, SyncAction{
 				Type:       ActionUpload,
 				LocalPath:  localFullPath,
@@ -125,26 +153,34 @@ func (r *Reconciler) Reconcile(ctx context.Context, remotePath string) ([]SyncAc
 		if r.needsUpdate(localFI.ModTime(), localFI.Size(), remoteFI) {
 			// Conflict: both modified — last-write-wins
 			if localFI.ModTime().After(remoteFI.ModTime) {
-				r.logConflict(ConflictEntry{
+				entry := ConflictEntry{
 					Path:       rel,
 					LocalMod:   localFI.ModTime(),
 					RemoteMod:  remoteFI.ModTime,
 					Resolution: "local-wins",
 					ResolvedAt: time.Now(),
-				})
+				}
+				r.logConflict(entry)
+				// #136 — mark as Conflict state; Dispatcher will transition to S after upload.
+				r.updateState(localFullPath, types.FileStateConflict)
+				// #144 — emit sync:conflict event.
+				r.emitConflict(entry)
 				actions = append(actions, SyncAction{
 					Type:       ActionUpload,
 					LocalPath:  localFullPath,
 					RemotePath: remoteFullPath,
 				})
 			} else {
-				r.logConflict(ConflictEntry{
+				entry := ConflictEntry{
 					Path:       rel,
 					LocalMod:   localFI.ModTime(),
 					RemoteMod:  remoteFI.ModTime,
 					Resolution: "remote-wins",
 					ResolvedAt: time.Now(),
-				})
+				}
+				r.logConflict(entry)
+				r.updateState(localFullPath, types.FileStateConflict)
+				r.emitConflict(entry)
 				actions = append(actions, SyncAction{
 					Type:       ActionDownload,
 					LocalPath:  localFullPath,
@@ -240,6 +276,19 @@ func (r *Reconciler) needsUpdate(localMod time.Time, localSize int64, remote plu
 		return false
 	}
 	return true
+}
+
+// emitConflict calls r.conflictEmitter if non-nil (#144).
+func (r *Reconciler) emitConflict(entry ConflictEntry) {
+	if r.conflictEmitter == nil {
+		return
+	}
+	r.conflictEmitter(map[string]any{
+		"path":          entry.Path,
+		"localModTime":  entry.LocalMod.UTC().Format(time.RFC3339),
+		"remoteModTime": entry.RemoteMod.UTC().Format(time.RFC3339),
+		"resolution":    entry.Resolution,
+	})
 }
 
 // logConflict appends a conflict entry to sync.log.

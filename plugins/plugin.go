@@ -53,6 +53,13 @@ var ErrNotConnected = errors.New("backend: not connected")
 //	return fmt.Errorf("myplugin: stat %s: %w", path, plugins.ErrFileNotFound)
 var ErrFileNotFound = errors.New("backend: file not found")
 
+// ErrNotSupported is returned when the backend does not support a specific
+// operation (e.g. atomic server-side Rename or Copy).
+// Callers should fall back to a download+upload sequence:
+//
+//	if errors.Is(err, plugins.ErrNotSupported) { /* fallback */ }
+var ErrNotSupported = errors.New("backend: operation not supported")
+
 // ─── Shared types ─────────────────────────────────────────────────────────────
 
 // FileInfo represents a file or directory entry, either local or remote.
@@ -339,6 +346,20 @@ type StorageBackend interface {
 	// Overwrites newPath if it already exists.
 	// Pre-condition: IsConnected() == true, else returns ErrNotConnected.
 	Move(ctx context.Context, oldPath, newPath string) error
+
+	// Rename performs an atomic server-side rename of oldPath to newPath.
+	// Unlike Move, Rename is optimised for simple renames within the same directory
+	// and plugins that support it may use a cheaper protocol operation (e.g. WebDAV MOVE).
+	// Returns ErrNotSupported when the backend cannot perform atomic rename —
+	// the caller (Dispatcher) falls back to Upload(new) + Delete(old).
+	// Pre-condition: IsConnected() == true, else returns ErrNotConnected.
+	Rename(ctx context.Context, oldPath, newPath string) error
+
+	// Copy duplicates the remote file at srcPath to dstPath server-side.
+	// Returns ErrNotSupported when the backend cannot perform atomic copy —
+	// the caller (Dispatcher) falls back to Download(src) + Upload(dst).
+	// Pre-condition: IsConnected() == true, else returns ErrNotConnected.
+	Copy(ctx context.Context, srcPath, dstPath string) error
 
 	// ── Navigation ──────────────────────────────────────────────────────────
 

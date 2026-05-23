@@ -1042,10 +1042,59 @@ func (a *App) ClearCache() error {
 	return nil
 }
 
+// GetFileState returns the per-file synchronization state for a backend.
+// Returns "L", "P", "U", "S", "C", "E", "X" or "" (unknown / backend not found).
+// Wails binding: window.go.App.GetFileState(backendID, localPath)
+func (a *App) GetFileState(backendID, localPath string) string {
+	a.mu.RLock()
+	eng, ok := a.engines[backendID]
+	a.mu.RUnlock()
+	if !ok {
+		return string(types.FileStateUnknown)
+	}
+	return string(eng.GetFileState(localPath))
+}
+
 // PinFile sets the CF pin state for a file.
 // pin=true → always local (CF_PIN_STATE_PINNED), pin=false → back to cloud-only.
+// #142 — if pin=false and file is not in Synced state, upload first before dehydrating.
+// #143 — if file is in U or P state (active transfer), enqueue intent for later execution.
 // Wails binding: window.go.App.PinFile()
 func (a *App) PinFile(backendID, localPath string, pin bool) error {
+	if a.cfManager == nil {
+		return nil
+	}
+
+	state := types.FileState(a.GetFileState(backendID, localPath))
+
+	// #143 — if transfer is active, queue intent for post-transfer execution.
+	if state == types.FileStateUploading || state == types.FileStatePending {
+		a.cfManager.QueuePinIntent(backendID, localPath, pin)
+		return nil // silently enqueued
+	}
+
+	// #142 — unpin guard: upload first if file is not synced.
+	if !pin && state != types.FileStateSynced && state != types.FileStateUnknown {
+		// File exists but is not synced — upload before dehydrating.
+		a.mu.RLock()
+		eng, hasEng := a.engines[backendID]
+		a.mu.RUnlock()
+		if hasEng {
+			if err := eng.ForceSync(a.ctx); err != nil {
+				return fmt.Errorf("pinfile: upload before unpin: %w", err)
+			}
+			// Re-check state after sync.
+			if types.FileState(a.GetFileState(backendID, localPath)) != types.FileStateSynced {
+				return fmt.Errorf("pinfile: file still not synced after upload — unpin aborted")
+			}
+		}
+	}
+	return a.cfManager.PinFile(backendID, localPath, pin)
+}
+
+// pinFileInternal is the non-Wails version used by the intent queue consumer (#143).
+// It bypasses the unpin guard (the intent was already validated when queued).
+func (a *App) pinFileInternal(backendID, localPath string, pin bool) error {
 	if a.cfManager == nil {
 		return nil
 	}
@@ -1178,6 +1227,15 @@ func (a *App) StartSync(backendID string) error {
 	// v2.1 — Wire cfManager into the engine for post-sync badge updates.
 	if a.cfManager != nil {
 		engine.SetCFManager(a.cfManager)
+	}
+	// v2.2 — Wire intent queue callbacks for #143.
+	if a.cfManager != nil {
+		engine.SetIntentCallbacks(
+			func(localPath string) (string, bool, bool) {
+				return a.cfManager.ConsumeIntent(localPath)
+			},
+			a.pinFileInternal,
+		)
 	}
 	a.engines[backendID] = engine
 	a.mu.Unlock() // release before Start to avoid holding lock during I/O

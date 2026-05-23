@@ -708,6 +708,18 @@ func (b *Backend) Delete(ctx context.Context, remote string) error {
 	return nil
 }
 
+// Rename performs an atomic server-side rename via the MooseFS RENAME opcode (#139).
+// Delegates to Move which uses the native opcode 424.
+func (b *Backend) Rename(ctx context.Context, oldPath, newPath string) error {
+	return b.Move(ctx, oldPath, newPath)
+}
+
+// Copy is not supported natively by MooseFS — returns ErrNotSupported (#140).
+// The Dispatcher falls back to Download(src) + Upload(dst).
+func (b *Backend) Copy(_ context.Context, _, _ string) error {
+	return plugins.ErrNotSupported
+}
+
 // Move renames oldPath to newPath using the native MooseFS RENAME opcode (424).
 // Works atomically for both files and non-empty directories.
 // On a TCP connection error, reconnects once and retries.

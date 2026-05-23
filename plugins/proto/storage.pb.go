@@ -1376,6 +1376,103 @@ func (x *CreateDirResponse) GetError() string {
 	return ""
 }
 
+// ─── Copy (v2.2 — #140) ──────────────────────────────────────────────────────
+type CopyRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SrcPath       string                 `protobuf:"bytes,1,opt,name=src_path,json=srcPath,proto3" json:"src_path,omitempty"`
+	DstPath       string                 `protobuf:"bytes,2,opt,name=dst_path,json=dstPath,proto3" json:"dst_path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CopyRequest) Reset() {
+	*x = CopyRequest{}
+	mi := &file_plugins_proto_storage_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CopyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CopyRequest) ProtoMessage() {}
+
+func (x *CopyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_plugins_proto_storage_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CopyRequest.ProtoReflect.Descriptor instead.
+func (*CopyRequest) Descriptor() ([]byte, []int) {
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *CopyRequest) GetSrcPath() string {
+	if x != nil {
+		return x.SrcPath
+	}
+	return ""
+}
+
+func (x *CopyRequest) GetDstPath() string {
+	if x != nil {
+		return x.DstPath
+	}
+	return ""
+}
+
+type CopyResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Error         string                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CopyResponse) Reset() {
+	*x = CopyResponse{}
+	mi := &file_plugins_proto_storage_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CopyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CopyResponse) ProtoMessage() {}
+
+func (x *CopyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_plugins_proto_storage_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CopyResponse.ProtoReflect.Descriptor instead.
+func (*CopyResponse) Descriptor() ([]byte, []int) {
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *CopyResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
 type WatchRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
@@ -1385,7 +1482,7 @@ type WatchRequest struct {
 
 func (x *WatchRequest) Reset() {
 	*x = WatchRequest{}
-	mi := &file_plugins_proto_storage_proto_msgTypes[25]
+	mi := &file_plugins_proto_storage_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1397,7 +1494,7 @@ func (x *WatchRequest) String() string {
 func (*WatchRequest) ProtoMessage() {}
 
 func (x *WatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_plugins_proto_storage_proto_msgTypes[25]
+	mi := &file_plugins_proto_storage_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1410,7 +1507,7 @@ func (x *WatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchRequest.ProtoReflect.Descriptor instead.
 func (*WatchRequest) Descriptor() ([]byte, []int) {
-	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{25}
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *WatchRequest) GetPath() string {
@@ -1431,7 +1528,7 @@ type WatchEvent struct {
 
 func (x *WatchEvent) Reset() {
 	*x = WatchEvent{}
-	mi := &file_plugins_proto_storage_proto_msgTypes[26]
+	mi := &file_plugins_proto_storage_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1443,7 +1540,7 @@ func (x *WatchEvent) String() string {
 func (*WatchEvent) ProtoMessage() {}
 
 func (x *WatchEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_plugins_proto_storage_proto_msgTypes[26]
+	mi := &file_plugins_proto_storage_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1456,7 +1553,7 @@ func (x *WatchEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchEvent.ProtoReflect.Descriptor instead.
 func (*WatchEvent) Descriptor() ([]byte, []int) {
-	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{26}
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *WatchEvent) GetEvent() *FileEventProto {
@@ -1481,7 +1578,7 @@ type QuotaRequest struct {
 
 func (x *QuotaRequest) Reset() {
 	*x = QuotaRequest{}
-	mi := &file_plugins_proto_storage_proto_msgTypes[27]
+	mi := &file_plugins_proto_storage_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1493,7 +1590,7 @@ func (x *QuotaRequest) String() string {
 func (*QuotaRequest) ProtoMessage() {}
 
 func (x *QuotaRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_plugins_proto_storage_proto_msgTypes[27]
+	mi := &file_plugins_proto_storage_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1506,7 +1603,7 @@ func (x *QuotaRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuotaRequest.ProtoReflect.Descriptor instead.
 func (*QuotaRequest) Descriptor() ([]byte, []int) {
-	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{27}
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{29}
 }
 
 type QuotaResponse struct {
@@ -1524,7 +1621,7 @@ type QuotaResponse struct {
 
 func (x *QuotaResponse) Reset() {
 	*x = QuotaResponse{}
-	mi := &file_plugins_proto_storage_proto_msgTypes[28]
+	mi := &file_plugins_proto_storage_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1536,7 +1633,7 @@ func (x *QuotaResponse) String() string {
 func (*QuotaResponse) ProtoMessage() {}
 
 func (x *QuotaResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_plugins_proto_storage_proto_msgTypes[28]
+	mi := &file_plugins_proto_storage_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1549,7 +1646,7 @@ func (x *QuotaResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuotaResponse.ProtoReflect.Descriptor instead.
 func (*QuotaResponse) Descriptor() ([]byte, []int) {
-	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{28}
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *QuotaResponse) GetFree() int64 {
@@ -1585,7 +1682,7 @@ type ReadAtRequest struct {
 
 func (x *ReadAtRequest) Reset() {
 	*x = ReadAtRequest{}
-	mi := &file_plugins_proto_storage_proto_msgTypes[29]
+	mi := &file_plugins_proto_storage_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1597,7 +1694,7 @@ func (x *ReadAtRequest) String() string {
 func (*ReadAtRequest) ProtoMessage() {}
 
 func (x *ReadAtRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_plugins_proto_storage_proto_msgTypes[29]
+	mi := &file_plugins_proto_storage_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1610,7 +1707,7 @@ func (x *ReadAtRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadAtRequest.ProtoReflect.Descriptor instead.
 func (*ReadAtRequest) Descriptor() ([]byte, []int) {
-	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{29}
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *ReadAtRequest) GetRemotePath() string {
@@ -1645,7 +1742,7 @@ type ReadAtResponse struct {
 
 func (x *ReadAtResponse) Reset() {
 	*x = ReadAtResponse{}
-	mi := &file_plugins_proto_storage_proto_msgTypes[30]
+	mi := &file_plugins_proto_storage_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1657,7 +1754,7 @@ func (x *ReadAtResponse) String() string {
 func (*ReadAtResponse) ProtoMessage() {}
 
 func (x *ReadAtResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_plugins_proto_storage_proto_msgTypes[30]
+	mi := &file_plugins_proto_storage_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1670,7 +1767,7 @@ func (x *ReadAtResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadAtResponse.ProtoReflect.Descriptor instead.
 func (*ReadAtResponse) Descriptor() ([]byte, []int) {
-	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{30}
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ReadAtResponse) GetData() []byte {
@@ -1696,7 +1793,7 @@ type ChunkSizeRequest struct {
 
 func (x *ChunkSizeRequest) Reset() {
 	*x = ChunkSizeRequest{}
-	mi := &file_plugins_proto_storage_proto_msgTypes[31]
+	mi := &file_plugins_proto_storage_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1708,7 +1805,7 @@ func (x *ChunkSizeRequest) String() string {
 func (*ChunkSizeRequest) ProtoMessage() {}
 
 func (x *ChunkSizeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_plugins_proto_storage_proto_msgTypes[31]
+	mi := &file_plugins_proto_storage_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1721,7 +1818,7 @@ func (x *ChunkSizeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChunkSizeRequest.ProtoReflect.Descriptor instead.
 func (*ChunkSizeRequest) Descriptor() ([]byte, []int) {
-	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{31}
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{33}
 }
 
 // ChunkSizeResponse returns the natural I/O granularity of the backend in bytes.
@@ -1735,7 +1832,7 @@ type ChunkSizeResponse struct {
 
 func (x *ChunkSizeResponse) Reset() {
 	*x = ChunkSizeResponse{}
-	mi := &file_plugins_proto_storage_proto_msgTypes[32]
+	mi := &file_plugins_proto_storage_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1747,7 +1844,7 @@ func (x *ChunkSizeResponse) String() string {
 func (*ChunkSizeResponse) ProtoMessage() {}
 
 func (x *ChunkSizeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_plugins_proto_storage_proto_msgTypes[32]
+	mi := &file_plugins_proto_storage_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1760,7 +1857,7 @@ func (x *ChunkSizeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChunkSizeResponse.ProtoReflect.Descriptor instead.
 func (*ChunkSizeResponse) Descriptor() ([]byte, []int) {
-	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{32}
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ChunkSizeResponse) GetChunkSize() int64 {
@@ -1786,7 +1883,7 @@ type ParamSpecProto struct {
 
 func (x *ParamSpecProto) Reset() {
 	*x = ParamSpecProto{}
-	mi := &file_plugins_proto_storage_proto_msgTypes[33]
+	mi := &file_plugins_proto_storage_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1798,7 +1895,7 @@ func (x *ParamSpecProto) String() string {
 func (*ParamSpecProto) ProtoMessage() {}
 
 func (x *ParamSpecProto) ProtoReflect() protoreflect.Message {
-	mi := &file_plugins_proto_storage_proto_msgTypes[33]
+	mi := &file_plugins_proto_storage_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1811,7 +1908,7 @@ func (x *ParamSpecProto) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ParamSpecProto.ProtoReflect.Descriptor instead.
 func (*ParamSpecProto) Descriptor() ([]byte, []int) {
-	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{33}
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ParamSpecProto) GetKey() string {
@@ -1878,7 +1975,7 @@ type DescribeRequest struct {
 
 func (x *DescribeRequest) Reset() {
 	*x = DescribeRequest{}
-	mi := &file_plugins_proto_storage_proto_msgTypes[34]
+	mi := &file_plugins_proto_storage_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1890,7 +1987,7 @@ func (x *DescribeRequest) String() string {
 func (*DescribeRequest) ProtoMessage() {}
 
 func (x *DescribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_plugins_proto_storage_proto_msgTypes[34]
+	mi := &file_plugins_proto_storage_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1903,7 +2000,7 @@ func (x *DescribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescribeRequest.ProtoReflect.Descriptor instead.
 func (*DescribeRequest) Descriptor() ([]byte, []int) {
-	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{34}
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{36}
 }
 
 type DescribeResponse struct {
@@ -1919,7 +2016,7 @@ type DescribeResponse struct {
 
 func (x *DescribeResponse) Reset() {
 	*x = DescribeResponse{}
-	mi := &file_plugins_proto_storage_proto_msgTypes[35]
+	mi := &file_plugins_proto_storage_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1931,7 +2028,7 @@ func (x *DescribeResponse) String() string {
 func (*DescribeResponse) ProtoMessage() {}
 
 func (x *DescribeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_plugins_proto_storage_proto_msgTypes[35]
+	mi := &file_plugins_proto_storage_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1944,7 +2041,7 @@ func (x *DescribeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescribeResponse.ProtoReflect.Descriptor instead.
 func (*DescribeResponse) Descriptor() ([]byte, []int) {
-	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{35}
+	return file_plugins_proto_storage_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *DescribeResponse) GetType() string {
@@ -2080,6 +2177,11 @@ const file_plugins_proto_storage_proto_rawDesc = "" +
 	"\x10CreateDirRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\")\n" +
 	"\x11CreateDirResponse\x12\x14\n" +
+	"\x05error\x18\x01 \x01(\tR\x05error\"C\n" +
+	"\vCopyRequest\x12\x19\n" +
+	"\bsrc_path\x18\x01 \x01(\tR\asrcPath\x12\x19\n" +
+	"\bdst_path\x18\x02 \x01(\tR\adstPath\"$\n" +
+	"\fCopyResponse\x12\x14\n" +
 	"\x05error\x18\x01 \x01(\tR\x05error\"\"\n" +
 	"\fWatchRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"_\n" +
@@ -2120,7 +2222,7 @@ const file_plugins_proto_storage_proto_rawDesc = "" +
 	"\fdisplay_name\x18\x15 \x01(\tR\vdisplayName\x12 \n" +
 	"\vdescription\x18\x16 \x01(\tR\vdescription\x12=\n" +
 	"\x06params\x18\x17 \x03(\v2%.ghostdrive.storage.v1.ParamSpecProtoR\x06params\x12\x18\n" +
-	"\aversion\x18\x18 \x01(\tR\aversion2\x9d\v\n" +
+	"\aversion\x18\x18 \x01(\tR\aversion2\xc1\f\n" +
 	"\x0eStorageService\x12O\n" +
 	"\x04Name\x12\".ghostdrive.storage.v1.NameRequest\x1a#.ghostdrive.storage.v1.NameResponse\x12X\n" +
 	"\aConnect\x12%.ghostdrive.storage.v1.ConnectRequest\x1a&.ghostdrive.storage.v1.ConnectResponse\x12a\n" +
@@ -2130,7 +2232,9 @@ const file_plugins_proto_storage_proto_rawDesc = "" +
 	"\x06Upload\x12\".ghostdrive.storage.v1.UploadChunk\x1a#.ghostdrive.storage.v1.UploadResult(\x01\x12Z\n" +
 	"\bDownload\x12&.ghostdrive.storage.v1.DownloadRequest\x1a$.ghostdrive.storage.v1.DownloadChunk0\x01\x12U\n" +
 	"\x06Delete\x12$.ghostdrive.storage.v1.DeleteRequest\x1a%.ghostdrive.storage.v1.DeleteResponse\x12O\n" +
-	"\x04Move\x12\".ghostdrive.storage.v1.MoveRequest\x1a#.ghostdrive.storage.v1.MoveResponse\x12O\n" +
+	"\x04Move\x12\".ghostdrive.storage.v1.MoveRequest\x1a#.ghostdrive.storage.v1.MoveResponse\x12Q\n" +
+	"\x06Rename\x12\".ghostdrive.storage.v1.MoveRequest\x1a#.ghostdrive.storage.v1.MoveResponse\x12O\n" +
+	"\x04Copy\x12\".ghostdrive.storage.v1.CopyRequest\x1a#.ghostdrive.storage.v1.CopyResponse\x12O\n" +
 	"\x04List\x12\".ghostdrive.storage.v1.ListRequest\x1a#.ghostdrive.storage.v1.ListResponse\x12O\n" +
 	"\x04Stat\x12\".ghostdrive.storage.v1.StatRequest\x1a#.ghostdrive.storage.v1.StatResponse\x12^\n" +
 	"\tCreateDir\x12'.ghostdrive.storage.v1.CreateDirRequest\x1a(.ghostdrive.storage.v1.CreateDirResponse\x12Q\n" +
@@ -2152,7 +2256,7 @@ func file_plugins_proto_storage_proto_rawDescGZIP() []byte {
 	return file_plugins_proto_storage_proto_rawDescData
 }
 
-var file_plugins_proto_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
+var file_plugins_proto_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
 var file_plugins_proto_storage_proto_goTypes = []any{
 	(*BackendConfigProto)(nil),  // 0: ghostdrive.storage.v1.BackendConfigProto
 	(*FileInfoProto)(nil),       // 1: ghostdrive.storage.v1.FileInfoProto
@@ -2179,26 +2283,28 @@ var file_plugins_proto_storage_proto_goTypes = []any{
 	(*StatResponse)(nil),        // 22: ghostdrive.storage.v1.StatResponse
 	(*CreateDirRequest)(nil),    // 23: ghostdrive.storage.v1.CreateDirRequest
 	(*CreateDirResponse)(nil),   // 24: ghostdrive.storage.v1.CreateDirResponse
-	(*WatchRequest)(nil),        // 25: ghostdrive.storage.v1.WatchRequest
-	(*WatchEvent)(nil),          // 26: ghostdrive.storage.v1.WatchEvent
-	(*QuotaRequest)(nil),        // 27: ghostdrive.storage.v1.QuotaRequest
-	(*QuotaResponse)(nil),       // 28: ghostdrive.storage.v1.QuotaResponse
-	(*ReadAtRequest)(nil),       // 29: ghostdrive.storage.v1.ReadAtRequest
-	(*ReadAtResponse)(nil),      // 30: ghostdrive.storage.v1.ReadAtResponse
-	(*ChunkSizeRequest)(nil),    // 31: ghostdrive.storage.v1.ChunkSizeRequest
-	(*ChunkSizeResponse)(nil),   // 32: ghostdrive.storage.v1.ChunkSizeResponse
-	(*ParamSpecProto)(nil),      // 33: ghostdrive.storage.v1.ParamSpecProto
-	(*DescribeRequest)(nil),     // 34: ghostdrive.storage.v1.DescribeRequest
-	(*DescribeResponse)(nil),    // 35: ghostdrive.storage.v1.DescribeResponse
-	nil,                         // 36: ghostdrive.storage.v1.BackendConfigProto.ParamsEntry
+	(*CopyRequest)(nil),         // 25: ghostdrive.storage.v1.CopyRequest
+	(*CopyResponse)(nil),        // 26: ghostdrive.storage.v1.CopyResponse
+	(*WatchRequest)(nil),        // 27: ghostdrive.storage.v1.WatchRequest
+	(*WatchEvent)(nil),          // 28: ghostdrive.storage.v1.WatchEvent
+	(*QuotaRequest)(nil),        // 29: ghostdrive.storage.v1.QuotaRequest
+	(*QuotaResponse)(nil),       // 30: ghostdrive.storage.v1.QuotaResponse
+	(*ReadAtRequest)(nil),       // 31: ghostdrive.storage.v1.ReadAtRequest
+	(*ReadAtResponse)(nil),      // 32: ghostdrive.storage.v1.ReadAtResponse
+	(*ChunkSizeRequest)(nil),    // 33: ghostdrive.storage.v1.ChunkSizeRequest
+	(*ChunkSizeResponse)(nil),   // 34: ghostdrive.storage.v1.ChunkSizeResponse
+	(*ParamSpecProto)(nil),      // 35: ghostdrive.storage.v1.ParamSpecProto
+	(*DescribeRequest)(nil),     // 36: ghostdrive.storage.v1.DescribeRequest
+	(*DescribeResponse)(nil),    // 37: ghostdrive.storage.v1.DescribeResponse
+	nil,                         // 38: ghostdrive.storage.v1.BackendConfigProto.ParamsEntry
 }
 var file_plugins_proto_storage_proto_depIdxs = []int32{
-	36, // 0: ghostdrive.storage.v1.BackendConfigProto.params:type_name -> ghostdrive.storage.v1.BackendConfigProto.ParamsEntry
+	38, // 0: ghostdrive.storage.v1.BackendConfigProto.params:type_name -> ghostdrive.storage.v1.BackendConfigProto.ParamsEntry
 	0,  // 1: ghostdrive.storage.v1.ConnectRequest.config:type_name -> ghostdrive.storage.v1.BackendConfigProto
 	1,  // 2: ghostdrive.storage.v1.ListResponse.files:type_name -> ghostdrive.storage.v1.FileInfoProto
 	1,  // 3: ghostdrive.storage.v1.StatResponse.file:type_name -> ghostdrive.storage.v1.FileInfoProto
 	2,  // 4: ghostdrive.storage.v1.WatchEvent.event:type_name -> ghostdrive.storage.v1.FileEventProto
-	33, // 5: ghostdrive.storage.v1.DescribeResponse.params:type_name -> ghostdrive.storage.v1.ParamSpecProto
+	35, // 5: ghostdrive.storage.v1.DescribeResponse.params:type_name -> ghostdrive.storage.v1.ParamSpecProto
 	7,  // 6: ghostdrive.storage.v1.StorageService.Name:input_type -> ghostdrive.storage.v1.NameRequest
 	9,  // 7: ghostdrive.storage.v1.StorageService.Connect:input_type -> ghostdrive.storage.v1.ConnectRequest
 	11, // 8: ghostdrive.storage.v1.StorageService.Disconnect:input_type -> ghostdrive.storage.v1.DisconnectRequest
@@ -2207,32 +2313,36 @@ var file_plugins_proto_storage_proto_depIdxs = []int32{
 	5,  // 11: ghostdrive.storage.v1.StorageService.Download:input_type -> ghostdrive.storage.v1.DownloadRequest
 	15, // 12: ghostdrive.storage.v1.StorageService.Delete:input_type -> ghostdrive.storage.v1.DeleteRequest
 	17, // 13: ghostdrive.storage.v1.StorageService.Move:input_type -> ghostdrive.storage.v1.MoveRequest
-	19, // 14: ghostdrive.storage.v1.StorageService.List:input_type -> ghostdrive.storage.v1.ListRequest
-	21, // 15: ghostdrive.storage.v1.StorageService.Stat:input_type -> ghostdrive.storage.v1.StatRequest
-	23, // 16: ghostdrive.storage.v1.StorageService.CreateDir:input_type -> ghostdrive.storage.v1.CreateDirRequest
-	25, // 17: ghostdrive.storage.v1.StorageService.Watch:input_type -> ghostdrive.storage.v1.WatchRequest
-	27, // 18: ghostdrive.storage.v1.StorageService.GetQuota:input_type -> ghostdrive.storage.v1.QuotaRequest
-	34, // 19: ghostdrive.storage.v1.StorageService.Describe:input_type -> ghostdrive.storage.v1.DescribeRequest
-	29, // 20: ghostdrive.storage.v1.StorageService.ReadAt:input_type -> ghostdrive.storage.v1.ReadAtRequest
-	31, // 21: ghostdrive.storage.v1.StorageService.ChunkSize:input_type -> ghostdrive.storage.v1.ChunkSizeRequest
-	8,  // 22: ghostdrive.storage.v1.StorageService.Name:output_type -> ghostdrive.storage.v1.NameResponse
-	10, // 23: ghostdrive.storage.v1.StorageService.Connect:output_type -> ghostdrive.storage.v1.ConnectResponse
-	12, // 24: ghostdrive.storage.v1.StorageService.Disconnect:output_type -> ghostdrive.storage.v1.DisconnectResponse
-	14, // 25: ghostdrive.storage.v1.StorageService.IsConnected:output_type -> ghostdrive.storage.v1.IsConnectedResponse
-	4,  // 26: ghostdrive.storage.v1.StorageService.Upload:output_type -> ghostdrive.storage.v1.UploadResult
-	6,  // 27: ghostdrive.storage.v1.StorageService.Download:output_type -> ghostdrive.storage.v1.DownloadChunk
-	16, // 28: ghostdrive.storage.v1.StorageService.Delete:output_type -> ghostdrive.storage.v1.DeleteResponse
-	18, // 29: ghostdrive.storage.v1.StorageService.Move:output_type -> ghostdrive.storage.v1.MoveResponse
-	20, // 30: ghostdrive.storage.v1.StorageService.List:output_type -> ghostdrive.storage.v1.ListResponse
-	22, // 31: ghostdrive.storage.v1.StorageService.Stat:output_type -> ghostdrive.storage.v1.StatResponse
-	24, // 32: ghostdrive.storage.v1.StorageService.CreateDir:output_type -> ghostdrive.storage.v1.CreateDirResponse
-	26, // 33: ghostdrive.storage.v1.StorageService.Watch:output_type -> ghostdrive.storage.v1.WatchEvent
-	28, // 34: ghostdrive.storage.v1.StorageService.GetQuota:output_type -> ghostdrive.storage.v1.QuotaResponse
-	35, // 35: ghostdrive.storage.v1.StorageService.Describe:output_type -> ghostdrive.storage.v1.DescribeResponse
-	30, // 36: ghostdrive.storage.v1.StorageService.ReadAt:output_type -> ghostdrive.storage.v1.ReadAtResponse
-	32, // 37: ghostdrive.storage.v1.StorageService.ChunkSize:output_type -> ghostdrive.storage.v1.ChunkSizeResponse
-	22, // [22:38] is the sub-list for method output_type
-	6,  // [6:22] is the sub-list for method input_type
+	17, // 14: ghostdrive.storage.v1.StorageService.Rename:input_type -> ghostdrive.storage.v1.MoveRequest
+	25, // 15: ghostdrive.storage.v1.StorageService.Copy:input_type -> ghostdrive.storage.v1.CopyRequest
+	19, // 16: ghostdrive.storage.v1.StorageService.List:input_type -> ghostdrive.storage.v1.ListRequest
+	21, // 17: ghostdrive.storage.v1.StorageService.Stat:input_type -> ghostdrive.storage.v1.StatRequest
+	23, // 18: ghostdrive.storage.v1.StorageService.CreateDir:input_type -> ghostdrive.storage.v1.CreateDirRequest
+	27, // 19: ghostdrive.storage.v1.StorageService.Watch:input_type -> ghostdrive.storage.v1.WatchRequest
+	29, // 20: ghostdrive.storage.v1.StorageService.GetQuota:input_type -> ghostdrive.storage.v1.QuotaRequest
+	36, // 21: ghostdrive.storage.v1.StorageService.Describe:input_type -> ghostdrive.storage.v1.DescribeRequest
+	31, // 22: ghostdrive.storage.v1.StorageService.ReadAt:input_type -> ghostdrive.storage.v1.ReadAtRequest
+	33, // 23: ghostdrive.storage.v1.StorageService.ChunkSize:input_type -> ghostdrive.storage.v1.ChunkSizeRequest
+	8,  // 24: ghostdrive.storage.v1.StorageService.Name:output_type -> ghostdrive.storage.v1.NameResponse
+	10, // 25: ghostdrive.storage.v1.StorageService.Connect:output_type -> ghostdrive.storage.v1.ConnectResponse
+	12, // 26: ghostdrive.storage.v1.StorageService.Disconnect:output_type -> ghostdrive.storage.v1.DisconnectResponse
+	14, // 27: ghostdrive.storage.v1.StorageService.IsConnected:output_type -> ghostdrive.storage.v1.IsConnectedResponse
+	4,  // 28: ghostdrive.storage.v1.StorageService.Upload:output_type -> ghostdrive.storage.v1.UploadResult
+	6,  // 29: ghostdrive.storage.v1.StorageService.Download:output_type -> ghostdrive.storage.v1.DownloadChunk
+	16, // 30: ghostdrive.storage.v1.StorageService.Delete:output_type -> ghostdrive.storage.v1.DeleteResponse
+	18, // 31: ghostdrive.storage.v1.StorageService.Move:output_type -> ghostdrive.storage.v1.MoveResponse
+	18, // 32: ghostdrive.storage.v1.StorageService.Rename:output_type -> ghostdrive.storage.v1.MoveResponse
+	26, // 33: ghostdrive.storage.v1.StorageService.Copy:output_type -> ghostdrive.storage.v1.CopyResponse
+	20, // 34: ghostdrive.storage.v1.StorageService.List:output_type -> ghostdrive.storage.v1.ListResponse
+	22, // 35: ghostdrive.storage.v1.StorageService.Stat:output_type -> ghostdrive.storage.v1.StatResponse
+	24, // 36: ghostdrive.storage.v1.StorageService.CreateDir:output_type -> ghostdrive.storage.v1.CreateDirResponse
+	28, // 37: ghostdrive.storage.v1.StorageService.Watch:output_type -> ghostdrive.storage.v1.WatchEvent
+	30, // 38: ghostdrive.storage.v1.StorageService.GetQuota:output_type -> ghostdrive.storage.v1.QuotaResponse
+	37, // 39: ghostdrive.storage.v1.StorageService.Describe:output_type -> ghostdrive.storage.v1.DescribeResponse
+	32, // 40: ghostdrive.storage.v1.StorageService.ReadAt:output_type -> ghostdrive.storage.v1.ReadAtResponse
+	34, // 41: ghostdrive.storage.v1.StorageService.ChunkSize:output_type -> ghostdrive.storage.v1.ChunkSizeResponse
+	24, // [24:42] is the sub-list for method output_type
+	6,  // [6:24] is the sub-list for method input_type
 	6,  // [6:6] is the sub-list for extension type_name
 	6,  // [6:6] is the sub-list for extension extendee
 	0,  // [0:6] is the sub-list for field type_name
@@ -2249,7 +2359,7 @@ func file_plugins_proto_storage_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_plugins_proto_storage_proto_rawDesc), len(file_plugins_proto_storage_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   37,
+			NumMessages:   39,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

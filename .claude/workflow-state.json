@@ -1,0 +1,29 @@
+{
+  "type": "FEATURE",
+  "description": "Milestone v2.2 — Workflow Objets (7 issues)",
+  "branch": "feature/v2.2-workflow-objets",
+  "version": "2.2.0",
+  "started_at": "2026-05-23T08:00:00Z",
+  "cycles": 0,
+  "issue_nums": [136, 139, 140, 141, 142, 143, 144],
+  "milestone_num": 27,
+  "milestone_title": "v2.2 - Workflow Objets",
+  "phases": {
+    "clarification": { "status": "completed", "skipped": false },
+    "plan":          { "status": "completed", "handoff": "_work/handoff/planner-v22.md" },
+    "dev-backend":   { "status": "in_progress" },
+    "dev-frontend":  { "status": "pending", "note": "standby — démarre après signal P1 (#136)" },
+    "test-writer":   { "status": "pending" },
+    "review":        { "status": "pending" },
+    "qa":            { "status": "pending" },
+    "doc":           { "status": "pending" },
+    "deploy-qualif": { "status": "pending" },
+    "deploy-prod":   { "status": "pending" }
+  },
+  "v22_phases": {
+    "phase1": { "issues": [136], "label": "Infrastructure cache d'état", "status": "pending" },
+    "phase2": { "issues": [139, 142, 143], "label": "Sync fixes indépendants", "status": "pending" },
+    "phase3": { "issues": [140, 141], "label": "Sync fixes dépendants #136", "status": "pending" },
+    "phase4": { "issues": [144], "label": "UX Conflict", "status": "pending" }
+  }
+}

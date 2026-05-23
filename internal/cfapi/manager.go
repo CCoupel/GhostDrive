@@ -39,6 +39,14 @@ type providerEntry struct {
 	cancelFunc context.CancelFunc // cancels any in-flight OnFetchPlaceholders goroutine
 }
 
+// PinIntent represents a deferred pin/unpin request for a file that is currently
+// being transferred.  Stored in CFManager.intentions until the transfer completes (#143).
+type PinIntent struct {
+	BackendID string
+	LocalPath string
+	Pin       bool
+}
+
 // CFManager manages one SyncProvider per enabled backend.
 // It is safe for concurrent use.
 type CFManager struct {
@@ -47,6 +55,10 @@ type CFManager struct {
 
 	mu       gosync.RWMutex
 	entries  map[string]*providerEntry // backendID → entry
+
+	// intentions holds deferred PinIntents keyed by localPath (#143).
+	// sync.Map is used for lock-free concurrent access from Engine goroutines.
+	intentions gosync.Map
 }
 
 // NewCFManager creates a CFManager.
@@ -239,6 +251,34 @@ func (m *CFManager) PinFile(backendID, localPath string, pin bool) error {
 		state = SyncStatePinned
 	}
 	return m.SetSyncState(backendID, localPath, int(state))
+}
+
+// ─── Pin Intent Queue (#143) ──────────────────────────────────────────────────
+
+// QueuePinIntent stores a deferred pin/unpin intention for a file that is
+// currently being transferred (state U or P).  Any existing intention for the
+// same localPath is overwritten (last-intent-wins).
+func (m *CFManager) QueuePinIntent(backendID, localPath string, pin bool) {
+	m.intentions.Store(localPath, &PinIntent{
+		BackendID: backendID,
+		LocalPath: localPath,
+		Pin:       pin,
+	})
+}
+
+// ConsumeIntent reads and removes the pending PinIntent for localPath.
+// Returns (backendID, pin, true) if an intent was found; ("", false, false) otherwise.
+// Safe for concurrent calls from Engine goroutines.
+func (m *CFManager) ConsumeIntent(localPath string) (backendID string, pin bool, ok bool) {
+	v, loaded := m.intentions.LoadAndDelete(localPath)
+	if !loaded {
+		return "", false, false
+	}
+	intent, _ := v.(*PinIntent)
+	if intent == nil {
+		return "", false, false
+	}
+	return intent.BackendID, intent.Pin, true
 }
 
 // syncStateString converts a SyncState to its JSON-friendly string.

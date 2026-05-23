@@ -1,0 +1,56 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(go vet *)",
+      "Bash(go mod *)",
+      "Bash(go get *)",
+      "Bash(mkdir -p *)",
+      "Bash(npm install*)",
+      "Bash(npm run build*)",
+      "Bash(npm run test*)",
+      "Bash(npm run dev*)",
+      "Bash(npm ci*)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git branch *)",
+      "Bash(git merge *)",
+      "Bash(gh issue comment *)",
+      "Bash(gh issue close *)",
+      "Bash(gh issue edit *)"
+    ],
+    "deny": []
+  },
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '=== workflow-state.json (NE PAS PERDRE — état agents actifs) ===' && cat .claude/workflow-state.json 2>/dev/null || echo '{\"watchdog_active\":false,\"agents\":{}}' ; touch .claude/.post-compact"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '=== workflow-state.json (NE PAS PERDRE — état agents actifs) ===' && cat .claude/workflow-state.json 2>/dev/null || echo '{\"agents\":{}}' ; touch .claude/.post-compact"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f .claude/.post-compact ] && echo '=== RESTAURATION POST-COMPACTAGE — état agents actifs ===' && cat .claude/workflow-state.json 2>/dev/null && rm -f .claude/.post-compact || true"
+          }
+        ]
+      }
+    ]
+  }
+}
