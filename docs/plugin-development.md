@@ -158,6 +158,7 @@ type ProgressCallback func(done, total int64)
 |----------|-------------|
 | `plugins.ErrNotConnected` | N'importe quelle opération appelée sans connexion active |
 | `plugins.ErrFileNotFound` | Le chemin distant demandé n'existe pas |
+| `plugins.ErrNotSupported` | Opération optionnelle non supportée nativement (ex: `Rename` ou `Copy` retourne cette erreur, l'Engine fera un fallback) |
 
 **Convention de wrapping (critique)** :
 
@@ -193,6 +194,8 @@ return errors.New("myplugin: not connected")
 | `Download()` | `Download(ctx context.Context, remote, local string, progress ProgressCallback) error` | Copie le fichier distant à `remote` vers le chemin local `local`. Le répertoire parent de `local` est créé s'il n'existe pas. Retourne `ErrFileNotFound` (wrapped) si `remote` n'existe pas. |
 | `Delete()` | `Delete(ctx context.Context, remote string) error` | Supprime le fichier ou le répertoire à `remote`. Supprimer un répertoire non-vide est implémentation-défini (les plugins peuvent refuser ou supprimer récursivement). Retourne `ErrFileNotFound` (wrapped) si absent. |
 | `Move()` | `Move(ctx context.Context, oldPath, newPath string) error` | Renomme ou déplace l'entrée à `oldPath` vers `newPath` sur le backend. Écrase `newPath` s'il existe déjà. |
+| `Rename()` | `Rename(ctx context.Context, src, dst string) error` | Renomme l'entrée à `src` vers `dst` sur le backend. Optimisé pour les opérations de renommage natif du backend. **Optionnel natif** : retourne `ErrNotSupported` si le backend ne supporte pas nativement le renommage (l'Engine fera un fallback upload+delete). Retourne `ErrFileNotFound` (wrapped) si `src` n'existe pas. |
+| `Copy()` | `Copy(ctx context.Context, src, dst string) error` | Copie l'entrée à `src` vers `dst` sur le backend. Optimisé pour les opérations de copie serveur-side si le backend les supporte (ex: WebDAV COPY method). **Optionnel natif** : retourne `ErrNotSupported` si le backend ne supporte pas nativement la copie (l'Engine fera un fallback download+upload). Retourne `ErrFileNotFound` (wrapped) si `src` n'existe pas. |
 
 #### Navigation
 
