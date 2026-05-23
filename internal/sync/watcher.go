@@ -59,6 +59,10 @@ func (w *Watcher) Start(ctx context.Context) (<-chan plugins.FileEvent, error) {
 		pendingRenames := map[string]string{}
 		// renameTimers holds the timeout timer for each pending rename dir.
 		renameTimers := map[string]*time.Timer{}
+		// expiredRenames receives directory keys from AfterFunc callbacks so that
+		// pendingRenames cleanup happens on the main goroutine, eliminating the
+		// data race between the timer goroutine and the select loop (#fix-race).
+		expiredRenames := make(chan string, 16)
 
 		emit := func(evt plugins.FileEvent) {
 			select {
@@ -85,6 +89,11 @@ func (w *Watcher) Start(ctx context.Context) (<-chan plugins.FileEvent, error) {
 					t.Stop()
 				}
 				return
+
+			case dir := <-expiredRenames:
+				// Timer fired without a matching Create — clean up maps on main goroutine.
+				delete(pendingRenames, dir)
+				delete(renameTimers, dir)
 
 			case err, ok := <-w.watcher.Errors:
 				if !ok {
@@ -117,10 +126,8 @@ func (w *Watcher) Start(ctx context.Context) (<-chan plugins.FileEvent, error) {
 					capturedOld := path
 					capturedCtx := ctx
 					renameTimers[dir] = time.AfterFunc(renamePairTimeout, func() {
-						select {
-						case <-capturedCtx.Done():
+						if capturedCtx.Err() != nil {
 							return
-						default:
 						}
 						// No Create arrived → treat as deletion.
 						emit(plugins.FileEvent{
@@ -129,7 +136,11 @@ func (w *Watcher) Start(ctx context.Context) (<-chan plugins.FileEvent, error) {
 							Timestamp: time.Now(),
 							Source:    "local",
 						})
-						delete(pendingRenames, capturedDir)
+						// Delegate map cleanup to the main goroutine to avoid data race.
+						select {
+						case expiredRenames <- capturedDir:
+						default:
+						}
 					})
 					continue
 				}

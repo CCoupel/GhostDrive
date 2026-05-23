@@ -125,6 +125,9 @@ func (e *Engine) makeStateUpdater() func(localPath string, state types.FileState
 	return func(localPath string, state types.FileState) {
 		prev := e.GetFileState(localPath)
 		e.SetFileState(localPath, state)
+		if prev == state {
+			return // no-op: avoid flooding the frontend with identical state events
+		}
 		e.emitter.Emit("sync:file-state-changed", map[string]string{
 			"backendID": e.backendID,
 			"localPath": localPath,
@@ -208,6 +211,32 @@ func (e *Engine) Resume() {
 // ForceSync triggers an immediate full reconciliation regardless of the watcher.
 func (e *Engine) ForceSync(ctx context.Context) error {
 	return e.runFullSync(ctx)
+}
+
+// UploadFile dispatches an ActionUpload for a single local file and waits for
+// completion. This is used by PinFile (#142) to upload a specific file before
+// dehydrating it, avoiding the full-reconciliation side-effects of ForceSync.
+func (e *Engine) UploadFile(ctx context.Context, localPath string) error {
+	dispatcher := NewDispatcher(e.backend, e.emitter, e.localDir)
+	e.mu.RLock()
+	cfMgr := e.cfManager
+	backendID := e.backendID
+	e.mu.RUnlock()
+	if cfMgr != nil && backendID != "" {
+		dispatcher.SetCFManager(backendID, cfMgr)
+	}
+	dispatcher.SetStateUpdater(e.makeStateUpdater())
+
+	rel, err := filepath.Rel(e.localDir, localPath)
+	if err != nil {
+		return fmt.Errorf("uploadfile: resolve path: %w", err)
+	}
+	remotePath := path.Join(e.remotePath, filepath.ToSlash(rel))
+	return dispatcher.Dispatch(ctx, []SyncAction{{
+		Type:       ActionUpload,
+		LocalPath:  localPath,
+		RemotePath: remotePath,
+	}})
 }
 
 // GetState returns the current sync state (safe for concurrent access).

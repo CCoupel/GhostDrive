@@ -1080,7 +1080,7 @@ func (a *App) PinFile(backendID, localPath string, pin bool) error {
 		eng, hasEng := a.engines[backendID]
 		a.mu.RUnlock()
 		if hasEng {
-			if err := eng.ForceSync(a.ctx); err != nil {
+			if err := eng.UploadFile(a.ctx, localPath); err != nil {
 				return fmt.Errorf("pinfile: upload before unpin: %w", err)
 			}
 			// Re-check state after sync.

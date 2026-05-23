@@ -14,7 +14,7 @@ import { ghostdriveApi } from './services/wails';
 import type { AppConfig } from './types/ghostdrive';
 
 const DEFAULT_CONFIG: AppConfig = {
-  version: '0.6.0',
+  version: '',
   backends: [],
   cacheEnabled: false,
   cacheDir: '',

@@ -210,11 +210,14 @@ func (d *Dispatcher) execute(ctx context.Context, a SyncAction) error {
 					return fmt.Errorf("dispatch: rename fallback upload %s: %w", a.RemotePath, err2)
 				}
 				if err2 := d.backend.Delete(ctx, a.SrcRemotePath); err2 != nil {
-					// Non-fatal: new file is uploaded; stale old path may remain.
+					// Delete failed: the new file was uploaded but the old path is orphaned.
+					// Set state E so the engine knows this rename is incomplete (#fix-rename-fallback).
 					d.emitter.Emit("sync:error", map[string]any{
 						"path":    a.SrcRemotePath,
 						"message": "rename fallback delete: " + err2.Error(),
 					})
+					d.updateState(a.LocalPath, types.FileStateError)
+					return fmt.Errorf("dispatch: rename fallback delete %s: %w", a.SrcRemotePath, err2)
 				}
 			} else {
 				d.updateState(a.LocalPath, types.FileStateError)
@@ -255,6 +258,10 @@ func (d *Dispatcher) execute(ctx context.Context, a SyncAction) error {
 			}
 		}
 		d.updateState(a.LocalPath, types.FileStateSynced)
+		// #140 — update CF badge to ✓✓ after successful copy (mirrors ActionDownload).
+		if d.cfManager != nil && d.backendID != "" && a.LocalPath != "" {
+			_ = d.cfManager.SetSyncState(d.backendID, a.LocalPath, CFSyncStateSynced)
+		}
 
 	default:
 		return fmt.Errorf("dispatch: unknown action type %q", a.Type)
