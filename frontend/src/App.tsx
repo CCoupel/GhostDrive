@@ -6,6 +6,7 @@ import { ConfigPage } from './pages/ConfigPage';
 import { AboutPage } from './pages/AboutPage';
 import { FileBrowserPage } from './pages/FileBrowserPage';
 import { LogsPage } from './pages/LogsPage';
+import { Toast } from './components/ui/Toast';
 import { useSyncStatus } from './hooks/useSyncStatus';
 import { useBackends } from './hooks/useBackends';
 import { useDriveStatuses } from './hooks/useDriveStatus';
@@ -28,7 +29,7 @@ export function App() {
   const [view, setView] = useState<View>('backends');
   const [appConfig, setAppConfig] = useState<AppConfig>(DEFAULT_CONFIG);
 
-  const { syncState } = useSyncStatus();
+  const { syncState, conflictToasts, dismissConflictToast } = useSyncStatus();
   const { configs } = useBackends();
   const { anyMounted: driveMounted } = useDriveStatuses();
 
@@ -90,6 +91,23 @@ export function App() {
           <SettingsPage />
         )}
       </main>
+
+      {/* ── Conflict Toast Overlay (v2.2 #144) ── */}
+      {conflictToasts.length > 0 && (
+        <div
+          className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end"
+          aria-label="Notifications de synchronisation"
+        >
+          {conflictToasts.map(toast => (
+            <Toast
+              key={toast.id}
+              message={toast.message}
+              type={toast.type}
+              onDismiss={() => dismissConflictToast(toast.id)}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

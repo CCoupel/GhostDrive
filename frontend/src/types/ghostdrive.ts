@@ -35,6 +35,17 @@ export interface SyncError {
   time: string;
 }
 
+// ── Conflict Event (v2.2 — #144) ─────────────────────────────────────────────
+
+/** Payload emis par sync:conflict quand un conflit est auto-résolu (last-write-wins). */
+export interface ConflictEvent {
+  backendID: string;
+  path: string;
+  localModTime: string;
+  remoteModTime: string;
+  resolution: 'local-wins' | 'remote-wins';
+}
+
 export interface BackendSyncState {
   backendId: string;
   backendName: string;
@@ -183,6 +194,8 @@ export type WailsEventMap = {
   'sync:progress': ProgressEvent;
   'sync:file-event': FileEvent;
   'sync:error': SyncError;
+  /** sync:conflict — conflit auto-résolu (v2.2 #144) */
+  'sync:conflict': ConflictEvent;
   'backend:status-changed': BackendStatus;
   'placeholder:hydration-started': { path: string; size: number };
   'placeholder:hydration-done': { path: string };
