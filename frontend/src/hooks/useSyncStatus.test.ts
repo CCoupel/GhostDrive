@@ -162,7 +162,7 @@ describe('useSyncStatus — sync:conflict toast', () => {
       emitEvent('sync:conflict', makeConflict('same-path.txt'));
     });
 
-    expect(result.current.conflictToasts).toHaveLength(1, 'debounce must suppress the second event');
+    expect(result.current.conflictToasts).toHaveLength(1);
   });
 
   it('debounce 500 ms — événement accepté après la fenêtre', async () => {
@@ -180,7 +180,7 @@ describe('useSyncStatus — sync:conflict toast', () => {
       emitEvent('sync:conflict', makeConflict('debounce-path.txt'));
     });
 
-    expect(result.current.conflictToasts).toHaveLength(2, 'event after debounce must create a new toast');
+    expect(result.current.conflictToasts).toHaveLength(2);
   });
 
   it('dismissConflictToast — retire le toast cible et garde les autres', async () => {
@@ -225,7 +225,7 @@ describe('useSyncStatus — sync:conflict toast', () => {
       emitEvent('sync:conflict', makeConflict('reset-path.txt'));
     });
 
-    expect(result.current.conflictToasts).toHaveLength(1, 'debounce must be reset after all toasts dismissed');
+    expect(result.current.conflictToasts).toHaveLength(1);
   });
 
   it('paths différents dans la même émission créent des toasts indépendants', async () => {
