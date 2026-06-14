@@ -623,12 +623,22 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 		delete(a.backendConnectErrors, id)
 		a.mu.Unlock()
 
-		// v2.0 — Update the unified drive with the new backend list.
-		// Build updated list including the just-connected backend.
+		// v2.0 — Update or mount the unified drive with the new backend list.
+		// If no backend was enabled at startup, MountUnified was never called, so
+		// UpdateBackends would fail with "unified drive not mounted" (#147).
+		// Detect this situation and call MountUnified instead.
 		newList := a.enabledMountedBackendsExcluding("")
-		if updateErr := a.driveManager.UpdateBackends(newList); updateErr != nil {
-			// UpdateBackends failed — rollback: disconnect backend, revert enabled flag.
-			log.Printf("app: SetBackendEnabled UpdateBackends (enable) %s: %v", bc.Name, updateErr)
+		var driveErr error
+		if _, isUnifiedMounted := a.driveManager.GetUnifiedStatus(); isUnifiedMounted {
+			// Normal case: drive already up — add the new backend to the live VFS.
+			driveErr = a.driveManager.UpdateBackends(newList)
+		} else {
+			// First activation after a no-backend startup: mount the unified drive now.
+			driveErr = a.driveManager.MountUnified(mountPoint, newList)
+		}
+		if driveErr != nil {
+			// Drive operation failed — rollback: disconnect backend, revert enabled flag.
+			log.Printf("app: SetBackendEnabled drive (enable) %s: %v", bc.Name, driveErr)
 			_ = a.manager.Remove(id)
 			a.mu.Lock()
 			if idx2 := indexByID(a.cfg.Backends, id); idx2 >= 0 {
@@ -638,9 +648,9 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 			a.emit("drive:error", map[string]any{
 				"backendID":   "unified",
 				"backendName": "GhostDrive",
-				"error":       updateErr.Error(),
+				"error":       driveErr.Error(),
 			})
-			return fmt.Errorf("update unified drive: %w", updateErr)
+			return fmt.Errorf("update unified drive: %w", driveErr)
 		}
 		// Emit mounted event with current unified status.
 		if s, ok := a.driveManager.GetUnifiedStatus(); ok {

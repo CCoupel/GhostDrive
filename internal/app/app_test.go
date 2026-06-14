@@ -987,6 +987,78 @@ func TestStartup_MigratesMountPoint(t *testing.T) {
 		"Startup must migrate empty AppConfig.MountPoint to a non-empty value (v2.0)")
 }
 
+// ─── #147 — Activation after no-backend startup ───────────────────────────
+
+// TestSetBackendEnabled_FirstActivation_NoBrackendAtStartup is the non-regression
+// test for issue #147.
+//
+// Scenario: app starts with NO enabled backends → MountUnified is never called →
+// drives["unified"] is nil.  User enables the first backend manually.
+// Before the fix, SetBackendEnabled called UpdateBackends which failed with
+// "unified drive not mounted", blocking activation permanently.
+// After the fix, SetBackendEnabled detects the unmounted state and calls
+// MountUnified instead.
+//
+// On Linux/CI, the underlying NullDrive always returns ErrNotSupported for
+// both MountUnified and UpdateBackends — so either call results in a drive
+// error that is propagated to the caller.  The important invariant is:
+//   - The error is NOT "unified drive not mounted" (which is the bug symptom).
+//   - The backend is properly rolled back (Enabled=false, not stuck in limbo).
+//
+// The test is necessarily platform-agnostic: it verifies the control-flow fix
+// (correct branch taken, no "unified drive not mounted" error) without
+// asserting that the mount actually succeeds (WinFsp not available on Linux CI).
+func TestSetBackendEnabled_FirstActivation_NoBrackendAtStartup(t *testing.T) {
+	a := newTestApp(t)
+	tmp := t.TempDir()
+
+	rootPath := filepath.Join(tmp, "source")
+	require.NoError(t, os.MkdirAll(rootPath, 0755))
+
+	// Precondition: no backends enabled at startup → unified drive NOT mounted.
+	_, isMounted := a.driveManager.GetUnifiedStatus()
+	require.False(t, isMounted,
+		"precondition: unified drive must not be mounted before first activation")
+
+	// Add a backend (AddBackend always creates it as disabled).
+	bc := plugins.BackendConfig{
+		Name:       "FirstBackend",
+		Type:       "local",
+		RemotePath: "/remote",
+		Params:     map[string]string{"rootPath": rootPath},
+	}
+	added, err := a.AddBackend(bc)
+	require.NoError(t, err)
+	require.False(t, added.Enabled, "precondition: backend must start disabled")
+
+	// Enable the backend — this is the #147 scenario.
+	// On Linux, the NullDrive MountUnified returns ErrNotSupported which is
+	// propagated — that's expected CI behaviour. What we must NOT see is the
+	// old "unified drive not mounted" error that used to block all activations.
+	enableErr := a.SetBackendEnabled(added.ID, true)
+
+	if enableErr != nil {
+		// Drive mount failed (NullDrive on CI) — error must NOT be the old
+		// "unified drive not mounted" sentinel from UpdateBackends (#147).
+		assert.NotContains(t, enableErr.Error(), "unified drive not mounted",
+			"#147: error must come from MountUnified, not from UpdateBackends guard")
+
+		// Rollback must have happened: Enabled must be false.
+		a.mu.RLock()
+		for _, b := range a.cfg.Backends {
+			if b.ID == added.ID {
+				assert.False(t, b.Enabled,
+					"backend must be rolled back to Enabled=false after drive mount failure")
+			}
+		}
+		a.mu.RUnlock()
+	} else {
+		// On Windows / real WinFsp: mount succeeded — drive must be registered.
+		_, ok := a.driveManager.GetUnifiedStatus()
+		assert.True(t, ok, "unified drive must be registered after successful first activation")
+	}
+}
+
 // ─── #146 — Activation failures emit ERROR logs ────────────────────────────
 
 // captureLogOutput routes all logger output to a fresh bytes.Buffer for the
