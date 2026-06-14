@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sync"
 	"time"
 
@@ -142,14 +141,6 @@ func (l *GRPCLoader) Scan(pluginsDir string) error {
 	}
 
 	for _, path := range matches {
-		// #145 — skip binaries that are built for a different OS.
-		// Log at WARN level (not ERROR: the binary is simply irrelevant here,
-		// not a failure). Do not create a "failed" entry for skipped plugins.
-		if !isCompatibleBinary(path) {
-			logger.Warn("loader: plugin %q incompatible avec l'OS courant (%s), ignoré",
-				filepath.Base(path), runtime.GOOS)
-			continue
-		}
 		l.loadPlugin(path)
 	}
 	return nil
@@ -478,26 +469,6 @@ func (l *GRPCLoader) KillPluginProcess(name string) error {
 // pluginVersionRe extracts a semver string from a .ghdp filename such as
 // "ghostdrive-webdav-v1.5.1-windows-amd64.ghdp" → "1.5.1".
 var pluginVersionRe = regexp.MustCompile(`-v(\d+\.\d+\.\d+)[-.]`)
-
-// pluginOSRe detects the OS platform token in a .ghdp filename such as
-// "ghostdrive-webdav-v1.5.1-linux-amd64.ghdp".
-// The OS token must immediately follow the semver suffix (-v<M>.<m>.<p>-)
-// to avoid false positives when a plugin name itself contains an OS word.
-// Recognised tokens: linux, windows, darwin, freebsd, netbsd, openbsd.
-var pluginOSRe = regexp.MustCompile(`-v\d+\.\d+\.\d+-(linux|windows|darwin|freebsd|netbsd|openbsd)[-.]`)
-
-// isCompatibleBinary reports whether a .ghdp binary is compatible with the
-// running OS. Compatibility is determined by the OS token embedded in the
-// filename (e.g. "-linux-", "-windows-"). A filename without a recognised OS
-// token is assumed compatible (forward-compatible with plugins that do not
-// embed GOOS in their filename).
-func isCompatibleBinary(path string) bool {
-	m := pluginOSRe.FindStringSubmatch(filepath.Base(path))
-	if m == nil {
-		return true // no OS tag — assume compatible
-	}
-	return m[1] == runtime.GOOS
-}
 
 // versionFromPath parses the plugin binary filename for a semver version tag.
 // Returns "unknown" when the pattern is absent.

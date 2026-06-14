@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -229,96 +228,6 @@ func TestGRPCLoader_ScanIgnoresNonGhdp(t *testing.T) {
 	defer l.Shutdown()
 
 	assert.Empty(t, l.GetLoadedPlugins(), "non-.ghdp files and directories must not be loaded as plugins")
-}
-
-// ── #145 — OS compatibility filter ───────────────────────────────────────────
-
-// TestIsCompatibleBinary_CurrentOS verifies that a filename tagged with the
-// current GOOS is reported as compatible.
-func TestIsCompatibleBinary_CurrentOS(t *testing.T) {
-	filename := fmt.Sprintf("ghostdrive-webdav-v2.2.0-%s-amd64.ghdp", runtime.GOOS)
-	assert.True(t, loader.IsCompatibleBinaryForTest(filename),
-		"binary tagged with current GOOS (%s) must be compatible", runtime.GOOS)
-}
-
-// TestIsCompatibleBinary_OtherOS verifies that a filename tagged with a
-// different OS is reported as incompatible.
-func TestIsCompatibleBinary_OtherOS(t *testing.T) {
-	other := "linux"
-	if runtime.GOOS == "linux" {
-		other = "windows"
-	}
-	filename := fmt.Sprintf("ghostdrive-webdav-v2.2.0-%s-amd64.ghdp", other)
-	assert.False(t, loader.IsCompatibleBinaryForTest(filename),
-		"binary tagged with %s must be incompatible on %s", other, runtime.GOOS)
-}
-
-// TestIsCompatibleBinary_NoOSTag verifies that a filename without an OS tag
-// is treated as compatible (forward-compatible with unversioned names).
-func TestIsCompatibleBinary_NoOSTag(t *testing.T) {
-	assert.True(t, loader.IsCompatibleBinaryForTest("ghostdrive-echo-v1.0.0.ghdp"),
-		"filename without OS tag must be assumed compatible")
-	assert.True(t, loader.IsCompatibleBinaryForTest("mock.ghdp"),
-		"plain filename must be assumed compatible")
-}
-
-// TestGRPCLoader_ScanIgnoresIncompatibleOS verifies that a .ghdp binary tagged
-// with a different OS is silently skipped: GetLoadedPlugins returns no entry
-// for it (neither "loaded" nor "failed") and Scan returns no error.
-func TestGRPCLoader_ScanIgnoresIncompatibleOS(t *testing.T) {
-	dir := t.TempDir()
-
-	// Build a filename with the opposite OS so it is always incompatible on the
-	// current platform.
-	other := "linux"
-	if runtime.GOOS == "linux" {
-		other = "windows"
-	}
-	filename := fmt.Sprintf("ghostdrive-moosefs-v2.2.0-%s-amd64.ghdp", other)
-	pluginPath := filepath.Join(dir, filename)
-	require.NoError(t, os.WriteFile(pluginPath, []byte("fake binary"), 0755))
-
-	l := loader.NewGRPCLoader()
-	require.NoError(t, l.Scan(dir), "Scan must not error on an incompatible binary")
-	defer l.Shutdown()
-
-	// The incompatible binary must be silently ignored — it must NOT appear in
-	// GetLoadedPlugins() either as "loaded" or "failed".
-	assert.Empty(t, l.GetLoadedPlugins(),
-		"incompatible OS plugin must be skipped entirely (not loaded, not failed)")
-}
-
-// TestGRPCLoader_ScanLoadsCompatibleIgnoresIncompatibleOS verifies that when
-// the plugin directory contains both a compatible and an incompatible binary,
-// only the compatible one is loaded (the incompatible one is skipped silently).
-func TestGRPCLoader_ScanLoadsCompatibleIgnoresIncompatibleOS(t *testing.T) {
-	requireMockPlugin(t)
-
-	dir := t.TempDir()
-
-	// Copy the real mock binary with the current GOOS in the filename.
-	compatibleName := fmt.Sprintf("ghostdrive-mock-v2.2.0-%s-amd64.ghdp", runtime.GOOS)
-	copyMockPlugin(t, dir, compatibleName)
-
-	// Write a fake binary for a different OS — must be skipped.
-	other := "linux"
-	if runtime.GOOS == "linux" {
-		other = "windows"
-	}
-	incompatibleName := fmt.Sprintf("ghostdrive-fake-v2.2.0-%s-amd64.ghdp", other)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, incompatibleName), []byte("fake"), 0755))
-
-	l := loader.NewGRPCLoaderWithOptions(loader.LoaderOptions{
-		WatchdogDelays: fastDelays(),
-	})
-	require.NoError(t, l.Scan(dir))
-	t.Cleanup(func() { _ = l.Shutdown() })
-
-	infos := l.GetLoadedPlugins()
-	// Exactly one plugin must be loaded (the compatible mock).
-	// The incompatible binary must not appear at all.
-	require.Len(t, infos, 1, "only the compatible binary must be loaded")
-	assert.Equal(t, "loaded", infos[0].Status, "compatible binary must be in loaded state")
 }
 
 // ── Integration tests (require compiled mock plugin) ─────────────────────────

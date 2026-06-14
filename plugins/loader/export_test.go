@@ -5,11 +5,6 @@ package loader
 
 import goplugin "github.com/hashicorp/go-plugin"
 
-// IsCompatibleBinaryForTest exposes isCompatibleBinary for unit testing.
-// It reports whether the .ghdp filename carries an OS token that matches the
-// running OS (or no OS token at all, which is treated as compatible).
-var IsCompatibleBinaryForTest = isCompatibleBinary
-
 // GetPluginClientForTest returns the underlying go-plugin Client for the named
 // plugin so that integration tests can inspect process state (e.g.
 // client.Exited() after Shutdown). The caller must NOT call Kill() on the
