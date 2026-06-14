@@ -128,6 +128,18 @@ func (w *Watcher) Start(ctx context.Context) (<-chan plugins.FileEvent, error) {
 					// fsnotify.Rename = the old path was renamed away.
 					// Start a timer; if a Create arrives in the same dir within
 					// renamePairTimeout, we emit FileEventRenamed. Otherwise emit Deleted.
+					//
+					// #149 — cancel any pending Create debounce timer for THIS path.
+					// When a file is created and renamed within the debounce window,
+					// the Create timer for the old path is still pending. Without
+					// cancellation the timer fires 500ms later emitting a stale
+					// FileEventCreated for a non-existent path, causing a spurious
+					// ActionUpload failure.
+					if t, exists := pending[path]; exists {
+						t.Stop()
+						delete(pending, path)
+						delete(pendingTypes, path)
+					}
 					dir := dirOf(path)
 					if t, exists := renameTimers[dir]; exists {
 						t.Stop()

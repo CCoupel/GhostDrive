@@ -296,6 +296,45 @@ func TestEngineHandleLocalEvent_Delete_SyncedFile_DispatchesRemoteDelete(t *test
 	assert.False(t, ok, "ActionDelete must have been dispatched for a Synced file")
 }
 
+// TestEngineMakeStateUpdater_NoDowngradeSyncedToLocal verifies that once a file
+// reaches FileStateSynced, the state updater DOES NOT allow a downgrade to
+// FileStateLocal (#149 fix 3).
+//
+// Root cause: the reconciler may race with a concurrent upload and classify an
+// already-uploaded file as local-only (because its remote-listing snapshot
+// predates the upload completion). Allowing S→L would cause ActionDelete to be
+// silently skipped (via the #141 guard), making deleted files reappear after the
+// next reconciliation.
+func TestEngineMakeStateUpdater_NoDowngradeSyncedToLocal(t *testing.T) {
+	engine, emitter := newTestEngine(t, newMockBackend(), t.TempDir())
+	updater := engine.makeStateUpdater()
+
+	const p = "/local/guarded.txt"
+
+	// Transition Unknown → Synced.
+	updater(p, types.FileStateSynced)
+	require.Equal(t, types.FileStateSynced, engine.GetFileState(p),
+		"precondition: file must be Synced before the guard is tested")
+
+	// Attempt reconciler-style S → L downgrade.
+	updater(p, types.FileStateLocal)
+
+	// State must remain Synced — the guard must block the downgrade.
+	assert.Equal(t, types.FileStateSynced, engine.GetFileState(p),
+		"#149: S→L downgrade must be blocked; state must remain Synced")
+
+	// Exactly one sync:file-state-changed event: Unknown→Synced.
+	// The blocked S→L transition must NOT emit a second event.
+	stateEvents := 0
+	for _, ev := range emitter.events {
+		if ev.Name == "sync:file-state-changed" {
+			stateEvents++
+		}
+	}
+	assert.Equal(t, 1, stateEvents,
+		"#149: exactly one state event expected (Unknown→Synced); blocked S→L must not emit")
+}
+
 // TestEngineHandleLocalEvent_Renamed_EmptyOldPath_Ignored verifies that an
 // incomplete rename event (OldPath == "") is silently ignored (#139).
 func TestEngineHandleLocalEvent_Renamed_EmptyOldPath_Ignored(t *testing.T) {

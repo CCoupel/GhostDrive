@@ -151,6 +151,62 @@ func TestWatcherStop(t *testing.T) {
 	}
 }
 
+// TestWatcherCreateRename_NoStaleCreateEvent verifies that when a file is created
+// and renamed within the debounce window the watcher does NOT emit a stale
+// FileEventCreated for the old (renamed-away) path after the debounce fires
+// (#149 fix 2).
+//
+// Without the fix a pending Create debounce timer for the old path continued to
+// run even after the rename was detected, causing a spurious FileEventCreated
+// ~500ms later.  The engine would then attempt ActionUpload on a non-existent
+// file and fail.
+func TestWatcherCreateRename_NoStaleCreateEvent(t *testing.T) {
+	tmp := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	w, err := NewWatcher(tmp)
+	require.NoError(t, err)
+
+	events, err := w.Start(ctx)
+	require.NoError(t, err)
+
+	// Give the watcher time to register.
+	time.Sleep(60 * time.Millisecond)
+
+	oldPath := filepath.Join(tmp, "stale_create_old.txt")
+	newPath := filepath.Join(tmp, "stale_create_new.txt")
+
+	// Create old.txt and immediately rename it to new.txt — both within the
+	// 500ms debounce window so the Create timer for old.txt is still pending.
+	require.NoError(t, os.WriteFile(oldPath, []byte("data"), 0644))
+	require.NoError(t, os.Rename(oldPath, newPath))
+
+	// Collect all events for debounceDuration + slack so any stale Create would appear.
+	collected := make([]plugins.FileEvent, 0)
+	deadline := time.After(debounceDuration + 300*time.Millisecond)
+	drain:
+	for {
+		select {
+		case evt, ok := <-events:
+			if !ok {
+				break drain
+			}
+			collected = append(collected, evt)
+		case <-deadline:
+			break drain
+		}
+	}
+
+	// A stale FileEventCreated for the old path must NOT be present.
+	for _, evt := range collected {
+		if evt.Type == plugins.FileEventCreated && evt.Path == "stale_create_old.txt" {
+			t.Errorf("#149: stale FileEventCreated for renamed-away path %q must not be emitted; got %+v",
+				"stale_create_old.txt", evt)
+		}
+	}
+}
+
 func TestWatcherInvalidDir(t *testing.T) {
 	w, err := NewWatcher("/nonexistent/path/that/does/not/exist")
 	require.NoError(t, err, "NewWatcher should not error on creation")

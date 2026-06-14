@@ -125,6 +125,14 @@ func (e *Engine) SetFileState(localPath string, state types.FileState) {
 func (e *Engine) makeStateUpdater() func(localPath string, state types.FileState) {
 	return func(localPath string, state types.FileState) {
 		prev := e.GetFileState(localPath)
+		// #149 — guard: never downgrade a Synced file to Local. The reconciler may race
+		// with a concurrent upload and incorrectly classify a just-uploaded file as
+		// local-only (because the remote listing snapshot was captured before the upload
+		// completed). Allowing S→L would cause ActionDelete to be skipped for a genuinely
+		// synced file, making the deleted file reappear after the next reconciliation.
+		if prev == types.FileStateSynced && state == types.FileStateLocal {
+			return
+		}
 		e.SetFileState(localPath, state)
 		if prev == state {
 			return // no-op: avoid flooding the frontend with identical state events
@@ -467,7 +475,14 @@ func (e *Engine) handleLocalEvent(ctx context.Context, evt plugins.FileEvent) er
 		// Transfer state from old path to new (P→S on success via stateUpdater).
 		oldState := e.GetFileState(srcLocalPath)
 		e.fileStates.Delete(srcLocalPath)
-		e.SetFileState(localPath, oldState)
+		// #149 — don't inherit FileStateLocal: the renamed file is about to be
+		// synced via ActionRename. Inheriting Local state would cause a subsequent
+		// delete of the new path to silently skip ActionDelete (via the #141 guard),
+		// leaving the remote copy intact and making the file reappear locally after
+		// the next reconciliation.
+		if oldState != types.FileStateLocal {
+			e.SetFileState(localPath, oldState)
+		}
 		return dispatcher.Dispatch(ctx, []SyncAction{{
 			Type:          ActionRename,
 			LocalPath:     localPath,

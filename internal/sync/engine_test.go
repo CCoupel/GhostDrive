@@ -361,6 +361,47 @@ func TestEngine_HandleRemoteEvent_Rename_RenamesLocally(t *testing.T) {
 	assert.NoError(t, statErr, "#148: new local file must exist after remote rename")
 }
 
+// TestEngine_HandleLocalEvent_Rename_DoesNotInheritLocalState verifies that
+// renaming a file whose previous state was FileStateLocal does NOT propagate that
+// Local state to the new path (#149 fix 1).  After the rename the new path must
+// have state Unknown (or whatever the dispatcher sets), so that a subsequent
+// FileEventDeleted correctly dispatches ActionDelete instead of being silently
+// skipped by the #141 guard.
+func TestEngine_HandleLocalEvent_Rename_DoesNotInheritLocalState(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	// Seed remote old.txt so the rename backend call does not fail.
+	backend.addRemoteFile("/remote/old.txt", 5, time.Now())
+	engine, _ := newTestEngine(t, backend, tmp)
+
+	// Mark old.txt as FileStateLocal (never synced to remote).
+	oldLocal := filepath.Join(tmp, "old.txt")
+	engine.SetFileState(oldLocal, types.FileStateLocal)
+
+	// Create new.txt locally (rename target).
+	newLocal := filepath.Join(tmp, "new.txt")
+	require.NoError(t, os.WriteFile(newLocal, []byte("content"), 0644))
+
+	// Simulate watcher's FileEventRenamed (relative paths per #148 fix).
+	evt := plugins.FileEvent{
+		Type:    plugins.FileEventRenamed,
+		Path:    "new.txt",
+		OldPath: "old.txt",
+		Source:  "local",
+	}
+	err := engine.handleLocalEvent(context.Background(), evt)
+	require.NoError(t, err, "#149: rename of Local-state file must not error")
+
+	// Old path state must be cleared.
+	assert.Equal(t, types.FileStateUnknown, engine.GetFileState(oldLocal),
+		"#149: old path state must be cleared after rename")
+
+	// New path must NOT have Local state — it would block ActionDelete (#141 guard).
+	newState := engine.GetFileState(newLocal)
+	assert.NotEqual(t, types.FileStateLocal, newState,
+		"#149: rename must not propagate Local state to new path; got %q", newState)
+}
+
 // TestEngine_HandleRemoteEvent_Rename_FallbackDownload verifies that when the
 // old local file is absent (not yet synced) the engine falls back to downloading
 // the new remote file (#148 fix).
