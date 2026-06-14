@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/CCoupel/GhostDrive/internal/backends"
 	"github.com/CCoupel/GhostDrive/internal/config"
+	"github.com/CCoupel/GhostDrive/internal/logger"
 	"github.com/CCoupel/GhostDrive/internal/placeholder"
 	internalsync "github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/internal/types"
@@ -983,4 +985,101 @@ func TestStartup_MigratesMountPoint(t *testing.T) {
 	defer a.mu.RUnlock()
 	assert.NotEmpty(t, a.cfg.MountPoint,
 		"Startup must migrate empty AppConfig.MountPoint to a non-empty value (v2.0)")
+}
+
+// ─── #146 — Activation failures emit ERROR logs ────────────────────────────
+
+// captureLogOutput routes all logger output to a fresh bytes.Buffer for the
+// duration of the test and restores the previous extra writer at cleanup.
+func captureLogOutput(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	logger.SetExtraWriter(&buf)
+	t.Cleanup(func() { logger.SetExtraWriter(nil) })
+	return &buf
+}
+
+// TestSetBackendEnabled_ActivationFails_LogsError verifies that when
+// SetBackendEnabled fails because the backend type is unknown, an ERROR log
+// is emitted containing the backend name (#146).
+func TestSetBackendEnabled_ActivationFails_LogsError(t *testing.T) {
+	buf := captureLogOutput(t)
+
+	a := newTestApp(t)
+
+	const badID = "bad-type-146-enable"
+	a.mu.Lock()
+	a.cfg.Backends = []plugins.BackendConfig{
+		{
+			ID:         badID,
+			Name:       "ActivationErrorBackend",
+			Type:       "unknown-type-146",
+			LocalPath:  t.TempDir(),
+			SyncDir:    t.TempDir(),
+			RemotePath: "/remote",
+			Enabled:    false,
+			Params:     map[string]string{},
+		},
+	}
+	a.mu.Unlock()
+
+	err := a.SetBackendEnabled(badID, true)
+	require.Error(t, err, "SetBackendEnabled must return an error when activation fails (#146)")
+
+	// #146 — ERROR log must have been emitted (not just returned as an error).
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, "[ERROR]",
+		"activation failure must be logged at ERROR level, not silently swallowed (#146)")
+	assert.Contains(t, logOutput, "ActivationErrorBackend",
+		"ERROR log must include the backend name so operators can identify the failing backend (#146)")
+}
+
+// TestUpdateBackend_ActivationFails_LogsError verifies that when UpdateBackend
+// fails to reconnect an enabled backend (Connect returns an error), an ERROR
+// log is emitted (#146).
+//
+// Strategy: use Type="local" so validateBackendConfig passes, but point rootPath
+// to a non-existent directory so local.Connect fails at os.Stat, triggering the
+// logger.Error call added by #146 before the validation step that rejects
+// unregistered types.
+func TestUpdateBackend_ActivationFails_LogsError(t *testing.T) {
+	buf := captureLogOutput(t)
+
+	a := newTestApp(t)
+	tmp := t.TempDir()
+
+	// Existing rootPath so AddBackend passes validation and Connect succeeds.
+	existingRoot := filepath.Join(tmp, "source-existing")
+	require.NoError(t, os.MkdirAll(existingRoot, 0755))
+
+	syncDir := filepath.Join(tmp, "sync")
+	require.NoError(t, os.MkdirAll(syncDir, 0755))
+
+	// Add a valid backend (disabled by AddBackend contract).
+	bc := plugins.BackendConfig{
+		Name:       "UpdateActivationError",
+		Type:       "local",
+		RemotePath: "/remote",
+		Params:     map[string]string{"rootPath": existingRoot},
+	}
+	added, err := a.AddBackend(bc)
+	require.NoError(t, err)
+
+	// Update: request Enabled=true but replace rootPath with a path that does
+	// NOT exist on disk — local.Connect will fail at os.Stat, triggering
+	// manager.Add → error → logger.Error (#146).
+	// validateBackendConfig only checks that rootPath is non-empty (not that it
+	// exists), so validation passes and we reach the reconnect path.
+	added.Enabled = true
+	added.Params = map[string]string{"rootPath": filepath.Join(tmp, "does-not-exist-146")}
+	_, updateErr := a.UpdateBackend(added)
+	require.Error(t, updateErr,
+		"UpdateBackend must return an error when local.Connect fails (#146)")
+
+	// #146 — ERROR log must contain the backend name.
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, "[ERROR]",
+		"reconnect failure in UpdateBackend must emit an ERROR log (#146)")
+	assert.Contains(t, logOutput, "UpdateActivationError",
+		"ERROR log must include the backend name (#146)")
 }

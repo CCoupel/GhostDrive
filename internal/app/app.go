@@ -243,6 +243,8 @@ func (a *App) Startup(ctx context.Context) {
 			continue
 		}
 		if err := a.manager.Add(bc); err != nil {
+			// #146 — log ERROR so the failure appears in logs and the UI log tab.
+			logger.Error("app: activation backend %q échouée au démarrage : %v", bc.Name, err)
 			a.emitError(fmt.Sprintf("app: reconnect backend %s: %v", bc.Name, err))
 			// Track the connect failure so GetSyncState() reports SyncError and
 			// the tray turns red even when no engine is running (#117).
@@ -604,6 +606,8 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 		// Enable path: connect first — only persist on success to avoid disk/memory
 		// divergence if manager.Add fails.
 		if err := a.manager.Add(bc); err != nil {
+			// #146 — log ERROR with the full underlying error message.
+			logger.Error("app: activation backend %q échouée : %v", bc.Name, err)
 			// Rollback in-memory flag (disk was never written).
 			a.mu.Lock()
 			if idx2 := indexByID(a.cfg.Backends, id); idx2 >= 0 {
@@ -823,6 +827,8 @@ func (a *App) UpdateBackend(newBC plugins.BackendConfig) (plugins.BackendConfig,
 	// ── Reconnect if enabled ──────────────────────────────────────────────
 	if newBC.Enabled {
 		if err := a.manager.Add(newBC); err != nil {
+			// #146 — log ERROR with full error details before propagating.
+			logger.Error("app: activation backend %q échouée (update) : %v", newBC.Name, err)
 			// Record the connect failure so the tray turns red (#117).
 			a.mu.Lock()
 			a.backendConnectErrors[newBC.ID] = err.Error()
