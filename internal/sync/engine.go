@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	gosync "sync"
@@ -505,6 +506,29 @@ func (e *Engine) handleRemoteEvent(ctx context.Context, evt plugins.FileEvent) e
 			"path":    evt.Path,
 			"message": "remote file deleted — manual review required (V1 policy)",
 		})
+
+	case plugins.FileEventRenamed:
+		// Remote rename → apply locally as an atomic os.Rename (#148).
+		// If the old local path is absent (e.g. not yet synced), fall back to
+		// downloading the new remote file so the local directory stays consistent.
+		if evt.OldPath == "" {
+			break // incomplete event — no old path, nothing to rename
+		}
+		oldLocalPath := filepath.Join(e.localDir, evt.OldPath)
+		if err := os.Rename(oldLocalPath, localPath); err != nil {
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("sync: handleRemoteEvent: rename local %s → %s: %w", oldLocalPath, localPath, err)
+			}
+			// Old local file not found — download the new remote version instead.
+			return dispatcher.Dispatch(ctx, []SyncAction{{
+				Type:       ActionDownload,
+				LocalPath:  localPath,
+				RemotePath: path.Join(e.remotePath, evt.Path),
+			}})
+		}
+		// Rename succeeded — clean up state for old path and mark new path synced.
+		e.fileStates.Delete(oldLocalPath)
+		e.makeStateUpdater()(localPath, types.FileStateSynced)
 	}
 	return nil
 }

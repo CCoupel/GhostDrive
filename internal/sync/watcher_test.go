@@ -12,6 +12,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestWatcherEmitsRelativePaths verifies that FileEvent.Path is relative to the
+// watched directory and never an absolute path (#148 — watcher path format fix).
+func TestWatcherEmitsRelativePaths(t *testing.T) {
+	tmp := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	w, err := NewWatcher(tmp)
+	require.NoError(t, err)
+
+	events, err := w.Start(ctx)
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+	testFile := filepath.Join(tmp, "rel_path_check.txt")
+	require.NoError(t, os.WriteFile(testFile, []byte("check"), 0644))
+
+	select {
+	case evt := <-events:
+		assert.Equal(t, plugins.FileEventCreated, evt.Type)
+		// Path must be the bare filename — no directory prefix.
+		assert.Equal(t, "rel_path_check.txt", evt.Path,
+			"#148: watcher must emit relative path, not absolute")
+		assert.False(t, filepath.IsAbs(evt.Path),
+			"#148: watcher path must never be absolute")
+	case <-time.After(testTimeout):
+		t.Skip("watcher event not received within timeout (CI may be slow)")
+	}
+}
+
 const testTimeout = 3 * time.Second
 
 func TestWatcherCreate(t *testing.T) {

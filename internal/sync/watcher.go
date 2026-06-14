@@ -106,7 +106,18 @@ func (w *Watcher) Start(ctx context.Context) (<-chan plugins.FileEvent, error) {
 					return
 				}
 
-				path := filepath.ToSlash(fsEvent.Name)
+				// Relativize absolute fsnotify path against the watched directory.
+				// fsnotify always returns absolute paths; the engine expects relative
+				// paths so it can prepend localDir / remotePath without doubling (#148).
+				relPath, relErr := filepath.Rel(w.dir, fsEvent.Name)
+				if relErr != nil {
+					continue
+				}
+				path := filepath.ToSlash(relPath)
+				// Guard: skip events that escape the watched directory (e.g. via symlinks).
+				if path == ".." || strings.HasPrefix(path, "../") {
+					continue
+				}
 				evtType := fsEventType(fsEvent.Op)
 				if evtType == "" {
 					continue

@@ -292,3 +292,97 @@ func TestEngineRetryWithBackoff(t *testing.T) {
 	assert.False(t, ok)
 	assert.Nil(t, notReady)
 }
+
+// ─── #148 — ActionRename bug fixes ───────────────────────────────────────────
+
+// TestEngine_HandleLocalEvent_Rename_PropagatesRemote verifies that a
+// FileEventRenamed emitted by the watcher (with relative paths after the #148
+// watcher fix) correctly triggers an ActionRename on the backend with the right
+// remote paths.
+func TestEngine_HandleLocalEvent_Rename_PropagatesRemote(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+
+	// Seed old file on remote; new local file already exists (rename happened locally).
+	backend.addRemoteFile("/remote/old.txt", 5, time.Now())
+	localNew := filepath.Join(tmp, "new.txt")
+	require.NoError(t, os.WriteFile(localNew, []byte("hello"), 0644))
+
+	engine, _ := newTestEngine(t, backend, tmp)
+
+	// Simulate watcher event with relative paths (as emitted after #148 watcher fix).
+	evt := plugins.FileEvent{
+		Type:    plugins.FileEventRenamed,
+		Path:    "new.txt",  // relative to localDir
+		OldPath: "old.txt",  // relative to localDir
+		Source:  "local",
+	}
+
+	err := engine.handleLocalEvent(context.Background(), evt)
+	require.NoError(t, err, "#148: handleLocalEvent rename must not error")
+
+	// Backend: old path gone, new path present.
+	_, oldExists := backend.files["/remote/old.txt"]
+	_, newExists := backend.files["/remote/new.txt"]
+	assert.False(t, oldExists, "#148: remote old.txt must be removed after rename")
+	assert.True(t, newExists, "#148: remote new.txt must exist after rename")
+}
+
+// TestEngine_HandleRemoteEvent_Rename_RenamesLocally verifies that when the
+// remote backend fires a FileEventRenamed the engine renames the local file
+// atomically instead of downloading a new copy (#148 fix).
+func TestEngine_HandleRemoteEvent_Rename_RenamesLocally(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	engine, _ := newTestEngine(t, backend, tmp)
+
+	// Create old local file (already synced).
+	oldLocal := filepath.Join(tmp, "old.txt")
+	require.NoError(t, os.WriteFile(oldLocal, []byte("synced content"), 0644))
+
+	evt := plugins.FileEvent{
+		Type:    plugins.FileEventRenamed,
+		Path:    "new.txt",  // relative to remote root / localDir
+		OldPath: "old.txt",
+		Source:  "remote",
+	}
+
+	err := engine.handleRemoteEvent(context.Background(), evt)
+	require.NoError(t, err, "#148: handleRemoteEvent rename must not error")
+
+	// Old file must be gone locally.
+	_, statErr := os.Stat(oldLocal)
+	assert.True(t, os.IsNotExist(statErr),
+		"#148: old local file must be removed after remote rename")
+
+	// New file must exist (renamed in place, not downloaded).
+	newLocal := filepath.Join(tmp, "new.txt")
+	_, statErr = os.Stat(newLocal)
+	assert.NoError(t, statErr, "#148: new local file must exist after remote rename")
+}
+
+// TestEngine_HandleRemoteEvent_Rename_FallbackDownload verifies that when the
+// old local file is absent (not yet synced) the engine falls back to downloading
+// the new remote file (#148 fix).
+func TestEngine_HandleRemoteEvent_Rename_FallbackDownload(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	// Remote has the new file (already renamed on backend side).
+	backend.addRemoteFile("/remote/new.txt", 5, time.Now())
+	engine, _ := newTestEngine(t, backend, tmp)
+
+	evt := plugins.FileEvent{
+		Type:    plugins.FileEventRenamed,
+		Path:    "new.txt",
+		OldPath: "old.txt", // not present locally
+		Source:  "remote",
+	}
+
+	err := engine.handleRemoteEvent(context.Background(), evt)
+	require.NoError(t, err, "#148: fallback download must not error")
+
+	// new.txt should be downloaded locally.
+	newLocal := filepath.Join(tmp, "new.txt")
+	_, statErr := os.Stat(newLocal)
+	assert.NoError(t, statErr, "#148: fallback download must create local new.txt")
+}
