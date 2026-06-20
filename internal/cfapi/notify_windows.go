@@ -14,6 +14,7 @@ package cfapi
 import "C"
 import (
 	"path/filepath"
+	"strings"
 	"unsafe"
 )
 
@@ -22,8 +23,16 @@ import (
 // Called after a remote→local sync operation (download, delete, rename) so
 // Explorer reflects the new state without requiring F5 (#150).
 // Implements sync.LocalRefresher.
+//
+// #154 — SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH, ...) requires the
+// directory path to end with a backslash on Windows; without it the shell
+// ignores the notification and Explorer does not refresh until F5.
 func (m *CFManager) NotifyLocalChange(localPath string) {
 	dir := filepath.Dir(localPath)
+	// #154 — append trailing separator so SHCNF_PATH resolves correctly.
+	if !strings.HasSuffix(dir, string(filepath.Separator)) {
+		dir += string(filepath.Separator)
+	}
 	cDir := C.CString(dir)
 	defer C.free(unsafe.Pointer(cDir))
 	wDir := C.ghd_utf8_to_wchar(cDir)
