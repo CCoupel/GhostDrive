@@ -120,12 +120,20 @@ func (p *SyncProvider) Disconnect() error {
 	return nil
 }
 
-// Non-fatal HRESULT codes from CfCreatePlaceholders.
+// Non-fatal HRESULT codes from CfCreatePlaceholders and CfConvertToPlaceholder.
 // In all these cases the placeholder is already present (or in-use) — nothing to do.
 const (
 	// hrAlreadyExists = HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) — placeholder already on disk.
 	// Returned on the 2nd+ FETCH_PLACEHOLDERS round-trip when CF_CREATE_FLAG_NONE is used.
 	hrAlreadyExists = uint32(0x800700b7)
+
+	// hrAlreadyPlaceholder = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_INVALID_REQUEST).
+	// Returned by CfConvertToPlaceholder with CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION
+	// when the directory is already a CF placeholder.  Unlike MARK_IN_SYNC (for files),
+	// ENABLE_ON_DEMAND_POPULATION is NOT idempotent: it returns this error on the 2nd+
+	// FETCH_PLACEHOLDERS pass once the directory was successfully converted on the first.
+	// This is expected, benign, and must be treated as a no-op (#156).
+	hrAlreadyPlaceholder = uint32(0x8007017c)
 
 	// hrUserMappedFile = HRESULT_FROM_WIN32(ERROR_USER_MAPPED_FILE) — file has an open
 	// memory-mapped section (FETCH_DATA is in progress for this file).  The placeholder
@@ -250,12 +258,17 @@ func (p *SyncProvider) createPlaceholdersWithFlags(baseDir string, items []Place
 				//   · Files → ghd_convert_to_placeholder: CF_CONVERT_FLAG_MARK_IN_SYNC
 				//       → badge ✓✓ (locally present + in sync). MARK_IN_SYNC on files
 				//       is correct: the local copy IS the definitive version.
+				//       MARK_IN_SYNC is idempotent — succeeds if already a placeholder.
 				//   · Directories → ghd_convert_dir_to_placeholder:
 				//       CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION (no MARK_IN_SYNC)
 				//       → "partial" population state → OS calls FETCH_PLACEHOLDERS on
 				//       every open, merging remote content. Using MARK_IN_SYNC on
 				//       directories marks them as "fully populated" and the OS stops
 				//       calling FETCH_PLACEHOLDERS after a restart (regression).
+				//       ENABLE_ON_DEMAND_POPULATION is NOT idempotent: calling it on a
+				//       directory that is already a CF placeholder returns 0x8007017c
+				//       (ERROR_CLOUD_FILE_INVALID_REQUEST). This is expected on the 2nd+
+				//       FETCH_PLACEHOLDERS pass and must be treated as a no-op (#156).
 				fullPath := filepath.Join(baseDir, item.RelativePath)
 				wFull := C.ghd_utf8_to_wchar(C.CString(fullPath))
 				var xhr C.HRESULT
@@ -265,8 +278,16 @@ func (p *SyncProvider) createPlaceholdersWithFlags(baseDir string, items []Place
 					xhr = C.ghd_convert_to_placeholder(wFull)
 				}
 				if xhr != 0 {
-					log.Printf("cfapi: CfConvertToPlaceholder %s isDir=%v: HRESULT 0x%08x",
-						fullPath, item.IsDirectory, uint32(xhr))
+					xhrCode := uint32(xhr)
+					if item.IsDirectory && xhrCode == hrAlreadyPlaceholder {
+						// #156 — directory is already a CF placeholder with on-demand
+						// population.  ENABLE_ON_DEMAND_POPULATION is not idempotent;
+						// this error is expected on every FETCH_PLACEHOLDERS pass after
+						// the initial conversion.  Treat as success — no log spam.
+					} else {
+						log.Printf("cfapi: CfConvertToPlaceholder %s isDir=%v: HRESULT 0x%08x",
+							fullPath, item.IsDirectory, xhrCode)
+					}
 				}
 				C.ghd_free_wchar(wFull)
 				total++

@@ -31,12 +31,13 @@ import (
 
 // ─── Spec helpers ────────────────────────────────────────────────────────────
 
-// HRESULT spec constants — mirror provider.go hrAlreadyExists / hrUserMappedFile.
+// HRESULT spec constants — mirror provider.go hrAlreadyExists / hrUserMappedFile / hrAlreadyPlaceholder.
 // Keeping them here as a cross-platform spec guard: if the production constants
 // change, this file's tests must be updated in sync.
 const (
-	specHRAlreadyExists  = uint32(0x800700b7) // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)
-	specHRUserMappedFile = uint32(0x800704c8) // HRESULT_FROM_WIN32(ERROR_USER_MAPPED_FILE)
+	specHRAlreadyExists      = uint32(0x800700b7) // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)
+	specHRUserMappedFile     = uint32(0x800704c8) // HRESULT_FROM_WIN32(ERROR_USER_MAPPED_FILE)
+	specHRAlreadyPlaceholder = uint32(0x8007017c) // HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_INVALID_REQUEST) — dir already a CF placeholder
 )
 
 // createPlaceholdersResultSpec mirrors the production error-handling logic inside
@@ -1158,6 +1159,103 @@ func TestSpec_StorageProvider_RegisteredBeforeCfRegister(t *testing.T) {
 	p := NewSyncProvider(syncPath, "{test}", "GhostDrive — Spec")
 	if err := p.Register(); err != nil {
 		t.Fatalf("p.Register after RegisterStorageProvider: %v", err)
+	}
+}
+
+// ─── #156 — 0x8007017c for already-placeholder directories ───────────────────
+
+// dirConvertResultSpec mirrors the production logic in createPlaceholdersWithFlags
+// for handling the HRESULT returned by ghd_convert_dir_to_placeholder (directory
+// case) or ghd_convert_to_placeholder (file case) inside the hrAlreadyExists branch.
+//
+//	if xhr != 0 {
+//	    xhrCode := uint32(xhr)
+//	    if item.IsDirectory && xhrCode == hrAlreadyPlaceholder {
+//	        // benign no-op — already a CF placeholder
+//	    } else {
+//	        log.Printf("cfapi: CfConvertToPlaceholder ...")
+//	    }
+//	}
+//
+// Returns (isError bool, shouldLog bool) where:
+//   - isError=false  means the call is treated as a success (total++ continues)
+//   - shouldLog=true means the error is logged
+func dirConvertResultSpec(xhr uint32, isDirectory bool) (isError bool, shouldLog bool) {
+	if xhr == 0 {
+		return false, false // success — no error, no log
+	}
+	if isDirectory && xhr == specHRAlreadyPlaceholder {
+		// #156 — directory already a CF placeholder; ENABLE_ON_DEMAND_POPULATION
+		// is not idempotent.  Expected on 2nd+ FETCH_PLACEHOLDERS pass.
+		return false, false // treat as success, suppress log spam
+	}
+	return true, true // real error — log it
+}
+
+// TestRegression156_DirConvert_AlreadyPlaceholder verifies that 0x8007017c from
+// ghd_convert_dir_to_placeholder is treated as a non-fatal success for directories.
+//
+// Without the fix: this HRESULT was logged as an error on every FETCH_PLACEHOLDERS
+// pass after the first, flooding logs with "CfConvertToPlaceholder ... isDir=true:
+// HRESULT 0x8007017c" — misleading because the directory IS properly set up.
+// With the fix (#156): silently treated as a no-op.
+func TestRegression156_DirConvert_AlreadyPlaceholder(t *testing.T) {
+	cases := []struct {
+		name        string
+		xhr         uint32
+		isDirectory bool
+		wantError   bool
+		wantLog     bool
+	}{
+		{
+			"dir: 0x8007017c → no error, no log (#156)",
+			specHRAlreadyPlaceholder, true, false, false,
+		},
+		{
+			"file: 0x8007017c → error + log (not guarded for files)",
+			specHRAlreadyPlaceholder, false, true, true,
+		},
+		{
+			"dir: S_OK → no error, no log",
+			0, true, false, false,
+		},
+		{
+			"file: S_OK → no error, no log",
+			0, false, false, false,
+		},
+		{
+			"dir: other error (0x80004005 = E_FAIL) → error + log",
+			uint32(0x80004005), true, true, true,
+		},
+		{
+			"file: other error (0x80004005 = E_FAIL) → error + log",
+			uint32(0x80004005), false, true, true,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			gotError, gotLog := dirConvertResultSpec(tt.xhr, tt.isDirectory)
+			if gotError != tt.wantError {
+				t.Errorf("dirConvertResult(xhr=0x%08x, isDir=%v) isError=%v, want %v",
+					tt.xhr, tt.isDirectory, gotError, tt.wantError)
+			}
+			if gotLog != tt.wantLog {
+				t.Errorf("dirConvertResult(xhr=0x%08x, isDir=%v) shouldLog=%v, want %v",
+					tt.xhr, tt.isDirectory, gotLog, tt.wantLog)
+			}
+		})
+	}
+}
+
+// TestRegression156_HRAlreadyPlaceholder_ConstantValue guards the HRESULT value.
+// 0x8007017c = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_INVALID_REQUEST = 0x17c = 380).
+func TestRegression156_HRAlreadyPlaceholder_ConstantValue(t *testing.T) {
+	// Windows formula: HRESULT_FROM_WIN32(x) = (x & 0xFFFF) | 0x80070000
+	const errorCloudFileInvalidRequest = uint32(380) // 0x17c
+	want := (errorCloudFileInvalidRequest & 0xFFFF) | 0x80070000
+	if specHRAlreadyPlaceholder != want {
+		t.Errorf("specHRAlreadyPlaceholder = 0x%08x, want HRESULT_FROM_WIN32(0x%x) = 0x%08x",
+			specHRAlreadyPlaceholder, errorCloudFileInvalidRequest, want)
 	}
 }
 
