@@ -18,6 +18,12 @@ import (
 // into Engine to avoid an import cycle (cfapi → app → sync).
 type intentConsumeFunc func(localPath string) (backendID string, pin bool, ok bool)
 
+// suppressSlack is added on top of debounceDuration to compute the TTL for
+// locally suppressed paths.  It absorbs channel queuing and scheduling jitter
+// so that watcher events triggered by handleRemoteEvent's os.Remove/os.Rename
+// are reliably filtered before handleLocalEvent sees them (#150).
+const suppressSlack = 1000 * time.Millisecond
+
 // Engine orchestrates bidirectional synchronization between a local directory
 // and a remote backend.
 type Engine struct {
@@ -33,6 +39,12 @@ type Engine struct {
 	// Keys are absolute local paths; values are types.FileState.
 	// Uses sync.Map for lock-free concurrent reads/writes from Dispatcher goroutines.
 	fileStates gosync.Map
+
+	// suppressedPaths tracks local paths temporarily ignored by handleLocalEvent.
+	// Set by handleRemoteEvent before os.Remove/os.Rename to prevent the resulting
+	// fsnotify events from re-triggering a remote ActionDelete/ActionRename (#150).
+	// Keys: absolute local paths; Values: time.Time expiry.
+	suppressedPaths gosync.Map
 
 	// consumeIntent is injected by App to consume pin/unpin intentions after
 	// a file transitions U→S (#143).  nil means no intent queue.
@@ -83,6 +95,37 @@ func (e *Engine) SetCFManager(m CFStateManager) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.cfManager = m
+}
+
+// ─── Suppress mechanism (#150) ────────────────────────────────────────────────
+
+// suppressLocalEvent marks localPath to be ignored by handleLocalEvent for
+// debounceDuration+suppressSlack (≈1.5s total). Call this in handleRemoteEvent
+// BEFORE any os.Remove or os.Rename so the resulting fsnotify feedback events
+// are silently dropped instead of being re-dispatched as local changes.
+func (e *Engine) suppressLocalEvent(localPath string) {
+	expiry := time.Now().Add(debounceDuration + suppressSlack)
+	e.suppressedPaths.Store(localPath, expiry)
+}
+
+// isLocalEventSuppressed returns true if localPath was recently mutated by a
+// remote-event handler and the resulting watcher event should be skipped.
+// Expired entries are lazily deleted on first check.
+func (e *Engine) isLocalEventSuppressed(localPath string) bool {
+	v, ok := e.suppressedPaths.Load(localPath)
+	if !ok {
+		return false
+	}
+	expiry, ok := v.(time.Time)
+	if !ok {
+		e.suppressedPaths.Delete(localPath)
+		return false
+	}
+	if time.Now().After(expiry) {
+		e.suppressedPaths.Delete(localPath)
+		return false
+	}
+	return true
 }
 
 // SetIntentCallbacks injects the pin intent consumer and executor for #143.
@@ -434,6 +477,21 @@ func (e *Engine) runFullSync(ctx context.Context) error {
 }
 
 func (e *Engine) handleLocalEvent(ctx context.Context, evt plugins.FileEvent) error {
+	localPath := filepath.Join(e.localDir, evt.Path)
+
+	// #150 — skip local events that were triggered by handleRemoteEvent applying a
+	// remote change locally (os.Remove, os.Rename).  Without this guard the watcher
+	// feedback would dispatch a second ActionDelete/ActionRename to the backend,
+	// potentially creating conflicts or spurious errors.
+	if e.isLocalEventSuppressed(localPath) {
+		return nil
+	}
+	if evt.OldPath != "" {
+		if e.isLocalEventSuppressed(filepath.Join(e.localDir, evt.OldPath)) {
+			return nil
+		}
+	}
+
 	dispatcher := NewDispatcher(e.backend, e.emitter, e.localDir)
 	e.mu.RLock()
 	cfMgr := e.cfManager
@@ -446,7 +504,6 @@ func (e *Engine) handleLocalEvent(ctx context.Context, evt plugins.FileEvent) er
 	dispatcher.SetStateUpdater(e.makeStateUpdater())
 
 	remotePath := path.Join(e.remotePath, evt.Path)
-	localPath := filepath.Join(e.localDir, evt.Path)
 
 	switch evt.Type {
 	case plugins.FileEventCreated, plugins.FileEventModified:
@@ -510,31 +567,53 @@ func (e *Engine) handleRemoteEvent(ctx context.Context, evt plugins.FileEvent) e
 
 	switch evt.Type {
 	case plugins.FileEventCreated, plugins.FileEventModified:
+		// Suppress the local watcher event that ActionDownload will trigger so
+		// handleLocalEvent does not attempt a redundant ActionUpload (#150).
+		e.suppressLocalEvent(localPath)
 		return dispatcher.Dispatch(ctx, []SyncAction{{
 			Type:       ActionDownload,
 			LocalPath:  localPath,
 			RemotePath: path.Join(e.remotePath, evt.Path),
 		}})
+
 	case plugins.FileEventDeleted:
-		// Remote deletion → could remove locally; V1 is conservative (no local delete on remote event)
-		e.emitter.Emit("sync:error", map[string]any{
-			"path":    evt.Path,
-			"message": "remote file deleted — manual review required (V1 policy)",
-		})
+		// #150 — propagate remote deletion to the local filesystem.
+		// Previously a "V1 policy" stub only emitted a warning; v2.2 now removes
+		// the local file so both sides stay consistent.
+		//
+		// Suppress the resulting fsnotify Delete event so handleLocalEvent does not
+		// dispatch a second ActionDelete to the already-gone remote file.
+		e.suppressLocalEvent(localPath)
+		if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("sync: handleRemoteEvent: remove local %s: %w", localPath, err)
+		}
+		e.fileStates.Delete(localPath)
+		// Notify Explorer to refresh the parent directory (#150 bug 3).
+		if cfMgr != nil && backendID != "" {
+			if lr, ok := cfMgr.(LocalRefresher); ok {
+				lr.NotifyLocalChange(filepath.Dir(localPath))
+			}
+		}
 
 	case plugins.FileEventRenamed:
 		// Remote rename → apply locally as an atomic os.Rename (#148).
-		// If the old local path is absent (e.g. not yet synced), fall back to
-		// downloading the new remote file so the local directory stays consistent.
+		// Suppress local events for both old and new paths so handleLocalEvent
+		// does not re-dispatch ActionRename back to the already-renamed backend (#150).
 		if evt.OldPath == "" {
 			break // incomplete event — no old path, nothing to rename
 		}
 		oldLocalPath := filepath.Join(e.localDir, evt.OldPath)
+		// #150 — suppress before touching the filesystem.
+		e.suppressLocalEvent(oldLocalPath)
+		e.suppressLocalEvent(localPath)
 		if err := os.Rename(oldLocalPath, localPath); err != nil {
 			if !os.IsNotExist(err) {
 				return fmt.Errorf("sync: handleRemoteEvent: rename local %s → %s: %w", oldLocalPath, localPath, err)
 			}
-			// Old local file not found — download the new remote version instead.
+			// Old local file not found (not yet synced locally, or already gone).
+			// #150 — defensively remove any stale placeholder at the old path.
+			_ = os.Remove(oldLocalPath)
+			// Fall back: download the new remote file.
 			return dispatcher.Dispatch(ctx, []SyncAction{{
 				Type:       ActionDownload,
 				LocalPath:  localPath,
@@ -544,6 +623,12 @@ func (e *Engine) handleRemoteEvent(ctx context.Context, evt plugins.FileEvent) e
 		// Rename succeeded — clean up state for old path and mark new path synced.
 		e.fileStates.Delete(oldLocalPath)
 		e.makeStateUpdater()(localPath, types.FileStateSynced)
+		// #150 — notify Explorer after local rename.
+		if cfMgr != nil && backendID != "" {
+			if lr, ok := cfMgr.(LocalRefresher); ok {
+				lr.NotifyLocalChange(filepath.Dir(localPath))
+			}
+		}
 	}
 	return nil
 }

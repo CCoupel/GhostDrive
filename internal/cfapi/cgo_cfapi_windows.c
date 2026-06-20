@@ -450,4 +450,17 @@ void ghd_notify_icon_refresh(LPCWSTR syncRootPath) {
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSH, NULL, NULL);
 }
 
+// ghd_notify_dir_change fires SHCNE_UPDATEDIR for a specific directory.
+// Used after remote→local sync operations (download, delete, rename) to refresh
+// Explorer so the new file state is visible without requiring F5 (#150).
+// Lighter than ghd_notify_icon_refresh — does NOT reload shell extension
+// associations (no SHCNE_ASSOCCHANGED), avoiding a global Explorer reload.
+// dir: absolute path of the directory to refresh (wide string); NULL is no-op.
+void ghd_notify_dir_change(LPCWSTR dir) {
+    if (dir) {
+        SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH | SHCNF_FLUSH,
+                       (LPCVOID)dir, NULL);
+    }
+}
+
 #endif // _WIN32

@@ -427,3 +427,164 @@ func TestEngine_HandleRemoteEvent_Rename_FallbackDownload(t *testing.T) {
 	_, statErr := os.Stat(newLocal)
 	assert.NoError(t, statErr, "#148: fallback download must create local new.txt")
 }
+
+// ─── #150 — remote→local propagation fixes ──────────────────────────────────
+
+// TestEngine_HandleRemoteEvent_Delete_RemovesLocally verifies that a remote
+// FileEventDeleted now propagates to the local filesystem via os.Remove (#150
+// bug 2: "remote file deleted — manual review required (V1 policy)" was the
+// previous no-op; v2.2 removes the file locally).
+func TestEngine_HandleRemoteEvent_Delete_RemovesLocally(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	engine, _ := newTestEngine(t, backend, tmp)
+
+	// Create a local file (simulating a previously synced file).
+	localFile := filepath.Join(tmp, "gone.txt")
+	require.NoError(t, os.WriteFile(localFile, []byte("synced"), 0644))
+	engine.SetFileState(localFile, types.FileStateSynced)
+
+	evt := plugins.FileEvent{
+		Type:   plugins.FileEventDeleted,
+		Path:   "gone.txt",
+		Source: "remote",
+	}
+
+	err := engine.handleRemoteEvent(context.Background(), evt)
+	require.NoError(t, err, "#150: handleRemoteEvent delete must not error")
+
+	// Local file must be gone.
+	_, statErr := os.Stat(localFile)
+	assert.True(t, os.IsNotExist(statErr),
+		"#150: local file must be removed after remote FileEventDeleted")
+
+	// State must be cleared.
+	assert.Equal(t, types.FileStateUnknown, engine.GetFileState(localFile),
+		"#150: file state must be cleared after remote delete")
+}
+
+// TestEngine_HandleRemoteEvent_Delete_SuppressesLocalFeedback verifies that
+// after handleRemoteEvent calls os.Remove, the resulting local watcher event
+// is suppressed so handleLocalEvent does not dispatch a second ActionDelete to
+// the already-gone remote file (#150 suppress mechanism).
+func TestEngine_HandleRemoteEvent_Delete_SuppressesLocalFeedback(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	engine, _ := newTestEngine(t, backend, tmp)
+
+	localFile := filepath.Join(tmp, "suppress_me.txt")
+	require.NoError(t, os.WriteFile(localFile, []byte("data"), 0644))
+	engine.SetFileState(localFile, types.FileStateSynced)
+
+	// Seed a remote file so ActionDelete would have something to delete.
+	backend.addRemoteFile("/remote/suppress_me.txt", 4, time.Now())
+
+	// Simulate remote delete.
+	err := engine.handleRemoteEvent(context.Background(), plugins.FileEvent{
+		Type:   plugins.FileEventDeleted,
+		Path:   "suppress_me.txt",
+		Source: "remote",
+	})
+	require.NoError(t, err)
+
+	// The path must be suppressed immediately after the remote event.
+	assert.True(t, engine.isLocalEventSuppressed(localFile),
+		"#150: local path must be suppressed after handleRemoteEvent delete")
+
+	// Simulate the local watcher feedback: Delete event for the same path.
+	// With suppress active, handleLocalEvent must skip this without calling backend.Delete.
+	deleteCalled := backend.deleteCount
+	err = engine.handleLocalEvent(context.Background(), plugins.FileEvent{
+		Type:   plugins.FileEventDeleted,
+		Path:   "suppress_me.txt",
+		Source: "local",
+	})
+	require.NoError(t, err, "#150: suppressed handleLocalEvent must not error")
+	assert.Equal(t, deleteCalled, backend.deleteCount,
+		"#150: backend.Delete must NOT be called for suppressed local feedback event")
+}
+
+// TestEngine_HandleRemoteEvent_Rename_SuppressesBothPaths verifies that after
+// a remote FileEventRenamed, both the old and new local paths are suppressed so
+// the resulting fsnotify pair (Rename(old)+Create(new)) does not trigger a
+// redundant ActionRename back to the backend (#150).
+func TestEngine_HandleRemoteEvent_Rename_SuppressesBothPaths(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	engine, _ := newTestEngine(t, backend, tmp)
+
+	// Create old local file (already synced).
+	oldLocal := filepath.Join(tmp, "alpha.txt")
+	require.NoError(t, os.WriteFile(oldLocal, []byte("content"), 0644))
+	engine.SetFileState(oldLocal, types.FileStateSynced)
+
+	// Seed remote new name.
+	backend.addRemoteFile("/remote/beta.txt", 7, time.Now())
+
+	err := engine.handleRemoteEvent(context.Background(), plugins.FileEvent{
+		Type:    plugins.FileEventRenamed,
+		Path:    "beta.txt",
+		OldPath: "alpha.txt",
+		Source:  "remote",
+	})
+	require.NoError(t, err, "#150: handleRemoteEvent rename must not error")
+
+	newLocal := filepath.Join(tmp, "beta.txt")
+
+	// Old path must be suppressed.
+	assert.True(t, engine.isLocalEventSuppressed(oldLocal),
+		"#150: old path must be suppressed after remote rename")
+	// New path must be suppressed.
+	assert.True(t, engine.isLocalEventSuppressed(newLocal),
+		"#150: new path must be suppressed after remote rename")
+
+	// Simulate watcher feedback: FileEventRenamed{beta, alpha}.
+	// With suppress active, no ActionRename must be sent to the backend.
+	renameBefore := backend.renameCount
+	err = engine.handleLocalEvent(context.Background(), plugins.FileEvent{
+		Type:    plugins.FileEventRenamed,
+		Path:    "beta.txt",
+		OldPath: "alpha.txt",
+		Source:  "local",
+	})
+	require.NoError(t, err, "#150: suppressed handleLocalEvent rename must not error")
+	assert.Equal(t, renameBefore, backend.renameCount,
+		"#150: backend.Rename must NOT be called for suppressed local feedback event")
+}
+
+// TestEngine_HandleRemoteEvent_Delete_NonExistentLocal verifies that deleting a
+// remote file that was never synced locally (os.IsNotExist) is a no-op error-wise
+// — the engine must not return an error for an already-absent local file (#150).
+func TestEngine_HandleRemoteEvent_Delete_NonExistentLocal(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	engine, _ := newTestEngine(t, backend, tmp)
+	// No local file created — simulate file that never synced locally.
+
+	err := engine.handleRemoteEvent(context.Background(), plugins.FileEvent{
+		Type:   plugins.FileEventDeleted,
+		Path:   "never_synced.txt",
+		Source: "remote",
+	})
+	require.NoError(t, err,
+		"#150: deleting a never-synced local file must not error (os.IsNotExist is OK)")
+}
+
+// TestEngine_SuppressExpiry verifies that the suppress TTL expires and the path
+// is no longer considered suppressed after the window closes.
+func TestEngine_SuppressExpiry(t *testing.T) {
+	tmp := t.TempDir()
+	engine, _ := newTestEngine(t, newMockBackend(), tmp)
+
+	// Artificially store an already-expired entry.
+	expiredPath := filepath.Join(tmp, "expired.txt")
+	engine.suppressedPaths.Store(expiredPath, time.Now().Add(-1*time.Second))
+
+	// Must return false — expiry is in the past.
+	assert.False(t, engine.isLocalEventSuppressed(expiredPath),
+		"expired suppress entry must return false")
+
+	// Entry must be cleaned up lazily.
+	_, still := engine.suppressedPaths.Load(expiredPath)
+	assert.False(t, still, "expired entry must be deleted on check")
+}

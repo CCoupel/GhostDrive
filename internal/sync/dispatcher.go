@@ -46,6 +46,15 @@ type CFStateManager interface {
 	SetSyncState(backendID, localPath string, state int) error
 }
 
+// LocalRefresher is an optional interface for notifying the OS shell about
+// local filesystem changes caused by remote sync events.
+// On Windows: calls SHChangeNotify(SHCNE_UPDATEDIR, ...) for the parent directory.
+// Satisfied by *cfapi.CFManager on Windows (notify_windows.go); no-op on Linux/macOS.
+// Type-asserted at runtime — additive, no breaking change to CFStateManager (#150).
+type LocalRefresher interface {
+	NotifyLocalChange(localPath string)
+}
+
 // Dispatcher executes SyncActions with bounded concurrency.
 type Dispatcher struct {
 	backend      plugins.StorageBackend
@@ -171,6 +180,11 @@ func (d *Dispatcher) execute(ctx context.Context, a SyncAction) error {
 		// Phase 4 — update CF badge to ✓✓ after successful download.
 		if d.cfManager != nil && d.backendID != "" && a.LocalPath != "" {
 			_ = d.cfManager.SetSyncState(d.backendID, a.LocalPath, CFSyncStateSynced)
+			// #150 — notify Explorer to refresh the parent directory so newly
+			// downloaded files appear without requiring F5 (SHChangeNotify on Windows).
+			if lr, ok := d.cfManager.(LocalRefresher); ok {
+				lr.NotifyLocalChange(a.LocalPath)
+			}
 		}
 
 	case ActionDelete:
