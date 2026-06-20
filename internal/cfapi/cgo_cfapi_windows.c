@@ -299,6 +299,18 @@ HRESULT ghd_cf_report_error(uintptr_t callbackInfoPtr, HRESULT providerError) {
 // If the provider already created placeholders via CfCreatePlaceholders (out-of-band),
 // it must still call this function with PlaceholderCount=0 and completionStatus=S_OK
 // to release the pending OS operation — otherwise the Explorer window will time out.
+//
+// #157 — FLAG_DISABLE_ON_DEMAND_POPULATION is required to mark the directory as
+// fully populated.  Without it (FLAG_NONE), the directory stays in "partial" state:
+// CF re-fires FETCH_PLACEHOLDERS on every directory access, causing a tight loop
+// (1550+ calls observed in minutes) and concurrent CfCreatePlaceholders calls that
+// corrupt the parent directory CF state (root cause of 0x80070781 on New File).
+//
+// Subdirectories converted with CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION still
+// receive their own FETCH_PLACEHOLDERS on first access; the ack with
+// DISABLE_ON_DEMAND_POPULATION marks each one as fully populated in turn.
+// Ongoing remote changes are delivered by the sync engine (Watch/reconciliation),
+// not via FETCH_PLACEHOLDERS — which is for initial population only.
 HRESULT ghd_cf_ack_placeholders(uintptr_t callbackInfoPtr, HRESULT completionStatus) {
     if (!callbackInfoPtr) return E_INVALIDARG;
     const CF_CALLBACK_INFO* info = (const CF_CALLBACK_INFO*)callbackInfoPtr;
@@ -308,11 +320,14 @@ HRESULT ghd_cf_ack_placeholders(uintptr_t callbackInfoPtr, HRESULT completionSta
 
     CF_OPERATION_PARAMETERS params = {0};
     params.ParamSize = CF_SIZE_OF_OP_PARAM(TransferPlaceholders);
-    params.TransferPlaceholders.Flags             = CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE;
+    /* #157 — DISABLE_ON_DEMAND_POPULATION marks the directory as fully populated.
+     * FLAG_NONE leaves ENABLE_ON_DEMAND_POPULATION active → infinite re-invocation. */
+    params.TransferPlaceholders.Flags             = CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION;
     params.TransferPlaceholders.CompletionStatus  = completionStatus;
     params.TransferPlaceholders.PlaceholderArray  = NULL;
     params.TransferPlaceholders.PlaceholderCount  = 0;
-    /* PlaceholderTotalCount left zero-initialized — signals "population complete" */
+    /* PlaceholderTotalCount zero-initialized — no new entries transferred via PlaceholderArray.
+     * Placeholders were created out-of-band via CfCreatePlaceholders before this ack. */
 
     return CfExecute(&opInfo, &params);
 }

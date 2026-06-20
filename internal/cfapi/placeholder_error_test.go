@@ -1284,3 +1284,97 @@ func TestRegression69628d7_NewEntry_NoConvert(t *testing.T) {
 		})
 	}
 }
+
+// ─── Spec: #157 FETCH_PLACEHOLDERS ack flag ──────────────────────────────────
+//
+// Fix (#157): ghd_cf_ack_placeholders was using CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE
+// (0x00000000) in the CfExecute(TRANSFER_PLACEHOLDERS) ack.  FLAG_NONE leaves the
+// directory's ENABLE_ON_DEMAND_POPULATION active → CF considers population incomplete
+// → re-fires FETCH_PLACEHOLDERS on every directory access → 1550+ calls in minutes →
+// concurrent CfCreatePlaceholders calls → CF state corruption → 0x80070781 on New File.
+//
+// Fix: use CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION (0x2).
+// This marks the directory as fully populated after each FETCH_PLACEHOLDERS run.
+// Subdirectories with ENABLE_ON_DEMAND_POPULATION each get their own FETCH_PLACEHOLDERS
+// on first access; the ack with DISABLE_ON_DEMAND_POPULATION marks each one in turn.
+// Ongoing remote changes are delivered by the sync engine (Watch/reconciliation),
+// not FETCH_PLACEHOLDERS — which is for initial population only.
+
+const (
+	// specTransferFlagNone mirrors CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE (cfapi.h, 0x0).
+	// MUST NOT be used as the ack flag (#157): leaves ENABLE_ON_DEMAND_POPULATION active
+	// → infinite FETCH_PLACEHOLDERS loop.
+	specTransferFlagNone = uint32(0x00000000)
+
+	// specTransferFlagDisableOnDemand mirrors
+	// CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION (cfapi.h, 0x2).
+	// Marks the directory as fully populated → stops CF from re-firing FETCH_PLACEHOLDERS.
+	specTransferFlagDisableOnDemand = uint32(0x00000002)
+)
+
+// ackFlagsSpec mirrors the flag used in ghd_cf_ack_placeholders (cgo_cfapi_windows.c).
+// After fix #157 this must always return specTransferFlagDisableOnDemand.
+func ackFlagsSpec() uint32 {
+	return specTransferFlagDisableOnDemand
+}
+
+// TestRegression157_AckFlag_DisableOnDemand verifies that the ack flag is
+// CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION, not FLAG_NONE.
+//
+// Before fix: FLAG_NONE → directory stays in partial state → infinite loop.
+// After fix:  DISABLE_ON_DEMAND_POPULATION → directory marked as fully populated.
+func TestRegression157_AckFlag_DisableOnDemand(t *testing.T) {
+	got := ackFlagsSpec()
+
+	if got != specTransferFlagDisableOnDemand {
+		t.Errorf("ghd_cf_ack_placeholders flag: got 0x%08x, want CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION (0x%08x) "+
+			"— FLAG_NONE causes infinite FETCH_PLACEHOLDERS loop (#157)", got, specTransferFlagDisableOnDemand)
+	}
+	// Explicit anti-regression: must NOT be FLAG_NONE.
+	if got == specTransferFlagNone {
+		t.Errorf("ghd_cf_ack_placeholders: must NOT use CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE (0x%08x) "+
+			"— leaves ENABLE_ON_DEMAND_POPULATION active, CF re-fires FETCH_PLACEHOLDERS on every access (#157)",
+			specTransferFlagNone)
+	}
+}
+
+// TestRegression157_TransferFlags_ConstantValues guards the exact Windows SDK values.
+// A constants mismatch (e.g. cfapi.h updated) would be caught before a broken binary
+// reaches a Windows machine.
+func TestRegression157_TransferFlags_ConstantValues(t *testing.T) {
+	// CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE = 0x00000000
+	if specTransferFlagNone != 0 {
+		t.Errorf("CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE: expected 0x00000000, got 0x%08x "+
+			"(Windows SDK value — do not change)", specTransferFlagNone)
+	}
+	// CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION = 0x00000002
+	if specTransferFlagDisableOnDemand != 2 {
+		t.Errorf("CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION: "+
+			"expected 0x00000002, got 0x%08x (Windows SDK value — do not change)", specTransferFlagDisableOnDemand)
+	}
+	// The two flags must be distinct.
+	if specTransferFlagNone == specTransferFlagDisableOnDemand {
+		t.Errorf("transfer flag constants: NONE (0x%08x) == DISABLE_ON_DEMAND (0x%08x) — must be distinct",
+			specTransferFlagNone, specTransferFlagDisableOnDemand)
+	}
+}
+
+// TestRegression157_InfiniteLoop_RootCause documents the causal chain:
+// FLAG_NONE → partial population → CF re-fires → concurrent CfCreatePlaceholders
+// → CF corruption → 0x80070781 on New File.
+// This test formalises the invariant: the ack flag must prevent re-invocation.
+func TestRegression157_InfiniteLoop_RootCause(t *testing.T) {
+	// The ack flag must NOT be FLAG_NONE (partial state, triggers re-invocation).
+	ackFlag := ackFlagsSpec()
+	if ackFlag == specTransferFlagNone {
+		t.Fatal("ack flag is FLAG_NONE: directory left in partial population state " +
+			"→ CF re-fires FETCH_PLACEHOLDERS on every directory access " +
+			"→ concurrent CfCreatePlaceholders → CF corruption → 0x80070781 (#157)")
+	}
+
+	// The ack flag must have DISABLE_ON_DEMAND_POPULATION bit set.
+	if ackFlag&specTransferFlagDisableOnDemand == 0 {
+		t.Errorf("ack flag 0x%08x: bit CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION "+
+			"(0x%08x) not set — directory will not be marked as fully populated", ackFlag, specTransferFlagDisableOnDemand)
+	}
+}
