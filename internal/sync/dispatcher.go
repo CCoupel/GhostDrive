@@ -195,18 +195,30 @@ func (d *Dispatcher) execute(ctx context.Context, a SyncAction) error {
 		d.updateState(a.LocalPath, types.FileStateSynced)
 		// Phase 4 — update CF badge to ✓✓ after successful download.
 		if d.cfManager != nil && d.backendID != "" && a.LocalPath != "" {
-			// #151 — convert to CF placeholder BEFORE setting sync state.
+			// #151 / #152 — convert to CF placeholder BEFORE setting sync state.
 			// Download() creates a regular NTFS file via os.Rename(tmp, dest).
 			// Calling CfSetInSyncState on a non-placeholder corrupts the parent
 			// directory's CF state → 0x80070781 / 0x8007017c on user operations.
+			// If ConvertToPlaceholder fails we MUST skip SetSyncState — calling
+			// CfSetInSyncState on a non-placeholder is the root cause of the
+			// 0x80070781 regression; ignoring the error is not safe (#152).
+			placeholderOK := true
 			if pm, ok := d.cfManager.(PlaceholderMaker); ok {
-				_ = pm.ConvertToPlaceholder(d.backendID, a.LocalPath)
+				if err := pm.ConvertToPlaceholder(d.backendID, a.LocalPath); err != nil {
+					d.emitter.Emit("sync:warn", map[string]any{
+						"path":    a.LocalPath,
+						"message": "convert-to-placeholder failed — skipping SetSyncState to avoid CF corruption: " + err.Error(),
+					})
+					placeholderOK = false
+				}
 			}
-			_ = d.cfManager.SetSyncState(d.backendID, a.LocalPath, CFSyncStateSynced)
-			// #150 — notify Explorer to refresh the parent directory so newly
-			// downloaded files appear without requiring F5 (SHChangeNotify on Windows).
-			if lr, ok := d.cfManager.(LocalRefresher); ok {
-				lr.NotifyLocalChange(a.LocalPath)
+			if placeholderOK {
+				_ = d.cfManager.SetSyncState(d.backendID, a.LocalPath, CFSyncStateSynced)
+				// #150 / #154 — notify Explorer to refresh the parent directory so
+				// newly downloaded files appear without requiring F5.
+				if lr, ok := d.cfManager.(LocalRefresher); ok {
+					lr.NotifyLocalChange(a.LocalPath)
+				}
 			}
 		}
 
@@ -295,14 +307,24 @@ func (d *Dispatcher) execute(ctx context.Context, a SyncAction) error {
 			}
 		}
 		d.updateState(a.LocalPath, types.FileStateSynced)
-		// #140 + #151 — convert to CF placeholder then update badge after copy.
-		// Copy fallback also downloads via os.Rename(tmp, dest) — same root cause
-		// as ActionDownload; PlaceholderMaker must run before SetSyncState.
+		// #140 + #151 / #152 — convert to placeholder then update badge after copy.
+		// Copy fallback downloads via os.Rename(tmp, dest) — same root cause as
+		// ActionDownload; PlaceholderMaker must run before SetSyncState, and
+		// SetSyncState must be skipped if Convert fails.
 		if d.cfManager != nil && d.backendID != "" && a.LocalPath != "" {
+			placeholderOK := true
 			if pm, ok := d.cfManager.(PlaceholderMaker); ok {
-				_ = pm.ConvertToPlaceholder(d.backendID, a.LocalPath)
+				if err := pm.ConvertToPlaceholder(d.backendID, a.LocalPath); err != nil {
+					d.emitter.Emit("sync:warn", map[string]any{
+						"path":    a.LocalPath,
+						"message": "convert-to-placeholder (copy) failed — skipping SetSyncState: " + err.Error(),
+					})
+					placeholderOK = false
+				}
 			}
-			_ = d.cfManager.SetSyncState(d.backendID, a.LocalPath, CFSyncStateSynced)
+			if placeholderOK {
+				_ = d.cfManager.SetSyncState(d.backendID, a.LocalPath, CFSyncStateSynced)
+			}
 		}
 
 	default:
