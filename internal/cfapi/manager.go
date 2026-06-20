@@ -215,6 +215,29 @@ func (m *CFManager) StopAll() error {
 	return nil
 }
 
+// ConvertToPlaceholder converts the regular local file at localPath into a CF
+// placeholder before SetSyncState is called.  This satisfies the optional
+// sync.PlaceholderMaker interface (#151).
+//
+// Background: Download() writes files via os.Rename(tmp, dest) — neither the
+// temp file nor the renamed destination is a CF placeholder.  Calling
+// CfSetInSyncState on a non-placeholder writes invalid CF reparse-point data,
+// corrupting the parent directory's CF state and causing 0x80070781 /
+// 0x8007017c on subsequent user operations (New File, Rename).
+// Converting first makes the file a proper placeholder so CfSetInSyncState
+// operates correctly.
+func (m *CFManager) ConvertToPlaceholder(backendID, localPath string) error {
+	m.mu.RLock()
+	e, ok := m.entries[backendID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil // backend not registered — silent no-op
+	}
+
+	return e.provider.ConvertToPlaceholder(localPath)
+}
+
 // SetSyncState exposes SyncProvider.SetSyncState for app.go and the sync engine.
 // This method satisfies the sync.CFStateManager interface (backendID, localPath, state int).
 func (m *CFManager) SetSyncState(backendID, localPath string, state int) error {

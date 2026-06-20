@@ -359,3 +359,132 @@ func TestDispatcher_UnknownActionType_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown action type")
 }
+
+// ─── PlaceholderMaker (#151) ─────────────────────────────────────────────────
+
+// mockPlaceholderCFManager implements CFStateManager + PlaceholderMaker for
+// testing the ConvertToPlaceholder → SetSyncState ordering fix (#151).
+type mockPlaceholderCFManager struct {
+	convertCalls []string // paths passed to ConvertToPlaceholder
+	syncCalls    []string // paths passed to SetSyncState
+}
+
+func (m *mockPlaceholderCFManager) SetSyncState(_, localPath string, _ int) error {
+	m.syncCalls = append(m.syncCalls, localPath)
+	return nil
+}
+
+func (m *mockPlaceholderCFManager) ConvertToPlaceholder(_, localPath string) error {
+	m.convertCalls = append(m.convertCalls, localPath)
+	return nil
+}
+
+// TestDispatcher_ActionDownload_ConvertBeforeSetSync verifies that ActionDownload
+// calls ConvertToPlaceholder BEFORE SetSyncState when the cfManager satisfies
+// PlaceholderMaker (#151 regression guard).
+//
+// Root cause: Download() creates a regular NTFS file (not a CF placeholder).
+// Calling CfSetInSyncState on a non-placeholder writes invalid CF reparse-point
+// data, corrupting the parent directory's CF state and causing 0x80070781 on
+// subsequent user operations.
+func TestDispatcher_ActionDownload_ConvertBeforeSetSync(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+
+	// Seed a remote file so Download() succeeds.
+	backend.addRemoteFile("/remote/file.txt", 5, time.Now())
+
+	localFile := filepath.Join(tmp, "file.txt")
+	mgr := &mockPlaceholderCFManager{}
+
+	d := NewDispatcher(backend, &NoopEmitter{}, tmp)
+	d.SetCFManager("backend-1", mgr)
+
+	err := d.execute(context.Background(), SyncAction{
+		Type:       ActionDownload,
+		LocalPath:  localFile,
+		RemotePath: "/remote/file.txt",
+	})
+	require.NoError(t, err)
+
+	// ConvertToPlaceholder must be called once for the downloaded file.
+	require.Len(t, mgr.convertCalls, 1, "ConvertToPlaceholder must be called once")
+	assert.Equal(t, localFile, mgr.convertCalls[0])
+
+	// SetSyncState must be called after ConvertToPlaceholder.
+	require.Len(t, mgr.syncCalls, 1, "SetSyncState must be called once")
+	assert.Equal(t, localFile, mgr.syncCalls[0])
+}
+
+// TestDispatcher_ActionCopy_ConvertBeforeSetSync verifies that ActionCopy also
+// calls ConvertToPlaceholder before SetSyncState (#151).
+func TestDispatcher_ActionCopy_ConvertBeforeSetSync(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	backend.addRemoteFile("/remote/src.txt", 3, time.Now())
+
+	localDst := filepath.Join(tmp, "dst.txt")
+	require.NoError(t, os.WriteFile(localDst, []byte("xyz"), 0644))
+
+	mgr := &mockPlaceholderCFManager{}
+
+	d := NewDispatcher(backend, &NoopEmitter{}, tmp)
+	d.SetCFManager("backend-1", mgr)
+
+	err := d.execute(context.Background(), SyncAction{
+		Type:          ActionCopy,
+		LocalPath:     localDst,
+		RemotePath:    "/remote/dst.txt",
+		SrcLocalPath:  filepath.Join(tmp, "src.txt"),
+		SrcRemotePath: "/remote/src.txt",
+	})
+	require.NoError(t, err)
+
+	// ConvertToPlaceholder must be called.
+	require.Len(t, mgr.convertCalls, 1, "ConvertToPlaceholder must be called for copy")
+	assert.Equal(t, localDst, mgr.convertCalls[0])
+
+	// SetSyncState must follow.
+	require.Len(t, mgr.syncCalls, 1)
+	assert.Equal(t, localDst, mgr.syncCalls[0])
+}
+
+// plainCFManager implements only CFStateManager, NOT PlaceholderMaker.
+// Used to verify the type-assertion guard in ActionDownload/ActionCopy (#151).
+type plainCFManager struct {
+	syncCalls []string
+}
+
+func (m *plainCFManager) SetSyncState(_, localPath string, _ int) error {
+	m.syncCalls = append(m.syncCalls, localPath)
+	return nil
+}
+
+// TestDispatcher_ActionDownload_NoPlaceholderMaker_NoPanic verifies that if the
+// cfManager does NOT implement PlaceholderMaker the dispatcher does not panic
+// and still calls SetSyncState (#151 guard — existing CFStateManager impls
+// without PlaceholderMaker remain compatible).
+func TestDispatcher_ActionDownload_NoPlaceholderMaker_NoPanic(t *testing.T) {
+	tmp := t.TempDir()
+	backend := newMockBackend()
+	backend.addRemoteFile("/remote/file.txt", 2, time.Now())
+
+	localFile := filepath.Join(tmp, "file.txt")
+	mgr := &plainCFManager{}
+
+	d := NewDispatcher(backend, &NoopEmitter{}, tmp)
+	d.SetCFManager("backend-1", mgr)
+
+	require.NotPanics(t, func() {
+		err := d.execute(context.Background(), SyncAction{
+			Type:       ActionDownload,
+			LocalPath:  localFile,
+			RemotePath: "/remote/file.txt",
+		})
+		require.NoError(t, err)
+	}, "must not panic when cfManager does not implement PlaceholderMaker")
+
+	// SetSyncState must still be called even without ConvertToPlaceholder.
+	require.Len(t, mgr.syncCalls, 1, "SetSyncState must still be called")
+	assert.Equal(t, localFile, mgr.syncCalls[0])
+}

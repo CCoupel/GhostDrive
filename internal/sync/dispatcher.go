@@ -46,6 +46,22 @@ type CFStateManager interface {
 	SetSyncState(backendID, localPath string, state int) error
 }
 
+// PlaceholderMaker is an optional interface for converting a regular local file
+// into a CF placeholder before its sync state is updated (#151).
+// Must be satisfied by *cfapi.CFManager on Windows; the stub implements it as
+// a no-op on non-Windows so no platform guards are needed at call sites.
+//
+// Motivation: Download() writes files via os.Rename(tmp, dest) — neither the
+// temp file nor the destination is a CF placeholder.  Calling CfSetInSyncState
+// on a non-placeholder writes partial CF reparse-point data and corrupts the
+// parent directory's CF state, causing 0x80070781 (ERROR_INVALID_REPARSE_DATA)
+// or 0x8007017c (ERROR_CLOUD_FILE_INVALID_REQUEST) on subsequent user
+// operations such as creating a new file or renaming.
+// Converting first ensures CfSetInSyncState only runs on proper placeholders.
+type PlaceholderMaker interface {
+	ConvertToPlaceholder(backendID, localPath string) error
+}
+
 // LocalRefresher is an optional interface for notifying the OS shell about
 // local filesystem changes caused by remote sync events.
 // On Windows: calls SHChangeNotify(SHCNE_UPDATEDIR, ...) for the parent directory.
@@ -179,6 +195,13 @@ func (d *Dispatcher) execute(ctx context.Context, a SyncAction) error {
 		d.updateState(a.LocalPath, types.FileStateSynced)
 		// Phase 4 — update CF badge to ✓✓ after successful download.
 		if d.cfManager != nil && d.backendID != "" && a.LocalPath != "" {
+			// #151 — convert to CF placeholder BEFORE setting sync state.
+			// Download() creates a regular NTFS file via os.Rename(tmp, dest).
+			// Calling CfSetInSyncState on a non-placeholder corrupts the parent
+			// directory's CF state → 0x80070781 / 0x8007017c on user operations.
+			if pm, ok := d.cfManager.(PlaceholderMaker); ok {
+				_ = pm.ConvertToPlaceholder(d.backendID, a.LocalPath)
+			}
 			_ = d.cfManager.SetSyncState(d.backendID, a.LocalPath, CFSyncStateSynced)
 			// #150 — notify Explorer to refresh the parent directory so newly
 			// downloaded files appear without requiring F5 (SHChangeNotify on Windows).
@@ -272,8 +295,13 @@ func (d *Dispatcher) execute(ctx context.Context, a SyncAction) error {
 			}
 		}
 		d.updateState(a.LocalPath, types.FileStateSynced)
-		// #140 — update CF badge to ✓✓ after successful copy (mirrors ActionDownload).
+		// #140 + #151 — convert to CF placeholder then update badge after copy.
+		// Copy fallback also downloads via os.Rename(tmp, dest) — same root cause
+		// as ActionDownload; PlaceholderMaker must run before SetSyncState.
 		if d.cfManager != nil && d.backendID != "" && a.LocalPath != "" {
+			if pm, ok := d.cfManager.(PlaceholderMaker); ok {
+				_ = pm.ConvertToPlaceholder(d.backendID, a.LocalPath)
+			}
 			_ = d.cfManager.SetSyncState(d.backendID, a.LocalPath, CFSyncStateSynced)
 		}
 

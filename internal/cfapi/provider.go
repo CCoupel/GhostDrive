@@ -287,6 +287,32 @@ func (p *SyncProvider) createPlaceholdersWithFlags(baseDir string, items []Place
 	return total, firstErr
 }
 
+// ConvertToPlaceholder converts an existing regular local file into a CF
+// placeholder with CF_CONVERT_FLAG_MARK_IN_SYNC (#151).
+//
+// Call this BEFORE SetSyncState when the file was created outside of the CF
+// provider mechanism (e.g. by Download() which writes via os.Rename from a
+// temp file).  Calling CfSetInSyncState on a non-placeholder file attempts
+// to write CF reparse-point data to the file, leaving it with an invalid
+// reparse point and causing 0x80070781 (ERROR_INVALID_REPARSE_DATA) for
+// subsequent user operations in the same directory.
+//
+// Idempotent: if localPath is already a CF placeholder the function succeeds
+// (CfConvertToPlaceholder with MARK_IN_SYNC is a no-op on an already-synced
+// placeholder).
+func (p *SyncProvider) ConvertToPlaceholder(localPath string) error {
+	wPath := C.ghd_utf8_to_wchar(C.CString(localPath))
+	if wPath == nil {
+		return fmt.Errorf("cfapi: convert to placeholder: nil wpath for %s", localPath)
+	}
+	defer C.ghd_free_wchar(wPath)
+	hr := C.ghd_convert_to_placeholder(wPath)
+	if hr != 0 {
+		return fmt.Errorf("cfapi: convert to placeholder %s: HRESULT 0x%08x", localPath, uint32(hr))
+	}
+	return nil
+}
+
 // SetSyncState sets the in-sync/pin state of localPath.
 func (p *SyncProvider) SetSyncState(localPath string, state SyncState) error {
 	wPath := C.ghd_utf8_to_wchar(C.CString(localPath))
