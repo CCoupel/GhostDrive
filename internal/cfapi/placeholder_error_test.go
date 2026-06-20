@@ -1285,56 +1285,61 @@ func TestRegression69628d7_NewEntry_NoConvert(t *testing.T) {
 	}
 }
 
-// ─── Spec: #157 FETCH_PLACEHOLDERS ack flag ──────────────────────────────────
+// ─── Spec: #157 / #158 FETCH_PLACEHOLDERS ack flag + cooldown ────────────────
 //
-// Fix (#157): ghd_cf_ack_placeholders was using CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE
-// (0x00000000) in the CfExecute(TRANSFER_PLACEHOLDERS) ack.  FLAG_NONE leaves the
-// directory's ENABLE_ON_DEMAND_POPULATION active → CF considers population incomplete
-// → re-fires FETCH_PLACEHOLDERS on every directory access → 1550+ calls in minutes →
-// concurrent CfCreatePlaceholders calls → CF state corruption → 0x80070781 on New File.
+// #157 original: FLAG_NONE caused FETCH_PLACEHOLDERS infinite loop (1550+ calls
+// in minutes) because the directory stays in "partial" CF state, CF re-fires on
+// every access → concurrent CfCreatePlaceholders → CF state corruption → 0x80070781.
 //
-// Fix: use CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION (0x2).
-// This marks the directory as fully populated after each FETCH_PLACEHOLDERS run.
-// Subdirectories with ENABLE_ON_DEMAND_POPULATION each get their own FETCH_PLACEHOLDERS
-// on first access; the ack with DISABLE_ON_DEMAND_POPULATION marks each one in turn.
-// Ongoing remote changes are delivered by the sync engine (Watch/reconciliation),
-// not FETCH_PLACEHOLDERS — which is for initial population only.
+// #157 fix (now reverted): used DISABLE_ON_DEMAND_POPULATION to stop the loop.
+// That modified the directory's CF reparse point and introduced regression #158:
+// bidirectional sync completely dead (LOCAL→GhD: and GhD:→LOCAL both broken).
+// Root cause: CfExecute with DISABLE_ON_DEMAND_POPULATION modifies the directory
+// reparse point in a way that interferes with ReadDirectoryChangesW (fsnotify)
+// and/or blocks CF file operations in the sync root.
+//
+// Revised fix (#158):
+//   • ghd_cf_ack_placeholders: FLAG_NONE (no CF directory state change)
+//   • ghdOnFetchPlaceholders: 30-second cooldown per directory path
+//     — first FETCH_PLACEHOLDERS: run OnFetchPlaceholders + store timestamp
+//     — subsequent calls within 30s: ack immediately, skip backend.List()
+// This stops the callback flood without touching the CF reparse point.
 
 const (
 	// specTransferFlagNone mirrors CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE (cfapi.h, 0x0).
-	// MUST NOT be used as the ack flag (#157): leaves ENABLE_ON_DEMAND_POPULATION active
-	// → infinite FETCH_PLACEHOLDERS loop.
+	// Used in ghd_cf_ack_placeholders after #158 revert — FLAG_NONE preserves CF
+	// directory state so fsnotify and sync operations remain functional.
 	specTransferFlagNone = uint32(0x00000000)
 
 	// specTransferFlagDisableOnDemand mirrors
 	// CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION (cfapi.h, 0x2).
-	// Marks the directory as fully populated → stops CF from re-firing FETCH_PLACEHOLDERS.
+	// Documented here for reference; MUST NOT be used as the ack flag (#158 regression).
 	specTransferFlagDisableOnDemand = uint32(0x00000002)
 )
 
 // ackFlagsSpec mirrors the flag used in ghd_cf_ack_placeholders (cgo_cfapi_windows.c).
-// After fix #157 this must always return specTransferFlagDisableOnDemand.
+// After fix #158 this must return specTransferFlagNone to preserve CF directory state.
+// Anti-loop protection is provided by the cooldown in ghdOnFetchPlaceholders.
 func ackFlagsSpec() uint32 {
-	return specTransferFlagDisableOnDemand
+	return specTransferFlagNone
 }
 
-// TestRegression157_AckFlag_DisableOnDemand verifies that the ack flag is
-// CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION, not FLAG_NONE.
+// TestRegression158_AckFlag_None verifies the ack flag is CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE.
 //
-// Before fix: FLAG_NONE → directory stays in partial state → infinite loop.
-// After fix:  DISABLE_ON_DEMAND_POPULATION → directory marked as fully populated.
-func TestRegression157_AckFlag_DisableOnDemand(t *testing.T) {
+// History:
+//   - Before #157: FLAG_NONE → infinite loop (1550+ calls) → CF corruption → 0x80070781.
+//   - Fix #157:    DISABLE_ON_DEMAND_POPULATION → stopped loop but broke sync (#158).
+//   - Fix #158:    FLAG_NONE + cooldown dedup in Go → no CF state change, no loop.
+func TestRegression158_AckFlag_None(t *testing.T) {
 	got := ackFlagsSpec()
-
-	if got != specTransferFlagDisableOnDemand {
-		t.Errorf("ghd_cf_ack_placeholders flag: got 0x%08x, want CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION (0x%08x) "+
-			"— FLAG_NONE causes infinite FETCH_PLACEHOLDERS loop (#157)", got, specTransferFlagDisableOnDemand)
+	if got != specTransferFlagNone {
+		t.Errorf("ghd_cf_ack_placeholders flag: got 0x%08x, want CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE (0x%08x) "+
+			"— DISABLE_ON_DEMAND_POPULATION (#157) caused regression #158 (sync dead)", got, specTransferFlagNone)
 	}
-	// Explicit anti-regression: must NOT be FLAG_NONE.
-	if got == specTransferFlagNone {
-		t.Errorf("ghd_cf_ack_placeholders: must NOT use CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE (0x%08x) "+
-			"— leaves ENABLE_ON_DEMAND_POPULATION active, CF re-fires FETCH_PLACEHOLDERS on every access (#157)",
-			specTransferFlagNone)
+	// Explicit anti-regression: must NOT be DISABLE_ON_DEMAND_POPULATION (#158).
+	if got == specTransferFlagDisableOnDemand {
+		t.Errorf("ghd_cf_ack_placeholders: must NOT use CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION (0x%08x) "+
+			"— modifies CF reparse point, breaks fsnotify and bidirectional sync (#158)", specTransferFlagDisableOnDemand)
 	}
 }
 
@@ -1359,22 +1364,74 @@ func TestRegression157_TransferFlags_ConstantValues(t *testing.T) {
 	}
 }
 
-// TestRegression157_InfiniteLoop_RootCause documents the causal chain:
-// FLAG_NONE → partial population → CF re-fires → concurrent CfCreatePlaceholders
-// → CF corruption → 0x80070781 on New File.
-// This test formalises the invariant: the ack flag must prevent re-invocation.
-func TestRegression157_InfiniteLoop_RootCause(t *testing.T) {
-	// The ack flag must NOT be FLAG_NONE (partial state, triggers re-invocation).
-	ackFlag := ackFlagsSpec()
-	if ackFlag == specTransferFlagNone {
-		t.Fatal("ack flag is FLAG_NONE: directory left in partial population state " +
-			"→ CF re-fires FETCH_PLACEHOLDERS on every directory access " +
-			"→ concurrent CfCreatePlaceholders → CF corruption → 0x80070781 (#157)")
+// cooldownShouldSkip is a pure-function spec mirroring the cooldown guard in
+// ghdOnFetchPlaceholders (provider.go, #158).  Tested independently so the
+// boundary conditions are validated without depending on SyncProvider internals
+// or Windows CF API availability.
+func cooldownShouldSkip(lastPopulated time.Time, now time.Time, cooldown time.Duration) bool {
+	if lastPopulated.IsZero() {
+		return false // never populated — first call must run OnFetchPlaceholders
 	}
+	return now.Sub(lastPopulated) < cooldown
+}
 
-	// The ack flag must have DISABLE_ON_DEMAND_POPULATION bit set.
-	if ackFlag&specTransferFlagDisableOnDemand == 0 {
-		t.Errorf("ack flag 0x%08x: bit CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION "+
-			"(0x%08x) not set — directory will not be marked as fully populated", ackFlag, specTransferFlagDisableOnDemand)
+// TestRegression158_Cooldown_NeverPopulated: first FETCH_PLACEHOLDERS for a path
+// must NOT be skipped (zero lastPopulated = never seen before).
+func TestRegression158_Cooldown_NeverPopulated(t *testing.T) {
+	var zero time.Time
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	if cooldownShouldSkip(zero, now, 30*time.Second) {
+		t.Error("cooldown: zero lastPopulated must not skip (first-time population required)")
+	}
+}
+
+// TestRegression158_Cooldown_WithinWindow: callback within 30s window must be skipped
+// to avoid repeated backend.List() calls for the same directory.
+func TestRegression158_Cooldown_WithinWindow(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	last := base
+	now := base.Add(5 * time.Second) // 5s after last — well within 30s window
+	if !cooldownShouldSkip(last, now, 30*time.Second) {
+		t.Error("cooldown: call 5s after last population must be skipped (within 30s window)")
+	}
+}
+
+// TestRegression158_Cooldown_AtBoundary: call at exactly 30s is NOT skipped
+// (elapsed == cooldown is not strictly less than).
+func TestRegression158_Cooldown_AtBoundary(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	last := base
+	now := base.Add(30 * time.Second) // exactly 30s — elapsed == cooldown, not < cooldown
+	if cooldownShouldSkip(last, now, 30*time.Second) {
+		t.Error("cooldown: call at exactly 30s boundary must NOT be skipped (cooldown expired)")
+	}
+}
+
+// TestRegression158_Cooldown_AfterExpiry: callback 61s after last population must
+// run OnFetchPlaceholders normally (cooldown window elapsed).
+func TestRegression158_Cooldown_AfterExpiry(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	last := base
+	now := base.Add(61 * time.Second) // 61s — cooldown long expired
+	if cooldownShouldSkip(last, now, 30*time.Second) {
+		t.Error("cooldown: call 61s after last population must NOT be skipped (cooldown expired)")
+	}
+}
+
+// TestRegression158_Cooldown_DifferentPaths: cooldown is per-path; two different
+// directories must be tracked independently.
+func TestRegression158_Cooldown_DifferentPaths(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	lastForPathA := base
+	now := base.Add(5 * time.Second) // 5s — within cooldown for pathA
+
+	// pathA: populated 5s ago → skip
+	if !cooldownShouldSkip(lastForPathA, now, 30*time.Second) {
+		t.Error("cooldown: pathA populated 5s ago must be skipped")
+	}
+	// pathB: never populated → do NOT skip
+	var neverPopulated time.Time
+	if cooldownShouldSkip(neverPopulated, now, 30*time.Second) {
+		t.Error("cooldown: pathB never populated must NOT be skipped")
 	}
 }

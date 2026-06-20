@@ -25,6 +25,13 @@ var (
 	providerRegistry = make(map[int64]*SyncProvider)
 )
 
+// fetchPlaceholdersCooldown is the minimum interval between real OnFetchPlaceholders
+// invocations for the same directory path.  Windows (Explorer, indexer, antivirus)
+// fires FETCH_PLACEHOLDERS on every directory access; without deduplication this
+// causes a tight loop of expensive backend.List() calls (#157 / #158).
+// Calls within this window are acked immediately with FLAG_NONE (no CF state change).
+const fetchPlaceholdersCooldown = 30 * time.Second
+
 // SyncProvider manages the CF API lifecycle for one backend (one sync root).
 // One SyncProvider corresponds to one registered + connected sync root.
 type SyncProvider struct {
@@ -35,6 +42,13 @@ type SyncProvider struct {
 	mu            sync.Mutex
 	connectionKey int64 // CF_CONNECTION_KEY — 0 means not connected
 	callbacks     CFCallbacks
+
+	// populatedDirs tracks the last successful OnFetchPlaceholders completion time
+	// for each local directory path.  Used for cooldown deduplication (#158):
+	// repeated FETCH_PLACEHOLDERS callbacks within fetchPlaceholdersCooldown are
+	// acked immediately without calling backend.List() or CfCreatePlaceholders.
+	// Type: map[string]time.Time (sync.Map for concurrent CGO callback safety).
+	populatedDirs sync.Map
 }
 
 // NewSyncProvider creates a SyncProvider for the given local path.
@@ -566,6 +580,30 @@ func ghdOnFetchPlaceholders(callbackInfoPtr uintptr, _ uintptr) {
 	localPath := resolveNormalizedPath(info, p.localPath)
 	log.Printf("cfapi: FETCH_PLACEHOLDERS: localPath=%q", localPath)
 
+	// #158 — Cooldown deduplication.
+	//
+	// Windows (Explorer, indexer, antivirus) fires FETCH_PLACEHOLDERS on every
+	// directory access.  With FLAG_NONE in ghd_cf_ack_placeholders the directory
+	// stays in "partial" CF state, so CF re-fires the callback repeatedly.
+	//
+	// Original fix #157 used DISABLE_ON_DEMAND_POPULATION to stop re-firing, but
+	// that modified the directory's CF reparse point and broke bidirectional sync
+	// (#158 regression: LOCAL→GhD: and GhD:→LOCAL both dead).
+	//
+	// Revised approach: use FLAG_NONE in the C ack (no reparse point change) and
+	// deduplicate here in Go.  First call per directory path runs OnFetchPlaceholders
+	// normally and records the timestamp.  Subsequent calls within fetchPlaceholdersCooldown
+	// are acked immediately without invoking backend.List() or CfCreatePlaceholders.
+	now := time.Now()
+	if last, hit := p.populatedDirs.Load(localPath); hit {
+		if now.Sub(last.(time.Time)) < fetchPlaceholdersCooldown {
+			log.Printf("cfapi: FETCH_PLACEHOLDERS: cooldown active for %q (%.0fs ago) — acking immediately",
+				localPath, now.Sub(last.(time.Time)).Seconds())
+			_ = C.ghd_cf_ack_placeholders(C.uintptr_t(callbackInfoPtr), 0) // S_OK, FLAG_NONE
+			return
+		}
+	}
+
 	err := p.callbacks.OnFetchPlaceholders(context.Background(), localPath)
 
 	// BUG FIX: Windows keeps the Explorer thread blocked until the provider calls
@@ -578,6 +616,9 @@ func ghdOnFetchPlaceholders(callbackInfoPtr uintptr, _ uintptr) {
 	if err != nil {
 		log.Printf("cfapi: FETCH_PLACEHOLDERS: callback error: %v", err)
 		status = C.HRESULT(-2147467259) // E_FAIL
+	} else {
+		// Record successful population time for cooldown tracking.
+		p.populatedDirs.Store(localPath, now)
 	}
 	if hr := C.ghd_cf_ack_placeholders(C.uintptr_t(callbackInfoPtr), status); hr != 0 {
 		log.Printf("cfapi: FETCH_PLACEHOLDERS: ack CfExecute failed: HRESULT 0x%08x", uint32(hr))

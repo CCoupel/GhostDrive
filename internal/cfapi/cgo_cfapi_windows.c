@@ -300,17 +300,22 @@ HRESULT ghd_cf_report_error(uintptr_t callbackInfoPtr, HRESULT providerError) {
 // it must still call this function with PlaceholderCount=0 and completionStatus=S_OK
 // to release the pending OS operation — otherwise the Explorer window will time out.
 //
-// #157 — FLAG_DISABLE_ON_DEMAND_POPULATION is required to mark the directory as
-// fully populated.  Without it (FLAG_NONE), the directory stays in "partial" state:
-// CF re-fires FETCH_PLACEHOLDERS on every directory access, causing a tight loop
-// (1550+ calls observed in minutes) and concurrent CfCreatePlaceholders calls that
-// corrupt the parent directory CF state (root cause of 0x80070781 on New File).
+// #158 — REVISION of #157 fix.
 //
-// Subdirectories converted with CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION still
-// receive their own FETCH_PLACEHOLDERS on first access; the ack with
-// DISABLE_ON_DEMAND_POPULATION marks each one as fully populated in turn.
-// Ongoing remote changes are delivered by the sync engine (Watch/reconciliation),
-// not via FETCH_PLACEHOLDERS — which is for initial population only.
+// #157 original: FLAG_NONE caused FETCH_PLACEHOLDERS infinite loop (1550+ calls in
+// minutes) because the directory stays in "partial" state and CF re-fires on every
+// access → concurrent CfCreatePlaceholders → CF state corruption → 0x80070781.
+//
+// #157 fix attempted: DISABLE_ON_DEMAND_POPULATION → stopped the loop, but introduced
+// regression #158: bidirectional sync completely dead (LOCAL→GhD: and GhD:→LOCAL).
+// Root cause: modifying the directory CF reparse point interferes with
+// ReadDirectoryChangesW (fsnotify) and/or blocks CF file operations in the sync root.
+//
+// Revised fix (#158): use FLAG_NONE here (no reparse point modification).
+// Anti-loop protection is now provided by a cooldown deduplication guard in
+// ghdOnFetchPlaceholders (provider.go): first call per path runs OnFetchPlaceholders
+// normally; subsequent calls within 30 seconds are acked immediately without invoking
+// the expensive backend.List() path.  This stops the loop without touching CF state.
 HRESULT ghd_cf_ack_placeholders(uintptr_t callbackInfoPtr, HRESULT completionStatus) {
     if (!callbackInfoPtr) return E_INVALIDARG;
     const CF_CALLBACK_INFO* info = (const CF_CALLBACK_INFO*)callbackInfoPtr;
@@ -320,9 +325,9 @@ HRESULT ghd_cf_ack_placeholders(uintptr_t callbackInfoPtr, HRESULT completionSta
 
     CF_OPERATION_PARAMETERS params = {0};
     params.ParamSize = CF_SIZE_OF_OP_PARAM(TransferPlaceholders);
-    /* #157 — DISABLE_ON_DEMAND_POPULATION marks the directory as fully populated.
-     * FLAG_NONE leaves ENABLE_ON_DEMAND_POPULATION active → infinite re-invocation. */
-    params.TransferPlaceholders.Flags             = CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION;
+    /* #158 — FLAG_NONE preserves CF directory state (no reparse point modification).
+     * Anti-loop dedup is handled in ghdOnFetchPlaceholders via a 30s cooldown. */
+    params.TransferPlaceholders.Flags             = CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE;
     params.TransferPlaceholders.CompletionStatus  = completionStatus;
     params.TransferPlaceholders.PlaceholderArray  = NULL;
     params.TransferPlaceholders.PlaceholderCount  = 0;

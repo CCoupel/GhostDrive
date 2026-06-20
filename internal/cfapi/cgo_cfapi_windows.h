@@ -142,8 +142,9 @@ char* ghd_wchar_to_utf8(LPCWSTR wstr);
 // Windows blocks the Explorer thread until this is called — always invoke it
 // after OnFetchPlaceholders returns, even when placeholders were already created
 // out-of-band via CfCreatePlaceholders.
-// Uses CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION to
-// mark the directory as fully populated (#157: FLAG_NONE caused infinite loop).
+// Uses CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE to preserve CF directory state
+// (#158: DISABLE_ON_DEMAND_POPULATION broke bidirectional sync).
+// Anti-loop dedup is handled in ghdOnFetchPlaceholders (provider.go) via a 30s cooldown.
 // completionStatus: S_OK (0) on success, E_FAIL on error.
 // Returns HRESULT.
 HRESULT ghd_cf_ack_placeholders(uintptr_t callbackInfoPtr, HRESULT completionStatus);
