@@ -7,9 +7,11 @@ import (
 	"path"
 	"path/filepath"
 	gosync "sync"
+	"strings"
 	"time"
 
 	"github.com/CCoupel/GhostDrive/internal/config"
+	"github.com/CCoupel/GhostDrive/internal/logger"
 	"github.com/CCoupel/GhostDrive/internal/types"
 	"github.com/CCoupel/GhostDrive/plugins"
 )
@@ -503,7 +505,15 @@ func (e *Engine) handleLocalEvent(ctx context.Context, evt plugins.FileEvent) er
 	// #136 — wire state updater.
 	dispatcher.SetStateUpdater(e.makeStateUpdater())
 
-	remotePath := path.Join(e.remotePath, evt.Path)
+	// #153 — convert evt.Path to forward-slash before path.Join.
+	// fsnotify on Windows returns paths with OS-native separators (backslashes).
+	// path.Join (from "path" package) does NOT normalise backslashes; a path like
+	// "subdir\file.txt" is treated as a single filename component, producing
+	// "/remote/subdir\file.txt" instead of "/remote/subdir/file.txt".
+	// This causes backend operations (Delete, Rename, Upload) to target the wrong
+	// remote path → 404 errors → remote file preserved → file revives on next sync.
+	remoteRelPath := filepath.ToSlash(evt.Path)
+	remotePath := path.Join(e.remotePath, remoteRelPath)
 
 	switch evt.Type {
 	case plugins.FileEventCreated, plugins.FileEventModified:
@@ -529,6 +539,8 @@ func (e *Engine) handleLocalEvent(ctx context.Context, evt plugins.FileEvent) er
 			break // incomplete pair — ignore
 		}
 		srcLocalPath := filepath.Join(e.localDir, evt.OldPath)
+		// #153 — same forward-slash normalisation for the source remote path.
+		srcRemoteRelPath := filepath.ToSlash(evt.OldPath)
 		// Transfer state from old path to new (P→S on success via stateUpdater).
 		oldState := e.GetFileState(srcLocalPath)
 		e.fileStates.Delete(srcLocalPath)
@@ -545,7 +557,7 @@ func (e *Engine) handleLocalEvent(ctx context.Context, evt plugins.FileEvent) er
 			LocalPath:     localPath,
 			RemotePath:    remotePath,
 			SrcLocalPath:  srcLocalPath,
-			SrcRemotePath: path.Join(e.remotePath, evt.OldPath),
+			SrcRemotePath: path.Join(e.remotePath, srcRemoteRelPath),
 		}})
 	}
 	return nil
@@ -563,7 +575,13 @@ func (e *Engine) handleRemoteEvent(ctx context.Context, evt plugins.FileEvent) e
 	// #136 — wire state updater.
 	dispatcher.SetStateUpdater(e.makeStateUpdater())
 
-	localPath := filepath.Join(e.localDir, evt.Path)
+	// #155 — normalise evt.Path from the remote Watch() before building the local path.
+	// Remote backends may return paths with a leading "/" (e.g. "/file.txt"); on
+	// Windows, filepath.Join("C:\\GhostDrive\\Backend", "/file.txt") = "C:\file.txt"
+	// (the absolute path from the remote wins, stripping the sync-root prefix).
+	// Strip leading slashes/backslashes and convert to OS-native separators first.
+	relPath := strings.TrimLeft(filepath.FromSlash(evt.Path), "/\\")
+	localPath := filepath.Join(e.localDir, relPath)
 
 	switch evt.Type {
 	case plugins.FileEventCreated, plugins.FileEventModified:
@@ -573,7 +591,7 @@ func (e *Engine) handleRemoteEvent(ctx context.Context, evt plugins.FileEvent) e
 		return dispatcher.Dispatch(ctx, []SyncAction{{
 			Type:       ActionDownload,
 			LocalPath:  localPath,
-			RemotePath: path.Join(e.remotePath, evt.Path),
+			RemotePath: path.Join(e.remotePath, filepath.ToSlash(relPath)),
 		}})
 
 	case plugins.FileEventDeleted:
@@ -585,13 +603,16 @@ func (e *Engine) handleRemoteEvent(ctx context.Context, evt plugins.FileEvent) e
 		// dispatch a second ActionDelete to the already-gone remote file.
 		e.suppressLocalEvent(localPath)
 		if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
+			logger.Error("handleRemoteEvent: remove local %s: %v", localPath, err)
 			return fmt.Errorf("sync: handleRemoteEvent: remove local %s: %w", localPath, err)
 		}
+		logger.Info("handleRemoteEvent: removed local %s (remote deleted)", localPath)
 		e.fileStates.Delete(localPath)
-		// Notify Explorer to refresh the parent directory (#150 bug 3).
+		// #154 — notify Explorer to refresh the parent directory.
+		// Pass localPath (file) so NotifyLocalChange computes filepath.Dir internally.
 		if cfMgr != nil && backendID != "" {
 			if lr, ok := cfMgr.(LocalRefresher); ok {
-				lr.NotifyLocalChange(filepath.Dir(localPath))
+				lr.NotifyLocalChange(localPath)
 			}
 		}
 
@@ -602,12 +623,15 @@ func (e *Engine) handleRemoteEvent(ctx context.Context, evt plugins.FileEvent) e
 		if evt.OldPath == "" {
 			break // incomplete event — no old path, nothing to rename
 		}
-		oldLocalPath := filepath.Join(e.localDir, evt.OldPath)
+		// #155 — same leading-slash normalisation for the source path.
+		oldRelPath := strings.TrimLeft(filepath.FromSlash(evt.OldPath), "/\\")
+		oldLocalPath := filepath.Join(e.localDir, oldRelPath)
 		// #150 — suppress before touching the filesystem.
 		e.suppressLocalEvent(oldLocalPath)
 		e.suppressLocalEvent(localPath)
 		if err := os.Rename(oldLocalPath, localPath); err != nil {
 			if !os.IsNotExist(err) {
+				logger.Error("handleRemoteEvent: rename local %s → %s: %v", oldLocalPath, localPath, err)
 				return fmt.Errorf("sync: handleRemoteEvent: rename local %s → %s: %w", oldLocalPath, localPath, err)
 			}
 			// Old local file not found (not yet synced locally, or already gone).
@@ -617,16 +641,18 @@ func (e *Engine) handleRemoteEvent(ctx context.Context, evt plugins.FileEvent) e
 			return dispatcher.Dispatch(ctx, []SyncAction{{
 				Type:       ActionDownload,
 				LocalPath:  localPath,
-				RemotePath: path.Join(e.remotePath, evt.Path),
+				RemotePath: path.Join(e.remotePath, filepath.ToSlash(relPath)),
 			}})
 		}
+		logger.Info("handleRemoteEvent: renamed local %s → %s (remote renamed)", oldLocalPath, localPath)
 		// Rename succeeded — clean up state for old path and mark new path synced.
 		e.fileStates.Delete(oldLocalPath)
 		e.makeStateUpdater()(localPath, types.FileStateSynced)
-		// #150 — notify Explorer after local rename.
+		// #154 — notify Explorer after local rename.
+		// Pass localPath (file) so NotifyLocalChange computes filepath.Dir internally.
 		if cfMgr != nil && backendID != "" {
 			if lr, ok := cfMgr.(LocalRefresher); ok {
-				lr.NotifyLocalChange(filepath.Dir(localPath))
+				lr.NotifyLocalChange(localPath)
 			}
 		}
 	}
