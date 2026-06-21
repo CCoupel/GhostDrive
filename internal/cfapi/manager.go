@@ -39,6 +39,16 @@ type providerEntry struct {
 	cancelFunc context.CancelFunc // cancels any in-flight OnFetchPlaceholders goroutine
 }
 
+// CompletionCallbacks holds optional sync-engine callbacks for CF completion events.
+// OnDeleteCompletion is called when Windows reports a successful local delete via CF API.
+// OnRenameCompletion is called when Windows reports a successful local rename via CF API.
+// Both are set by app.go after the sync engine starts, so the CF provider can propagate
+// remote CF operations (delete, rename) back to the backend (#v2.2-bugD).
+type CompletionCallbacks struct {
+	OnDeleteCompletion func(localPath string)
+	OnRenameCompletion func(oldPath, newPath string)
+}
+
 // PinIntent represents a deferred pin/unpin request for a file that is currently
 // being transferred.  Stored in CFManager.intentions until the transfer completes (#143).
 type PinIntent struct {
@@ -151,6 +161,20 @@ func (m *CFManager) Start(bc BackendEntry, backend plugins.StorageBackend, ch ca
 		cancelFunc: cancel,
 	}
 	return nil
+}
+
+// SetCompletionCallbacks injects delete and rename completion handlers for the given backend.
+// These handlers are invoked when Windows CF API fires NOTIFY_DELETE_COMPLETION or
+// NOTIFY_RENAME_COMPLETION — i.e. when an operation on GhD: (the CF sync root) completes.
+// Must be called after Start(backendID) and before user interactions (#v2.2-bugD).
+func (m *CFManager) SetCompletionCallbacks(backendID string, cbs CompletionCallbacks) {
+	m.mu.RLock()
+	e, ok := m.entries[backendID]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	e.provider.SetCompletionCallbacks(cbs.OnDeleteCompletion, cbs.OnRenameCompletion)
 }
 
 // Stop disconnects and deregisters the CF sync root for a backend.
