@@ -1253,6 +1253,18 @@ func (a *App) StartSync(backendID string) error {
 			a.pinFileInternal,
 		)
 	}
+	// v2.2 — Wire CF completion callbacks so Delete/Rename on GhD: propagate to backend (#v2.2-bugD).
+	if a.cfManager != nil {
+		eng := engine // capture for closures
+		a.cfManager.SetCompletionCallbacks(backendID, cfapi.CompletionCallbacks{
+			OnDeleteCompletion: func(localPath string) {
+				eng.HandleCFDelete(localPath)
+			},
+			OnRenameCompletion: func(oldPath, newPath string) {
+				eng.HandleCFRename(oldPath, newPath)
+			},
+		})
+	}
 	a.engines[backendID] = engine
 	a.mu.Unlock() // release before Start to avoid holding lock during I/O
 	return engine.Start(a.ctx)
