@@ -3,7 +3,7 @@
 package cfapi
 
 // #cgo CFLAGS: -I. -I${SRCDIR}/include
-// #cgo LDFLAGS: -lcldapi -lruntimeobject -lshell32
+// #cgo LDFLAGS: -lcldapi -lruntimeobject -lshell32 -lole32
 // #include "cgo_cfapi_windows.h"
 // #include <stdlib.h>
 import "C"
