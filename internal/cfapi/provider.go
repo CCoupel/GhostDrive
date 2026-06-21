@@ -262,48 +262,43 @@ func (p *SyncProvider) createPlaceholdersWithFlags(baseDir string, items []Place
 		if hr != 0 {
 			switch uint32(hr) {
 			case hrAlreadyExists:
-				// The local entry (file or directory) exists as an ordinary NTFS
-				// entry — never registered as a CF placeholder.  Without conversion:
-				//   · Directories: OS never calls FETCH_PLACEHOLDERS → remote content
-				//     stays invisible.
-				//   · Files: no CF attributes → no badge (not ☁️ nor ✓✓).
+				// #159 — FILES: do NOT call CfConvertToPlaceholder.
 				//
-				// Two helpers are used to set different CF_CONVERT_FLAGS:
-				//   · Files → ghd_convert_to_placeholder: CF_CONVERT_FLAG_MARK_IN_SYNC
-				//       → badge ✓✓ (locally present + in sync). MARK_IN_SYNC on files
-				//       is correct: the local copy IS the definitive version.
-				//       MARK_IN_SYNC is idempotent — succeeds if already a placeholder.
-				//   · Directories → ghd_convert_dir_to_placeholder:
-				//       CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION (no MARK_IN_SYNC)
-				//       → "partial" population state → OS calls FETCH_PLACEHOLDERS on
-				//       every open, merging remote content. Using MARK_IN_SYNC on
-				//       directories marks them as "fully populated" and the OS stops
-				//       calling FETCH_PLACEHOLDERS after a restart (regression).
-				//       ENABLE_ON_DEMAND_POPULATION is NOT idempotent: calling it on a
-				//       directory that is already a CF placeholder returns 0x8007017c
-				//       (ERROR_CLOUD_FILE_INVALID_REQUEST). This is expected on the 2nd+
-				//       FETCH_PLACEHOLDERS pass and must be treated as a no-op (#156).
-				fullPath := filepath.Join(baseDir, item.RelativePath)
-				wFull := C.ghd_utf8_to_wchar(C.CString(fullPath))
-				var xhr C.HRESULT
+				// When CfCreatePlaceholders returns hrAlreadyExists for a file, the
+				// file already exists in the directory.  In the vast majority of cases
+				// it is already a CF placeholder (created on a prior FETCH_PLACEHOLDERS
+				// pass or by ActionDownload immediately after os.Rename).
+				// Calling CfConvertToPlaceholder on an existing CF placeholder rewrites
+				// the file's Extended Attributes and may corrupt the parent directory's
+				// CF index → ERROR_INVALID_REPARSE_DATA (0x80070781) on subsequent CF
+				// operations in that directory (#159).
+				// Non-placeholder NTFS files that incidentally appear in the sync root
+				// are handled by the sync engine (Watch() → ActionUpload) without CF
+				// state modifications.
+				//
+				// DIRECTORIES: still convert to CF placeholder to activate
+				// CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION, so Explorer fires
+				// FETCH_PLACEHOLDERS on first open of each subdirectory.
+				// ENABLE_ON_DEMAND_POPULATION is NOT idempotent: calling it on a
+				// directory already converted returns 0x8007017c — treated as no-op (#156).
 				if item.IsDirectory {
-					xhr = C.ghd_convert_dir_to_placeholder(wFull)
-				} else {
-					xhr = C.ghd_convert_to_placeholder(wFull)
-				}
-				if xhr != 0 {
-					xhrCode := uint32(xhr)
-					if item.IsDirectory && xhrCode == hrAlreadyPlaceholder {
-						// #156 — directory is already a CF placeholder with on-demand
-						// population.  ENABLE_ON_DEMAND_POPULATION is not idempotent;
-						// this error is expected on every FETCH_PLACEHOLDERS pass after
-						// the initial conversion.  Treat as success — no log spam.
-					} else {
-						log.Printf("cfapi: CfConvertToPlaceholder %s isDir=%v: HRESULT 0x%08x",
-							fullPath, item.IsDirectory, xhrCode)
+					fullPath := filepath.Join(baseDir, item.RelativePath)
+					wFull := C.ghd_utf8_to_wchar(C.CString(fullPath))
+					xhr := C.ghd_convert_dir_to_placeholder(wFull)
+					C.ghd_free_wchar(wFull)
+					if xhr != 0 {
+						xhrCode := uint32(xhr)
+						if xhrCode == hrAlreadyPlaceholder {
+							// #156 — directory is already a CF placeholder with on-demand
+							// population.  ENABLE_ON_DEMAND_POPULATION is not idempotent;
+							// this error is expected on every FETCH_PLACEHOLDERS pass after
+							// the initial conversion.  Treat as success — no log spam.
+						} else {
+							log.Printf("cfapi: CfConvertToPlaceholder %s isDir=true: HRESULT 0x%08x",
+								fullPath, xhrCode)
+						}
 					}
 				}
-				C.ghd_free_wchar(wFull)
 				total++
 			case hrUserMappedFile:
 				// File has an open memory-mapped section (FETCH_DATA in progress).
