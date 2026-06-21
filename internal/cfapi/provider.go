@@ -49,6 +49,12 @@ type SyncProvider struct {
 	// acked immediately without calling backend.List() or CfCreatePlaceholders.
 	// Type: map[string]time.Time (sync.Map for concurrent CGO callback safety).
 	populatedDirs sync.Map
+
+	// fetchMu provides per-directory mutual exclusion for concurrent FETCH_PLACEHOLDERS
+	// callbacks. Windows may fire multiple simultaneous callbacks for the same directory
+	// before the first one completes and records the cooldown timestamp (#v2.2-bugA).
+	// Type: map[string]*sync.Mutex (sync.Map for CGO callback safety).
+	fetchMu sync.Map
 }
 
 // NewSyncProvider creates a SyncProvider for the given local path.
@@ -110,6 +116,16 @@ func (p *SyncProvider) Connect(cbs CFCallbacks) error {
 	providerMu.Unlock()
 
 	return nil
+}
+
+// SetCompletionCallbacks injects delete and rename completion handlers after Connect.
+// Safe to call after Connect and before or after CF callbacks start firing.
+// Existing callbacks (OnFetchData, OnFetchPlaceholders, OnCancelFetch) are preserved.
+func (p *SyncProvider) SetCompletionCallbacks(onDelete func(localPath string), onRename func(oldPath, newPath string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.callbacks.OnDeleteCompletion = onDelete
+	p.callbacks.OnRenameCompletion = onRename
 }
 
 // Disconnect calls CfDisconnectSyncRoot.
@@ -575,7 +591,7 @@ func ghdOnFetchPlaceholders(callbackInfoPtr uintptr, _ uintptr) {
 	localPath := resolveNormalizedPath(info, p.localPath)
 	log.Printf("cfapi: FETCH_PLACEHOLDERS: localPath=%q", localPath)
 
-	// #158 — Cooldown deduplication.
+	// #158 / #v2.2-bugA — Cooldown deduplication with per-directory mutex.
 	//
 	// Windows (Explorer, indexer, antivirus) fires FETCH_PLACEHOLDERS on every
 	// directory access.  With FLAG_NONE in ghd_cf_ack_placeholders the directory
@@ -585,10 +601,20 @@ func ghdOnFetchPlaceholders(callbackInfoPtr uintptr, _ uintptr) {
 	// that modified the directory's CF reparse point and broke bidirectional sync
 	// (#158 regression: LOCAL→GhD: and GhD:→LOCAL both dead).
 	//
-	// Revised approach: use FLAG_NONE in the C ack (no reparse point change) and
-	// deduplicate here in Go.  First call per directory path runs OnFetchPlaceholders
-	// normally and records the timestamp.  Subsequent calls within fetchPlaceholdersCooldown
-	// are acked immediately without invoking backend.List() or CfCreatePlaceholders.
+	// Revised approach (#158): use FLAG_NONE in the C ack (no reparse point change)
+	// and deduplicate with a cooldown guard in Go.
+	//
+	// #v2.2-bugA race: Windows may fire multiple simultaneous callbacks for the same
+	// directory before the first one completes.  Multiple goroutines passed the cooldown
+	// check simultaneously (all seeing cache-miss before any stored the timestamp),
+	// causing concurrent backend.List() calls and repeated "0s ago" cooldown log entries.
+	// Fix: a per-directory mutex (fetchMu) ensures only one goroutine executes
+	// OnFetchPlaceholders at a time; concurrent goroutines block then hit the cooldown.
+	dirMuVal, _ := p.fetchMu.LoadOrStore(localPath, &sync.Mutex{})
+	dirMu := dirMuVal.(*sync.Mutex)
+	dirMu.Lock()
+	defer dirMu.Unlock()
+
 	now := time.Now()
 	if last, hit := p.populatedDirs.Load(localPath); hit {
 		if now.Sub(last.(time.Time)) < fetchPlaceholdersCooldown {

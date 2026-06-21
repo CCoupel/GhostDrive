@@ -23,14 +23,15 @@ func NewSyncProvider(localPath, providerID, displayName string) *SyncProvider {
 	}
 }
 
-func (p *SyncProvider) Register() error                                              { return nil }
-func (p *SyncProvider) Deregister() error                                            { return nil }
-func (p *SyncProvider) Connect(_ CFCallbacks) error                                  { return nil }
-func (p *SyncProvider) Disconnect() error                                            { return nil }
-func (p *SyncProvider) CreatePlaceholders(_ string, _ []PlaceholderInfo) (int, error) { return 0, nil }
-func (p *SyncProvider) UpdatePlaceholder(_ string, _ PlaceholderInfo) error          { return nil }
-func (p *SyncProvider) ConvertToPlaceholder(_ string) error                          { return nil }
-func (p *SyncProvider) SetSyncState(_ string, _ SyncState) error                     { return nil }
-func (p *SyncProvider) ExecuteTransfer(_ FetchRequest, _ []byte, _ bool) error       { return nil }
-func (p *SyncProvider) ReportError(_ FetchRequest, _ error) error                    { return nil }
-func (p *SyncProvider) ReportProgress(_ FetchRequest, _, _ int64) error              { return nil }
+func (p *SyncProvider) Register() error                                                              { return nil }
+func (p *SyncProvider) Deregister() error                                                            { return nil }
+func (p *SyncProvider) Connect(_ CFCallbacks) error                                                  { return nil }
+func (p *SyncProvider) Disconnect() error                                                            { return nil }
+func (p *SyncProvider) CreatePlaceholders(_ string, _ []PlaceholderInfo) (int, error)               { return 0, nil }
+func (p *SyncProvider) UpdatePlaceholder(_ string, _ PlaceholderInfo) error                         { return nil }
+func (p *SyncProvider) ConvertToPlaceholder(_ string) error                                         { return nil }
+func (p *SyncProvider) SetSyncState(_ string, _ SyncState) error                                    { return nil }
+func (p *SyncProvider) ExecuteTransfer(_ FetchRequest, _ []byte, _ bool) error                      { return nil }
+func (p *SyncProvider) ReportError(_ FetchRequest, _ error) error                                   { return nil }
+func (p *SyncProvider) ReportProgress(_ FetchRequest, _, _ int64) error                             { return nil }
+func (p *SyncProvider) SetCompletionCallbacks(_ func(string), _ func(string, string)) {}            // no-op on non-Windows
