@@ -267,6 +267,100 @@ func (e *Engine) ForceSync(ctx context.Context) error {
 	return e.runFullSync(ctx)
 }
 
+// HandleCFDelete propagates a CF API NOTIFY_DELETE_COMPLETION event to the backend.
+// Called when Windows reports that a delete operation on the CF sync root completed
+// (i.e. user deleted a file in GhD: via Explorer). The delete is forwarded to the
+// remote backend so both sides stay consistent (#v2.2-bugD).
+func (e *Engine) HandleCFDelete(localPath string) {
+	e.mu.RLock()
+	ctx := context.Background()
+	if e.cancelFunc == nil {
+		e.mu.RUnlock()
+		return // engine not running
+	}
+	e.mu.RUnlock()
+
+	// Build the remote path by stripping the local sync root prefix.
+	relPath := filepath.ToSlash(strings.TrimPrefix(localPath, e.localDir))
+	if relPath == "" || relPath == "/" {
+		return // do not delete the root
+	}
+	remotePath := path.Join(e.remotePath, relPath)
+
+	// Skip if not synced — file may have been local-only (never uploaded).
+	if e.GetFileState(localPath) == types.FileStateLocal {
+		e.fileStates.Delete(localPath)
+		return
+	}
+
+	dispatcher := NewDispatcher(e.backend, e.emitter, e.localDir)
+	e.mu.RLock()
+	cfMgr := e.cfManager
+	backendID := e.backendID
+	e.mu.RUnlock()
+	if cfMgr != nil && backendID != "" {
+		dispatcher.SetCFManager(backendID, cfMgr)
+	}
+	dispatcher.SetStateUpdater(e.makeStateUpdater())
+
+	logger.Info("engine: HandleCFDelete %s → remote %s", localPath, remotePath)
+	if err := dispatcher.Dispatch(ctx, []SyncAction{{
+		Type:       ActionDelete,
+		LocalPath:  localPath,
+		RemotePath: remotePath,
+	}}); err != nil {
+		e.recordError(localPath, "CF delete: "+err.Error())
+	}
+}
+
+// HandleCFRename propagates a CF API NOTIFY_RENAME_COMPLETION event to the backend.
+// Called when Windows reports a rename/move on the CF sync root completed (#v2.2-bugD).
+func (e *Engine) HandleCFRename(oldLocalPath, newLocalPath string) {
+	e.mu.RLock()
+	if e.cancelFunc == nil {
+		e.mu.RUnlock()
+		return // engine not running
+	}
+	e.mu.RUnlock()
+
+	oldRelPath := filepath.ToSlash(strings.TrimPrefix(oldLocalPath, e.localDir))
+	newRelPath := filepath.ToSlash(strings.TrimPrefix(newLocalPath, e.localDir))
+	if oldRelPath == "" || newRelPath == "" {
+		return
+	}
+	oldRemotePath := path.Join(e.remotePath, oldRelPath)
+	newRemotePath := path.Join(e.remotePath, newRelPath)
+
+	dispatcher := NewDispatcher(e.backend, e.emitter, e.localDir)
+	e.mu.RLock()
+	cfMgr := e.cfManager
+	backendID := e.backendID
+	e.mu.RUnlock()
+	if cfMgr != nil && backendID != "" {
+		dispatcher.SetCFManager(backendID, cfMgr)
+	}
+	dispatcher.SetStateUpdater(e.makeStateUpdater())
+
+	// Transfer state from old path to new before dispatch.
+	oldState := e.GetFileState(oldLocalPath)
+	e.fileStates.Delete(oldLocalPath)
+	if oldState != types.FileStateLocal {
+		e.SetFileState(newLocalPath, oldState)
+	}
+
+	logger.Info("engine: HandleCFRename %s → %s (remote %s → %s)",
+		oldLocalPath, newLocalPath, oldRemotePath, newRemotePath)
+	if err := dispatcher.Dispatch(context.Background(), []SyncAction{{
+		Type:          ActionRename,
+		LocalPath:     newLocalPath,
+		RemotePath:    newRemotePath,
+		SrcLocalPath:  oldLocalPath,
+		SrcRemotePath: oldRemotePath,
+	}}); err != nil {
+		e.recordError(newLocalPath, "CF rename: "+err.Error())
+	}
+}
+
 // UploadFile dispatches an ActionUpload for a single local file and waits for
 // completion. This is used by PinFile (#142) to upload a specific file before
 // dehydrating it, avoiding the full-reconciliation side-effects of ForceSync.
