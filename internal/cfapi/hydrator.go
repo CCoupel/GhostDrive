@@ -315,12 +315,27 @@ func (h *Hydrator) localToRemote(localPath string) string {
 		return localPath
 	}
 	root := h.provider.localPath
-	// Guard: ensure the path is actually inside the sync root (MINEUR-4).
-	if !strings.HasPrefix(localPath, root) {
+
+	// #v2.2-bugC — normalise both paths to forward-slash before comparison.
+	// CF API may return NormalizedPath with mixed or uppercase drive letter
+	// (e.g. "C:\GhostDrive\MFS\file.txt") while the sync root was registered
+	// with a different casing.  strings.HasPrefix is case-sensitive on all
+	// platforms, so a casing mismatch silently bypasses the strip and returns
+	// the raw Windows absolute path as a "remote" path, causing ReadAt to fail
+	// and FETCH_DATA to transfer 0 bytes.
+	// Fix: normalise both paths to lowercase + forward-slash before matching,
+	// then strip using the original (pre-normalised) localPath byte count.
+	normLocal := strings.ToLower(strings.ReplaceAll(localPath, "\\", "/"))
+	normRoot := strings.ToLower(strings.ReplaceAll(root, "\\", "/"))
+	// Ensure root ends without trailing slash for consistent prefix matching.
+	normRoot = strings.TrimRight(normRoot, "/")
+
+	if !strings.HasPrefix(normLocal, normRoot) {
 		log.Printf("cfapi: localToRemote: path %q is outside sync root %q — returning as-is", localPath, root)
 		return localPath
 	}
-	rel := strings.TrimPrefix(localPath, root)
+	// Strip using the original localPath (preserves original casing for remote path).
+	rel := localPath[len(root):]
 	if rel == "" {
 		rel = "/"
 	}
