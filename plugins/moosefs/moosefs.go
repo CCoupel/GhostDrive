@@ -653,6 +653,18 @@ func (b *Backend) Download(ctx context.Context, remote, local string, progress p
 			break // EOF signalled by mfsclient
 		}
 
+		// MooseFS zero-pads CS reads within a chunk boundary (see the primary
+		// EOF guard comment above): the last block of a file whose size is not
+		// a multiple of chunkSize therefore arrives padded to a full chunkSize.
+		// Truncate it to the file's real remaining length so the cache file
+		// never grows past the size Stat()/Getattr announces — with the strict
+		// size-equality cache-freshness check (#160 CA12), an unpruned pad
+		// meant the local file could never match the remote size and every
+		// Open() triggered a full redownload, defeating the fix.
+		if remaining := totalSize - int64(offset); remaining >= 0 && int64(len(chunk)) > remaining {
+			chunk = chunk[:remaining]
+		}
+
 		if _, writeErr := out.Write(chunk); writeErr != nil {
 			return fmt.Errorf("moosefs: download %s: write local: %w", remote, writeErr)
 		}
