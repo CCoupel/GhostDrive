@@ -165,7 +165,7 @@ func (s *fakeCSServer) serveRead(conn net.Conn, payload []byte) {
 		return
 	}
 	chunkID, off, _ := ReadUint64(payload, 0)
-	_, off, _ = ReadUint32(payload, off)  // version (not validated in fake)
+	_, off, _ = ReadUint32(payload, off) // version (not validated in fake)
 	offset, off, _ := ReadUint32(payload, off)
 	size, _, _ := ReadUint32(payload, off)
 
@@ -245,7 +245,7 @@ func (s *fakeCSServer) serveWrite(conn net.Conn, payload []byte) {
 			blockNum, off, _ := ReadUint16(data, off) // blockNum at offset 12
 			blockOff, off, _ := ReadUint16(data, off) // blockOff at offset 14
 			size, off, _ := ReadUint32(data, off)     // size at offset 16
-			off += 4                                   // skip CRC at offset 20
+			off += 4                                  // skip CRC at offset 20
 			if off+int(size) > len(data) {
 				return
 			}
@@ -467,8 +467,8 @@ func (s *badCRCServer) handle(conn net.Conn) {
 	// Send CSTOCL_READ_DATA with bad CRC.
 	var resp []byte
 	resp = PutUint64(resp, chunkID)
-	resp = PutUint16(resp, 0)               // blocknum
-	resp = PutUint16(resp, 0)               // blockOffset
+	resp = PutUint16(resp, 0) // blocknum
+	resp = PutUint16(resp, 0) // blockOffset
 	resp = PutUint32(resp, uint32(len(block)))
 	resp = PutUint32(resp, badCRC)
 	resp = append(resp, block...)
@@ -573,7 +573,7 @@ func TestWriteChunk_withChain(t *testing.T) {
 	// Intercept the init frame by wrapping the connection in a recorder.
 	// Instead, we verify indirectly: the fake CS parses chunkId at offset 1
 	// (protocolid byte), so a successful round-trip proves the layout is correct.
-	const chainIP = uint32(0xC0A802DC)  // 192.168.2.220
+	const chainIP = uint32(0xC0A802DC) // 192.168.2.220
 	const chainPort = uint16(9423)
 	chain := []ChunkServer{{IP: chainIP, Port: chainPort}}
 	err = WriteChunk(conn, chunkID, 1, 0, payload, chain)
@@ -602,7 +602,6 @@ func TestWriteChunk_earlyCANTCONNECT(t *testing.T) {
 	assert.Contains(t, err.Error(), "CANTCONNECT",
 		"error must identify CANTCONNECT status")
 }
-
 
 // TestWriteChunk_chainEOF verifies that WriteChunk returns a diagnostic error
 // when the CS closes the connection during the write-init ACK phase without
@@ -1157,4 +1156,742 @@ func TestRead_PoolReuse(t *testing.T) {
 	// Total CS connections after 1 Write + 5 Reads must be exactly 1.
 	assert.Equal(t, int64(1), srv.cs.connCount.Load(),
 		"pool must reuse a single CS connection across Write + 5 sequential Reads")
+}
+
+// ── Bugfix #160 — ReadChunk NOP handling ──────────────────────────────────────
+//
+// Root cause (see docs/diagrams/moosefs-ec4-read-statemachine.md and
+// _work/reports/plan-20260812-102022.md, D1): ReadChunk's frame switch has no
+// branch for ANTOAN_NOP (cmd=0), so a legitimate keepalive sent by a live CS
+// mid-read falls into `default:` and aborts the read.  The three other
+// protocol loops in this package (client.go:101, csclient.go write-init ACK,
+// csclient.go write-status reader) already skip cmd=0; TestWriteChunk_NOPskip
+// covers the write path.  The tests below are the read-path counterpart.
+
+// TestReadChunk_NOPskip verifies that ReadChunk silently skips ANTOAN_NOP
+// (cmd=0) keepalive frames interleaved between CSTOCL_READ_DATA frames, and
+// still returns the complete, correct chunk data (CA1).
+func TestReadChunk_NOPskip(t *testing.T) {
+	const chunkID = uint64(11011)
+	content := []byte("nop-skip-read-test-data")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		cmd, payload, readErr := ReadFrame(conn)
+		if readErr != nil || cmd != CltocsFuseRead || len(payload) < 20 {
+			return
+		}
+		gotChunkID, _, _ := ReadUint64(payload, 0)
+
+		// NOP keepalive BEFORE the first READ_DATA frame.
+		_ = WriteFrame(conn, ANTOAN_NOP, nil)
+
+		// Real READ_DATA frame.
+		checksum := crc32.ChecksumIEEE(content)
+		var dataResp []byte
+		dataResp = PutUint64(dataResp, gotChunkID)
+		dataResp = PutUint16(dataResp, 0) // blocknum
+		dataResp = PutUint16(dataResp, 0) // blockOffset
+		dataResp = PutUint32(dataResp, uint32(len(content)))
+		dataResp = PutUint32(dataResp, checksum)
+		dataResp = append(dataResp, content...)
+		if writeErr := WriteFrame(conn, CstoclFuseReadData, dataResp); writeErr != nil {
+			return
+		}
+
+		// NOP keepalives AFTER READ_DATA, BEFORE READ_STATUS.
+		_ = WriteFrame(conn, ANTOAN_NOP, nil)
+		_ = WriteFrame(conn, ANTOAN_NOP, nil)
+
+		// Real READ_STATUS frame.
+		var statusResp []byte
+		statusResp = PutUint64(statusResp, gotChunkID)
+		statusResp = PutUint8(statusResp, StatusOK)
+		_ = WriteFrame(conn, CstoclFuseReadStatus, statusResp)
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	ip := binary.BigEndian.Uint32(addr.IP.To4())
+	port := uint16(addr.Port)
+
+	conn, err := DialCS(ip, port)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	got, err := ReadChunk(conn, chunkID, 1, 0, uint32(len(content)))
+	require.NoError(t, err, "ReadChunk must succeed even when the CS sends NOP keepalives interleaved with READ_DATA/READ_STATUS")
+	assert.Equal(t, content, got, "returned data must be intact — NOP frames must not corrupt or truncate it")
+
+	<-done
+}
+
+// TestReadChunk_NOPBadLength verifies that ReadChunk treats an ANTOAN_NOP
+// frame carrying a non-zero payload length as a protocol error rather than
+// silently skipping it. A legitimate keepalive always has length 0
+// (protocol.go: ANTOAN_NOP payload is empty); a non-empty NOP means the
+// client and CS have desynchronised on the frame stream. Conformance target:
+// the official MooseFS client (readdata.c:1682-1691) treats this exact case
+// as fatal ("got wrong sized nop packet from chunkserver"), not as a skip
+// (CA2, plan révision 2 task 20).
+func TestReadChunk_NOPBadLength(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, readErr := ReadFrame(conn); readErr != nil {
+			return
+		}
+		// A malformed NOP: cmd=0 but with a non-empty payload — real
+		// ANTOAN_NOP keepalives always carry zero bytes.
+		_ = WriteFrame(conn, ANTOAN_NOP, []byte{0xAA, 0xBB, 0xCC})
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+
+	addr := ln.Addr().(*net.TCPAddr)
+	ip := binary.BigEndian.Uint32(addr.IP.To4())
+	port := uint16(addr.Port)
+
+	conn, err := DialCS(ip, port)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = ReadChunk(conn, 42, 1, 0, 64)
+	require.Error(t, err, "a NOP frame with a non-zero payload length must be a protocol error, not a silently skipped keepalive")
+}
+
+// TestReadChunk_NOPFlood verifies that a chunk server which only ever sends
+// ANTOAN_NOP keepalives (never READ_DATA nor READ_STATUS) cannot make
+// ReadChunk block forever: the anti-flood guard must return a bounded error
+// (CA3). A server-controlled, unbounded frame is a denial-of-service vector if
+// the client loop has no cap.
+//
+// Safety note: the assertion runs through a goroutine + select/timeout rather
+// than calling ReadChunk synchronously, so this test fails loudly (instead of
+// hanging the whole `go test` run) if the anti-flood guard is missing.
+func TestReadChunk_NOPFlood(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, readErr := ReadFrame(conn); readErr != nil {
+			return
+		}
+		// Flood NOPs until the client disconnects (write fails).
+		for {
+			if writeErr := WriteFrame(conn, ANTOAN_NOP, nil); writeErr != nil {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-serverDone
+	})
+
+	addr := ln.Addr().(*net.TCPAddr)
+	ip := binary.BigEndian.Uint32(addr.IP.To4())
+	port := uint16(addr.Port)
+
+	conn, err := DialCS(ip, port)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, readErr := ReadChunk(conn, 42, 1, 0, 64)
+		resultCh <- readErr
+	}()
+
+	select {
+	case readErr := <-resultCh:
+		require.Error(t, readErr, "a CS that only sends NOP keepalives must eventually produce a bounded error, not succeed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadChunk did not return within 5s against a NOP-flooding CS — anti-flood guard missing or unbounded (CA2)")
+	}
+}
+
+// TestReadChunk_UnknownCmd verifies that a genuinely unknown opcode (neither
+// ANTOAN_NOP=0, CSTOCL_READ_STATUS=201, nor CSTOCL_READ_DATA=202) remains a
+// fatal, non-retryable protocol error — distinct from the now-legitimate NOP
+// case (CA3).
+func TestReadChunk_UnknownCmd(t *testing.T) {
+	const unknownCmd = uint32(9999) // not 0, 201, or 202 — see protocol.go opcode tables
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, readErr := ReadFrame(conn); readErr != nil {
+			return
+		}
+		_ = WriteFrame(conn, unknownCmd, []byte("garbage"))
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+
+	addr := ln.Addr().(*net.TCPAddr)
+	ip := binary.BigEndian.Uint32(addr.IP.To4())
+	port := uint16(addr.Port)
+
+	conn, err := DialCS(ip, port)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = ReadChunk(conn, 42, 1, 0, 64)
+	require.Error(t, err, "ReadChunk must fail fatally on a genuinely unknown opcode")
+	assert.False(t, isStaleConnErr(err),
+		"a genuinely unknown opcode must never be classified as a retryable stale-connection error (CA3)")
+}
+
+// ── Bugfix #160 — retry policy (forced fresh dial, bounded backoff, pool age) ─
+//
+// These tests exercise the retry policy through c.readEC4At (defined in
+// ecclient.go), reusing the EC4 test helpers from ecclient_test.go
+// (makeECClient, makeShardBytes, startFourCSServers) — same package, no new
+// imports required. Placed here per the #160 test-writer dispatch (all Phase 4
+// tasks default to this file unless stated otherwise).
+
+// TestRetry_ForcesFreshDial verifies that once the first read attempt fails,
+// every subsequent retry dials a brand-new connection instead of popping
+// another (possibly also stale) connection out of the pool (CA5, D3).
+//
+// Setup: the pool for shard 0's CS is pre-loaded with 2 pre-closed ("stale")
+// connections — fewer than maxIdleCSConns (4), matching the D3 scenario where
+// several stale entries can sit in the pool at once. Before the fix, the
+// retry-once policy called pool.Get() again on the second attempt, which
+// could return the second stale entry and fail outright. After the fix, any
+// attempt beyond the first must bypass the pool entirely.
+func TestRetry_ForcesFreshDial(t *testing.T) {
+	const block = uint32(65536)
+	const logicalID = uint64(0xF125DA1)
+
+	shardData := [4][]byte{
+		makeShardBytes(0, int(block)),
+		makeShardBytes(1, int(block)),
+		makeShardBytes(2, int(block)),
+		makeShardBytes(3, int(block)),
+	}
+	info, servers := startFourCSServers(t, logicalID, shardData)
+	srv0 := info.Servers[0]
+
+	c := makeECClient(t, info)
+
+	// Pre-load the pool with 2 pre-closed connections for shard 0's address.
+	// Both Get() calls must happen BEFORE either Put(): once one closed
+	// connection is back in the pool, a later Get() would simply pop it again
+	// (Get only checks age, not liveness) instead of dialling a genuinely
+	// second connection.
+	stale1, dialErr := c.pool.Get(srv0.IP, srv0.Port)
+	require.NoError(t, dialErr)
+	stale2, dialErr := c.pool.Get(srv0.IP, srv0.Port)
+	require.NoError(t, dialErr)
+	stale1.Close()
+	stale2.Close()
+	c.pool.Put(stale1, srv0.IP, srv0.Port)
+	c.pool.Put(stale2, srv0.IP, srv0.Port)
+
+	// The server increments connCount from its acceptLoop goroutine, which
+	// races with the client-side dial returning — wait for both accepts to
+	// be registered before resetting, otherwise a pending increment from
+	// setup could land after Store(0) and pollute the assertion below.
+	require.Eventually(t, func() bool {
+		return servers[0].connCount.Load() == int64(2)
+	}, 200*time.Millisecond, 5*time.Millisecond,
+		"both stale setup connections must be registered by the server before isolating the count")
+	// Isolate the connection count to what happens from this point on —
+	// the 2 stale dials above already incremented it.
+	servers[0].connCount.Store(0)
+
+	got, err := c.readEC4At(1, info, 0, 0, block)
+	require.NoError(t, err, "retry must dial fresh rather than exhausting the pool's stale entries")
+	assert.Equal(t, shardData[0], got, "data must match shard 0 after the forced fresh dial")
+	assert.Equal(t, int64(1), servers[0].connCount.Load(),
+		"exactly one fresh TCP connection must be dialled for the retry — the 2 stale pool entries must be bypassed, not consumed")
+}
+
+// serveInvalidationMaster serves a minimal fake MooseFS master for
+// TestRetry_InvalidatesChunkLocation: REGISTER + READ_CHUNK (proto=2, a
+// normal non-EC chunk). It answers the Nth READ_CHUNK request for this
+// connection with badAddr for N==1 and goodAddr for every subsequent request,
+// so the test can prove whether the client re-queries the master before
+// retrying rather than reusing the first (dead) location it was handed.
+func serveInvalidationMaster(conn net.Conn, chunkID uint64, fileLen uint64,
+	badIP uint32, badPort uint16, goodIP uint32, goodPort uint16, readChunkCalls *atomic.Int64) {
+	defer conn.Close()
+	for {
+		cmd, payload, err := ReadFrame(conn)
+		if err != nil {
+			return
+		}
+		switch cmd {
+		case CltomFuseRegister:
+			if len(payload) < 4 {
+				return
+			}
+			msgid := binary.BigEndian.Uint32(payload[:4])
+			var resp []byte
+			resp = PutUint32(resp, msgid)
+			resp = PutUint32(resp, 0xABCD1234) // sessionID (fixed — no client-visible meaning here)
+			resp = PutUint32(resp, 0)          // maxopenfiles (unused)
+			_ = WriteFrame(conn, MatoclFuseRegister, resp)
+
+		case CltomFuseReadChunk:
+			if len(payload) < 12 {
+				return
+			}
+			msgid, _, _ := ReadUint32(payload, 0)
+
+			n := readChunkCalls.Add(1)
+			ip, port := badIP, badPort
+			if n > 1 {
+				ip, port = goodIP, goodPort
+			}
+
+			var resp []byte
+			resp = PutUint32(resp, msgid)
+			resp = PutUint8(resp, 2) // protocolid = 2 (normal replicated chunk)
+			resp = PutUint64(resp, fileLen)
+			resp = PutUint64(resp, chunkID)
+			resp = PutUint32(resp, 1) // version
+			resp = PutUint32(resp, ip)
+			resp = PutUint16(resp, port)
+			resp = PutUint32(resp, 0) // cs_ver
+			resp = PutUint32(resp, 0) // labelmask
+			_ = WriteFrame(conn, MatoclFuseReadChunk, resp)
+
+		default:
+			return
+		}
+	}
+}
+
+// TestRetry_InvalidatesChunkLocation verifies invariant 11 of
+// docs/diagrams/moosefs-ec4-read-statemachine.md §2.4 (plan révision 2, task
+// 25, CA7): before retrying, the client must invalidate the cached chunk
+// location and re-query the master for a fresh one — mirroring the official
+// client's chunksdatacache_invalidate (readdata.c:1989) — rather than
+// re-attacking the same (now known-dead) chunk server from the location it
+// already has cached.
+//
+// This is exercised end-to-end through Client.Read() (black-box: no
+// assumption about doCSRead's internal signature) with a fake master that
+// answers the first READ_CHUNK with a dead CS address and every subsequent
+// READ_CHUNK with a live one. If the client only retries against the
+// originally-cached address, this read can never succeed.
+func TestRetry_InvalidatesChunkLocation(t *testing.T) {
+	const nodeID = uint32(1)
+	const block = uint32(4096)
+	const chunkID = uint64(0xABCDEF01)
+	content := makeShardBytes(3, int(block))
+
+	// "Bad" CS: accepts then immediately closes — a retryable failure. The
+	// client must stop attacking this address after invalidating it, not
+	// keep retrying it under its own backoff budget.
+	badLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	badDone := make(chan struct{})
+	go func() {
+		defer close(badDone)
+		for {
+			conn, acceptErr := badLn.Accept()
+			if acceptErr != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = badLn.Close()
+		<-badDone
+	})
+	badAddr := badLn.Addr().(*net.TCPAddr)
+	badIP := binary.BigEndian.Uint32(badAddr.IP.To4())
+	badPort := uint16(badAddr.Port)
+
+	// "Good" CS: serves the real chunk content.
+	goodCS := newFakeCSServer()
+	goodIP, goodPort := goodCS.Start()
+	t.Cleanup(goodCS.Stop)
+	goodCS.SetChunkData(chunkID, content)
+
+	var readChunkCalls atomic.Int64
+	masterLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	masterDone := make(chan struct{})
+	go func() {
+		defer close(masterDone)
+		for {
+			conn, acceptErr := masterLn.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go serveInvalidationMaster(conn, chunkID, uint64(len(content)), badIP, badPort, goodIP, goodPort, &readChunkCalls)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = masterLn.Close()
+		<-masterDone
+	})
+
+	masterAddr := masterLn.Addr().(*net.TCPAddr)
+	c, err := Dial("127.0.0.1", masterAddr.Port)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+
+	got, err := c.Read(nodeID, 0, block)
+	require.NoError(t, err, "Read must succeed by invalidating the cached (dead) chunk location and re-querying the master, not by retrying the same address")
+	assert.Equal(t, content, got, "data must match the content served by the good CS")
+	assert.GreaterOrEqualf(t, readChunkCalls.Load(), int64(2),
+		"the client must issue at least 2 READ_CHUNK requests to the master — the initial one plus at least one re-query after invalidating the bad location (CA7, invariant 11)")
+}
+
+// TestRetry_BackoffBounded verifies that when every retry attempt fails with a
+// retryable error, the total time spent backing off before giving up is
+// bounded (CA6). The budget must stay well under the delay before Windows
+// Explorer reissues an Open() (on the order of a minute per #160), or
+// low-level retries and the CF-API retry would stack.
+//
+// 5s is a conservative, implementation-agnostic ceiling for this assertion;
+// tighten it once the real backoff constants land if a stricter bound is
+// wanted.
+func TestRetry_BackoffBounded(t *testing.T) {
+	const block = uint32(65536)
+	const logicalID = uint64(0xBAC0FF)
+
+	shardData := [4][]byte{
+		makeShardBytes(0, int(block)),
+		makeShardBytes(1, int(block)),
+		makeShardBytes(2, int(block)),
+		makeShardBytes(3, int(block)),
+	}
+	info, _ := startFourCSServers(t, logicalID, shardData)
+
+	// Shard 0's CS always accepts then immediately closes — every attempt
+	// (including every retry) fails with a retryable EOF, so the read never
+	// succeeds and the full retry budget is exhausted.
+	badLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var accepted atomic.Int64
+	badDone := make(chan struct{})
+	go func() {
+		defer close(badDone)
+		for {
+			conn, acceptErr := badLn.Accept()
+			if acceptErr != nil {
+				return
+			}
+			accepted.Add(1)
+			_ = conn.Close() // immediate EOF on the client's next read
+		}
+	}()
+	t.Cleanup(func() {
+		_ = badLn.Close()
+		<-badDone
+	})
+	badAddr := badLn.Addr().(*net.TCPAddr)
+	info.Servers[0] = ChunkServer{
+		IP:   binary.BigEndian.Uint32(badAddr.IP.To4()),
+		Port: uint16(badAddr.Port),
+	}
+
+	c := makeECClient(t, info)
+
+	start := time.Now()
+	_, err = c.readEC4At(1, info, 0, 0, block)
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "a CS that never succeeds must eventually surface an error, not hang forever")
+	assert.Lessf(t, elapsed, 5*time.Second,
+		"total retry+backoff budget must be bounded — took %v, expected well under Windows' Open() re-issue delay (CA6)", elapsed)
+	assert.GreaterOrEqualf(t, accepted.Load(), int64(2),
+		"at least one retry (2+ fresh dials) must have been attempted before giving up")
+}
+
+// TestRetry_NonRetryableFailsFast verifies that a non-retryable error (CRC
+// mismatch) fails immediately, without consuming the retry/backoff budget
+// (CA7).
+func TestRetry_NonRetryableFailsFast(t *testing.T) {
+	const block = uint32(65536)
+	const logicalID = uint64(0xC2C001)
+
+	shardData := [4][]byte{
+		makeShardBytes(0, int(block)),
+		makeShardBytes(1, int(block)),
+		makeShardBytes(2, int(block)),
+		makeShardBytes(3, int(block)),
+	}
+	info, _ := startFourCSServers(t, logicalID, shardData)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var accepted atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			accepted.Add(1)
+			go func(c net.Conn) {
+				defer c.Close()
+				cmd, payload, readErr := ReadFrame(c)
+				if readErr != nil || cmd != CltocsFuseRead || len(payload) < 8 {
+					return
+				}
+				gotChunkID, _, _ := ReadUint64(payload, 0)
+				block := []byte("bad-crc-shard-data")
+				badCRC := crc32.ChecksumIEEE(block) ^ 0xDEADBEEF
+				var resp []byte
+				resp = PutUint64(resp, gotChunkID)
+				resp = PutUint16(resp, 0)
+				resp = PutUint16(resp, 0)
+				resp = PutUint32(resp, uint32(len(block)))
+				resp = PutUint32(resp, badCRC)
+				resp = append(resp, block...)
+				_ = WriteFrame(c, CstoclFuseReadData, resp)
+			}(conn)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+
+	addr := ln.Addr().(*net.TCPAddr)
+	info.Servers[0] = ChunkServer{
+		IP:   binary.BigEndian.Uint32(addr.IP.To4()),
+		Port: uint16(addr.Port),
+	}
+
+	c := makeECClient(t, info)
+
+	start := time.Now()
+	_, err = c.readEC4At(1, info, 0, 0, block)
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "a CRC mismatch must fail the read, never succeed")
+	assert.Contains(t, err.Error(), "CRC mismatch", "error must identify the CRC mismatch")
+	assert.Equal(t, int64(1), accepted.Load(),
+		"a CRC mismatch is not retryable — exactly one connection must be attempted, no retry dial")
+	assert.Lessf(t, elapsed, 500*time.Millisecond,
+		"a non-retryable error must fail fast, not wait through the backoff budget")
+}
+
+// TestCSPool_MaxIdleAge verifies that a pooled connection older than
+// maxIdleConnAge is closed and replaced by a fresh dial rather than being
+// handed back to a caller (CA8, D5).
+//
+// maxIdleConnAge is a 60s production constant — far too long to sleep through
+// in a unit test — so this test injects an already-aged agedConn directly
+// into pool.idle (white-box: agedConn/putAt/idle/mu are package-internal,
+// same pattern as the pre-existing TestCSPool_FullPool_ClosesExtra) instead
+// of waiting out the real duration.
+func TestCSPool_MaxIdleAge(t *testing.T) {
+	srv := newFakeCSServer()
+	ip, port := srv.Start()
+	defer srv.Stop()
+
+	pool := newCSPool()
+	defer pool.CloseAll()
+
+	// Dial once, then put it back pre-aged past maxIdleConnAge.
+	conn1, err := pool.Get(ip, port)
+	require.NoError(t, err)
+
+	key := csAddr(ip, port)
+	pool.mu.Lock()
+	pool.idle[key] = append(pool.idle[key], &agedConn{
+		Conn:  conn1,
+		putAt: time.Now().Add(-maxIdleConnAge - time.Second),
+	})
+	pool.mu.Unlock()
+
+	// Get() must NOT hand back the aged connection — it must be closed and
+	// replaced by a fresh dial.
+	conn2, err := pool.Get(ip, port)
+	require.NoError(t, err, "Get must dial fresh when the only idle connection has aged out")
+	defer conn2.Close()
+
+	assert.NotSame(t, conn1, conn2, "an aged-out connection must never be served to a caller")
+
+	// The aged connection must have been closed by the pool (not leaked).
+	_, writeErr := conn1.Write([]byte("x"))
+	assert.Error(t, writeErr, "the aged-out connection must be closed by the pool, not left dangling")
+
+	require.Eventually(t, func() bool {
+		return srv.connCount.Load() == int64(2)
+	}, 200*time.Millisecond, 5*time.Millisecond,
+		"exactly 2 TCP connections must have been dialled: the original + the fresh replacement after aging out")
+}
+
+// TestReadChunk_InactivityTimeout verifies the model mandated by CA9 /
+// invariant 9 (docs/diagrams/moosefs-ec4-read-statemachine.md §2.3, plan
+// révision 2 task 27): ReadChunk must bound wait time by *inactivity*
+// between frames, not by a fixed duration for the whole call. This is the
+// single biggest risk flagged in the plan's risk table — a global-deadline
+// design would abort a legitimately slow but progressing read exactly like
+// #160's own root cause (a keepalive arriving after ~512 successful blocks,
+// several seconds into the read). Reference model: the official MooseFS
+// client's CHUNKSERVER_ACTIVITY_TIMEOUT, re-armed on every received frame
+// (readdata.c:78, :1395), not a call-wide timer.
+//
+// csInactivityTimeout (same package, white-box) is the real bound applied to
+// the *gap since the last received frame*, re-armed before every ReadFrame —
+// see ReadChunk's SetReadDeadline call. Both sub-tests derive their timing
+// from that real constant instead of a guessed duration, so they stay
+// correct — neither flaky nor artificially slow — if it is retuned.
+func TestReadChunk_InactivityTimeout(t *testing.T) {
+	t.Run("progressing_read_not_interrupted", func(t *testing.T) {
+		const chunkID = uint64(20020)
+		content := []byte("inactivity-timeout-progress-test-data")
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			defer conn.Close()
+
+			cmd, payload, readErr := ReadFrame(conn)
+			if readErr != nil || cmd != CltocsFuseRead || len(payload) < 20 {
+				return
+			}
+			gotChunkID, _, _ := ReadUint64(payload, 0)
+
+			// Drip-feed NOP keepalives spaced well inside a single inactivity
+			// window, but spanning MORE than csInactivityTimeout in total —
+			// a legitimate slow-but-progressing read that must never be
+			// killed by a call-wide timer.
+			interval := csInactivityTimeout / 2
+			const steps = 4 // 4 × (timeout/2) = 2 × timeout in total
+			for i := 0; i < steps; i++ {
+				time.Sleep(interval)
+				if writeErr := WriteFrame(conn, ANTOAN_NOP, nil); writeErr != nil {
+					return
+				}
+			}
+
+			checksum := crc32.ChecksumIEEE(content)
+			var dataResp []byte
+			dataResp = PutUint64(dataResp, gotChunkID)
+			dataResp = PutUint16(dataResp, 0)
+			dataResp = PutUint16(dataResp, 0)
+			dataResp = PutUint32(dataResp, uint32(len(content)))
+			dataResp = PutUint32(dataResp, checksum)
+			dataResp = append(dataResp, content...)
+			if writeErr := WriteFrame(conn, CstoclFuseReadData, dataResp); writeErr != nil {
+				return
+			}
+			var statusResp []byte
+			statusResp = PutUint64(statusResp, gotChunkID)
+			statusResp = PutUint8(statusResp, StatusOK)
+			_ = WriteFrame(conn, CstoclFuseReadStatus, statusResp)
+		}()
+		t.Cleanup(func() {
+			_ = ln.Close()
+			<-done
+		})
+
+		addr := ln.Addr().(*net.TCPAddr)
+		ip := binary.BigEndian.Uint32(addr.IP.To4())
+		port := uint16(addr.Port)
+
+		conn, err := DialCS(ip, port)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		got, err := ReadChunk(conn, chunkID, 1, 0, uint32(len(content)))
+		require.NoError(t, err, "a read that keeps progressing (NOP keepalives spanning more than csInactivityTimeout in total, each well inside one inactivity window) must NOT be interrupted")
+		assert.Equal(t, content, got, "data must be intact")
+	})
+
+	t.Run("silent_connection_interrupted", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+
+		stopServer := make(chan struct{})
+		serverDone := make(chan struct{})
+		go func() {
+			defer close(serverDone)
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			defer conn.Close()
+			_, _, _ = ReadFrame(conn) // consume CLTOCS_READ, then go completely silent
+			<-stopServer              // stay mute until the test tells us to stop
+		}()
+		t.Cleanup(func() {
+			close(stopServer)
+			_ = ln.Close()
+			<-serverDone
+		})
+
+		addr := ln.Addr().(*net.TCPAddr)
+		ip := binary.BigEndian.Uint32(addr.IP.To4())
+		port := uint16(addr.Port)
+
+		conn, err := DialCS(ip, port)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		resultCh := make(chan error, 1)
+		go func() {
+			_, readErr := ReadChunk(conn, 42, 1, 0, 64)
+			resultCh <- readErr
+		}()
+
+		safetyNet := csInactivityTimeout + 10*time.Second
+		select {
+		case readErr := <-resultCh:
+			require.Error(t, readErr, "a connection with zero activity (no DATA, no NOP) must produce a bounded error, not hang")
+		case <-time.After(safetyNet):
+			t.Fatalf("ReadChunk did not return within %v against a fully silent CS — no inactivity timeout enforced (CA9)", safetyNet)
+		}
+	})
 }

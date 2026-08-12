@@ -36,9 +36,9 @@ func (m *mockStorageBackend) Describe() plugins.PluginDescriptor {
 	return plugins.PluginDescriptor{Type: "mock", DisplayName: "Mock"}
 }
 
-func (m *mockStorageBackend) Connect(_ plugins.BackendConfig) error  { return nil }
-func (m *mockStorageBackend) Disconnect() error                       { return nil }
-func (m *mockStorageBackend) IsConnected() bool                       { return true }
+func (m *mockStorageBackend) Connect(_ plugins.BackendConfig) error { return nil }
+func (m *mockStorageBackend) Disconnect() error                     { return nil }
+func (m *mockStorageBackend) IsConnected() bool                     { return true }
 func (m *mockStorageBackend) GetQuota(_ context.Context) (int64, int64, error) {
 	return 0, 0, nil
 }
@@ -49,9 +49,22 @@ func (m *mockStorageBackend) Upload(_ context.Context, _, _ string, _ plugins.Pr
 func (m *mockStorageBackend) Download(_ context.Context, _, _ string, _ plugins.ProgressCallback) error {
 	return nil
 }
-func (m *mockStorageBackend) Delete(_ context.Context, _ string) error { return nil }
-func (m *mockStorageBackend) Move(_ context.Context, _, _ string) error { return nil }
+func (m *mockStorageBackend) Delete(_ context.Context, _ string) error    { return nil }
+func (m *mockStorageBackend) Move(_ context.Context, _, _ string) error   { return nil }
+func (m *mockStorageBackend) Rename(_ context.Context, _, _ string) error { return nil }
+func (m *mockStorageBackend) Copy(_ context.Context, _, _ string) error   { return nil }
 func (m *mockStorageBackend) CreateDir(_ context.Context, _ string) error { return nil }
+
+// ReadAt and ChunkSize satisfy the plugins.StorageBackend range-read surface
+// (V2.0 VFS Foundation). Not exercised by the VFS/metacache tests in this
+// file — stubbed as no-ops so mockStorageBackend keeps implementing the
+// interface as it grows. Fixed incidentally while unblocking #160/#162
+// tests (internal/placeholder/download_integrity_test.go) — the interface
+// had grown these methods without every existing mock being updated.
+func (m *mockStorageBackend) ReadAt(_ context.Context, _ string, _, _ int64) ([]byte, error) {
+	return nil, nil
+}
+func (m *mockStorageBackend) ChunkSize() int64 { return 0 }
 
 func (m *mockStorageBackend) Stat(_ context.Context, _ string) (*plugins.FileInfo, error) {
 	m.statCalls.Add(1)
