@@ -997,37 +997,21 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 
 	// Phase 2: I/O chunk server hors mutex — c.conn n'est pas utilisé ici.
 	//
-	// Retry-once policy for stale pool connections:
+	// doCSRead (csclient.go) implements the shared retry/backoff/fresh-dial
+	// policy for stale pool connections (#160):
 	//   A pooled connection may have been closed server-side (CS idle timeout,
 	//   network interruption) between two consecutive reads.  On the first
 	//   attempt, if ReadChunk returns a stale-connection error (EOF, reset…),
-	//   the bad connection is discarded and a fresh one is dialled immediately.
-	//   This prevents callers from receiving EIO and retrying the Open() in a
+	//   the bad connection is discarded and a fresh one is dialled immediately
+	//   — with exponential backoff bounded by a total retry budget.  This
+	//   prevents callers from receiving EIO and retrying the Open() in a
 	//   tight loop (Windows Explorer behaviour) — which manifested as a storm
 	//   of "parseChunkInfo" debug log lines with no download progress (#112).
 	srv := info.Servers[0]
-	for attempt := 0; attempt < 2; attempt++ {
-		cs, dialErr := c.pool.Get(srv.IP, srv.Port)
-		if dialErr != nil {
-			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): dial CS: %w", nodeID, offset, dialErr)
-		}
-		result, readErr := ReadChunk(cs, info.ChunkID, info.Version, chunkOffset, size)
-		if readErr != nil {
-			cs.Close() // don't pool a broken connection
-			if attempt == 0 && isStaleConnErr(readErr) {
-				// Stale pooled connection — discard and retry with a fresh dial.
-				logger.Debug("[mfsclient] Read(%d, off=%d): stale CS connection on attempt 1, retrying: %v",
-					nodeID, offset, readErr)
-				continue
-			}
-			return nil, readErr
-		}
-		c.pool.Put(cs, srv.IP, srv.Port)
-		return result, nil
-	}
-	// Unreachable: attempt 1 always returns (either success or non-stale error
-	// that falls through to return nil, readErr above).
-	return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): CS I/O failed after 2 attempts", nodeID, offset)
+	return doCSRead(c.pool, srv.IP, srv.Port, fmt.Sprintf("Read(%d, off=%d)", nodeID, offset),
+		func(cs net.Conn) ([]byte, error) {
+			return ReadChunk(cs, info.ChunkID, info.Version, chunkOffset, size)
+		})
 }
 
 // ─── Internal: chunk info parsing ────────────────────────────────────────────

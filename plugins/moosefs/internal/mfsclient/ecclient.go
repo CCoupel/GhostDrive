@@ -14,6 +14,7 @@ package mfsclient
 
 import (
 	"fmt"
+	"net"
 
 	"github.com/CCoupel/GhostDrive/internal/logger"
 )
@@ -44,8 +45,8 @@ func alignToBlock(n, blockSize uint32) uint32 {
 //	size        — number of bytes to read (typically 65536 — one MooseFS block)
 //
 // The physical chunk ID for each shard is derived via ECPhysicalChunkID.
-// Connection pooling and the retry-once stale-connection policy mirror the
-// behaviour of Client.Read for normal chunks.
+// Connection pooling and the retry/backoff/fresh-dial policy (doCSRead,
+// csclient.go) are shared with Client.Read for normal chunks — see #160.
 //
 // Precondition: the read must not cross a shard boundary.
 // Callers must ensure chunkOffset is aligned to mfsBlockSize and
@@ -99,31 +100,8 @@ func (c *Client) readEC4At(
 	logger.Debug("[mfsclient] readEC4At chunkID=%d chunkIndex=%d shardIdx=%d physicalID=0x%x offsetInShard=%d size=%d",
 		info.ChunkID, chunkIndex, shardIdx, physicalID, offsetInShard, size)
 
-	// Retry-once on stale pool connections (same policy as Client.Read).
-	for attempt := 0; attempt < 2; attempt++ {
-		cs, dialErr := c.pool.Get(srv.IP, srv.Port)
-		if dialErr != nil {
-			return nil, fmt.Errorf("mfsclient: readEC4At chunkID=%d shard=%d: dial CS: %w",
-				info.ChunkID, shardIdx, dialErr)
-		}
-
-		result, readErr := ReadChunk(cs, physicalID, info.Version, offsetInShard, size)
-		if readErr != nil {
-			cs.Close() // never pool a broken connection
-			if attempt == 0 && isStaleConnErr(readErr) {
-				logger.Debug("[mfsclient] readEC4At chunkID=%d shard=%d: stale conn on attempt 1, retrying: %v",
-					info.ChunkID, shardIdx, readErr)
-				continue
-			}
-			return nil, fmt.Errorf("mfsclient: readEC4At chunkID=%d shard=%d: ReadChunk: %w",
-				info.ChunkID, shardIdx, readErr)
-		}
-
-		c.pool.Put(cs, srv.IP, srv.Port)
-		return result, nil
-	}
-
-	// Unreachable: attempt 1 always returns (success or non-stale error).
-	return nil, fmt.Errorf("mfsclient: readEC4At chunkID=%d shard=%d: CS I/O failed after 2 attempts",
-		info.ChunkID, shardIdx)
+	opDesc := fmt.Sprintf("readEC4At chunkID=%d shard=%d", info.ChunkID, shardIdx)
+	return doCSRead(c.pool, srv.IP, srv.Port, opDesc, func(cs net.Conn) ([]byte, error) {
+		return ReadChunk(cs, physicalID, info.Version, offsetInShard, size)
+	})
 }
