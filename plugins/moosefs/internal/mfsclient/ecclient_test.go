@@ -13,6 +13,9 @@
 //	TestReadEC4InsufficientServers   — fewer servers than shardIdx → error
 //	TestReadEC4ShardReadError        — CS closes connection → error propagated
 //	TestReadEC4StaleConnection       — stale pooled conn → retry → success
+//	TestReadEC4Cmd0_NOPIgnored                  — NOP interleaved in a read reply is ignored,
+//	                                               single connection, no retry (bugfix #160)
+//	TestReadEC4Cmd0_TrueStaleness_TriggersRetry — genuine EOF staleness still retries (#160)
 //	TestReadEC4Via_ClientRead        — Client.Read() path with proto=3 fake master
 package mfsclient
 
@@ -20,6 +23,7 @@ import (
 	"encoding/binary"
 	"math/rand"
 	"net"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -75,10 +79,96 @@ func TestDivCeilAlignToBlock(t *testing.T) {
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
-// makeECClient creates a bare Client with only a CS pool — no master connection.
-// Used for tests that call readEC4At directly without a master roundtrip.
-func makeECClient() *Client {
-	return &Client{pool: newCSPool()}
+// makeECClient creates a Client backed by a small in-memory master that
+// answers every CLTOMA_FUSE_READ_CHUNK with the same info, regardless of the
+// requested nodeID/chunkIndex or how many times it is asked.
+//
+// This exists because readEC4At's retry path re-resolves the chunk location
+// via c.locateChunk on every attempt beyond the first (#160 D3bis —
+// invalidate-and-re-query, mirroring chunksdatacache_invalidate in the
+// official client) instead of reusing the info passed by the caller. A bare
+// pool-only Client (the old shape of this helper) cannot serve that
+// re-resolution and every retry-exercising test would fail with a master I/O
+// error unrelated to what it actually tests. Serving the SAME info back
+// keeps every existing test's intent intact: a retry against a shard whose
+// server later becomes reachable (fresh dial, a NOP-vs-stale distinction,
+// etc.) still targets the server the test set up, exactly as it did when
+// retries reused the cached location directly.
+func makeECClient(t *testing.T, info *ChunkInfo) *Client {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go serveStableEC4Master(conn, info)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+
+	addr := ln.Addr().(*net.TCPAddr)
+	c, err := Dial("127.0.0.1", addr.Port)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Register())
+	return c
+}
+
+// serveStableEC4Master serves REGISTER + READ_CHUNK (proto=3, EC4+1),
+// answering every READ_CHUNK request with the same info — see makeECClient.
+func serveStableEC4Master(conn net.Conn, info *ChunkInfo) {
+	defer conn.Close()
+	for {
+		cmd, payload, err := ReadFrame(conn)
+		if err != nil {
+			return
+		}
+		switch cmd {
+		case CltomFuseRegister:
+			if len(payload) < 4 {
+				return
+			}
+			msgid := binary.BigEndian.Uint32(payload[:4])
+			var resp []byte
+			resp = PutUint32(resp, msgid)
+			resp = PutUint32(resp, 0xABCD1234) // sessionID (fixed — no client-visible meaning here)
+			resp = PutUint32(resp, 0)          // maxopenfiles (unused)
+			_ = WriteFrame(conn, MatoclFuseRegister, resp)
+
+		case CltomFuseReadChunk:
+			if len(payload) < 12 {
+				return
+			}
+			msgid, _, _ := ReadUint32(payload, 0)
+
+			var resp []byte
+			resp = PutUint32(resp, msgid)
+			resp = PutUint8(resp, 3) // protocolid = 3 (EC4+1)
+			resp = PutUint64(resp, info.Length)
+			resp = PutUint64(resp, info.ChunkID)
+			resp = PutUint32(resp, info.Version)
+			for _, srv := range info.Servers {
+				resp = PutUint32(resp, srv.IP)
+				resp = PutUint16(resp, srv.Port)
+				resp = PutUint32(resp, 0) // cs_ver
+				resp = PutUint32(resp, 0) // labelmask
+			}
+			_ = WriteFrame(conn, MatoclFuseReadChunk, resp)
+
+		default:
+			return
+		}
+	}
 }
 
 // makeShardBytes returns a deterministic byte slice of size n for shard i.
@@ -147,11 +237,11 @@ func TestReadEC4Basic(t *testing.T) {
 
 	info, servers := startFourCSServers(t, logicalID, shardData)
 
-	c := makeECClient()
+	c := makeECClient(t, info)
 
 	for i := 0; i < 4; i++ {
 		chunkOffset := uint32(i) * shardSize
-		got, err := c.readEC4At(info, 0, chunkOffset, shardSize)
+		got, err := c.readEC4At(1, info, 0, chunkOffset, shardSize)
 		require.NoErrorf(t, err, "shard %d read failed", i)
 		assert.Equalf(t, shardData[i], got, "shard %d data mismatch", i)
 		// Verify that only the target server was contacted.
@@ -169,8 +259,8 @@ func TestReadEC4Basic(t *testing.T) {
 // TestReadEC4FullChunk verifies sequential 64-KiB reads across a 4 MiB chunk
 // (4 × 1 MiB shards).  This simulates the Download() inner loop.
 func TestReadEC4FullChunk(t *testing.T) {
-	const block = uint32(65536)          // 64 KiB — MooseFS block size
-	const shardSz = uint32(1024 * 1024)  // 1 MiB per shard
+	const block = uint32(65536)              // 64 KiB — MooseFS block size
+	const shardSz = uint32(1024 * 1024)      // 1 MiB per shard
 	const chunkLen = uint64(4 * 1024 * 1024) // 4 MiB total
 	const logicalID = uint64(0x1234)
 
@@ -182,7 +272,7 @@ func TestReadEC4FullChunk(t *testing.T) {
 	info, _ := startFourCSServers(t, logicalID, shardData)
 	info.Length = chunkLen
 
-	c := makeECClient()
+	c := makeECClient(t, info)
 
 	// Read the entire chunk in 64-KiB blocks.
 	nReads := int(chunkLen / uint64(block))
@@ -191,7 +281,7 @@ func TestReadEC4FullChunk(t *testing.T) {
 		shardIdx := chunkOffset / shardSz
 		offsetInShard := chunkOffset % shardSz
 
-		got, err := c.readEC4At(info, 0, chunkOffset, block)
+		got, err := c.readEC4At(1, info, 0, chunkOffset, block)
 		require.NoErrorf(t, err, "read %d (offset=%d) failed", r, chunkOffset)
 
 		want := shardData[shardIdx][offsetInShard : offsetInShard+block]
@@ -224,15 +314,15 @@ func TestReadEC4PartialLastShard(t *testing.T) {
 	info, _ := startFourCSServers(t, logicalID, shardData)
 	info.Length = chunkLen
 
-	c := makeECClient()
+	c := makeECClient(t, info)
 
 	// Read shard 0 (offset 0).
-	got0, err := c.readEC4At(info, 0, 0, block)
+	got0, err := c.readEC4At(1, info, 0, 0, block)
 	require.NoError(t, err, "shard 0 read")
 	assert.Equal(t, shardData[0], got0, "shard 0 data")
 
 	// Read shard 3 (offset 3*block) — only 1 byte available.
-	got3, err := c.readEC4At(info, 0, 3*block, block)
+	got3, err := c.readEC4At(1, info, 0, 3*block, block)
 	require.NoError(t, err, "shard 3 read (partial)")
 	// fakeCSServer returns only available data; 1 byte expected.
 	assert.Equal(t, shardData[3], got3, "shard 3 partial data")
@@ -256,10 +346,10 @@ func TestReadEC4InsufficientServers(t *testing.T) {
 	// Remove the last server to simulate missing shard DF3.
 	info.Servers = info.Servers[:3]
 
-	c := makeECClient()
+	c := makeECClient(t, info)
 
 	// Shard 3 offset is 3 × block.
-	_, err := c.readEC4At(info, 0, 3*block, block)
+	_, err := c.readEC4At(1, info, 0, 3*block, block)
 	require.Error(t, err, "must fail when shardIdx >= len(Servers)")
 	assert.Contains(t, err.Error(), "shardIdx", "error must mention shardIdx")
 }
@@ -308,15 +398,15 @@ func TestReadEC4ShardReadError(t *testing.T) {
 	// Replace shard 1's server with the bad one.
 	info.Servers[1] = ChunkServer{IP: badIP, Port: badPort}
 
-	c := makeECClient()
+	c := makeECClient(t, info)
 
 	// Reading shard 0 should succeed.
-	got0, err0 := c.readEC4At(info, 0, 0, block)
+	got0, err0 := c.readEC4At(1, info, 0, 0, block)
 	require.NoError(t, err0, "shard 0 must succeed")
 	assert.Equal(t, shardData[0], got0, "shard 0 data")
 
 	// Reading shard 1 must fail (bad CS).
-	_, err1 := c.readEC4At(info, 0, block, block)
+	_, err1 := c.readEC4At(1, info, 0, block, block)
 	require.Error(t, err1, "shard 1 must return error (CS closes connection)")
 }
 
@@ -337,7 +427,7 @@ func TestReadEC4StaleConnection(t *testing.T) {
 	}
 	info, _ := startFourCSServers(t, logicalID, shardData)
 
-	c := makeECClient()
+	c := makeECClient(t, info)
 	srv0 := info.Servers[0]
 
 	// Inject a stale (pre-closed) connection into the pool for shard 0.
@@ -347,29 +437,40 @@ func TestReadEC4StaleConnection(t *testing.T) {
 	c.pool.Put(staleConn, srv0.IP, srv0.Port)
 
 	// readEC4At must transparently retry with a fresh connection and succeed.
-	got, err := c.readEC4At(info, 0, 0, block)
+	got, err := c.readEC4At(1, info, 0, 0, block)
 	require.NoError(t, err, "must succeed after transparent stale-conn retry")
 	assert.Equal(t, shardData[0], got, "data must match shard 0")
 }
 
-// ─── TestReadEC4StaleConnection_Cmd0 ─────────────────────────────────────────
+// ─── TestReadEC4Cmd0_NOPIgnored / TestReadEC4Cmd0_TrueStaleness_TriggersRetry ─
 
-// TestReadEC4StaleConnection_Cmd0 verifies that readEC4At correctly handles the
-// "unexpected response cmd 0" error produced when a stale pooled CS connection
-// returns an ANTOAN_NOP frame (cmd=0) instead of CSTOCL_READ_DATA.
+// Bugfix #160 rewrite (task 17 of the #160 plan).
 //
-// This reproduces the QUALIF v1.8.0 symptom:
+// The original TestReadEC4StaleConnection_Cmd0 encoded the erroneous D1/D2
+// diagnosis: it treated an ANTOAN_NOP (cmd=0) frame received during a CS read
+// as "stale connection" and asserted that it triggers a retry-and-redial.
+// That is exactly the bug reported in #160 — a live chunk server sends
+// ANTOAN_NOP as a keepalive *during* a slow read, not only when a pooled
+// connection has gone stale.  Treating it as staleness makes every keepalive
+// abort the read; Windows then reissues Open() and the whole download restarts
+// (see docs/diagrams/moosefs-ec4-read-statemachine.md §1.3).
 //
-//	readEC4At chunkID=… shard=0: ReadChunk: csclient: ReadChunk …: unexpected response cmd 0
+// The single scenario is split into the two behaviours it conflated:
 //
-// The scenario: a chunk server closes a pooled TCP connection server-side.  The
-// OS TCP buffer may still contain zeros so ReadFrame returns (cmd=0, nil, nil)
-// instead of an EOF, causing ReadChunk to fall into the default case and return
-// errUnexpectedCmd.  isStaleConnErr must detect this via errors.Is and trigger
-// the retry-once policy — which then dials a fresh connection and succeeds.
-func TestReadEC4StaleConnection_Cmd0(t *testing.T) {
+//	(a) TestReadEC4Cmd0_NOPIgnored              — a NOP interleaved in an
+//	    otherwise-live read must be silently skipped; the read completes on
+//	    the SAME connection, no retry/redial (CA1).
+//	(b) TestReadEC4Cmd0_TrueStaleness_TriggersRetry — a genuinely dead
+//	    connection (server closes → EOF) must still trigger the transparent
+//	    retry-with-fresh-dial policy (CA4: cmd=0 alone is no longer a
+//	    staleness signal, but EOF/reset still is).
+
+// TestReadEC4Cmd0_NOPIgnored verifies that an ANTOAN_NOP keepalive received
+// mid-read is ignored by ReadChunk itself: the read completes successfully on
+// the single connection that was used, with no retry and no second dial.
+func TestReadEC4Cmd0_NOPIgnored(t *testing.T) {
 	const block = uint32(65536)
-	const logicalID = uint64(0xb10c)
+	const logicalID = uint64(0xc0de1)
 
 	shardData := [4][]byte{
 		makeShardBytes(0, int(block)),
@@ -378,18 +479,83 @@ func TestReadEC4StaleConnection_Cmd0(t *testing.T) {
 		makeShardBytes(3, int(block)),
 	}
 
-	// innerCS holds the real shard data and is called on the retry connection.
+	// inner holds the real shard data; its serveRead helper is reused to
+	// build the real CSTOCL_READ_DATA/READ_STATUS reply after the NOP.
+	physID := ECPhysicalChunkID(logicalID, 0)
+	inner := newFakeCSServer()
+	inner.SetChunkData(physID, shardData[0])
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	var acceptCount atomic.Int64
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return // listener closed
+			}
+			acceptCount.Add(1)
+			go func(c net.Conn) {
+				defer c.Close()
+				// Consume CLTOCS_READ, reply with a keepalive NOP first —
+				// exactly what a live CS does while a read is in flight —
+				// THEN serve the real data on the SAME connection.
+				_, payload, readErr := ReadFrame(c)
+				if readErr != nil {
+					return
+				}
+				_ = WriteFrame(c, ANTOAN_NOP, nil)
+				inner.serveRead(c, payload)
+			}(conn)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-serverDone
+	})
+
+	addr := ln.Addr().(*net.TCPAddr)
+	ip0 := binary.BigEndian.Uint32(addr.IP.To4())
+	port0 := uint16(addr.Port)
+
+	info, _ := startFourCSServers(t, logicalID, shardData)
+	info.Servers[0] = ChunkServer{IP: ip0, Port: port0}
+
+	c := makeECClient(t, info)
+
+	got, err := c.readEC4At(1, info, 0, 0, block)
+	require.NoError(t, err, "a NOP keepalive interleaved in a read reply must be ignored, not treated as staleness (CA1)")
+	assert.Equal(t, shardData[0], got, "data must match shard 0")
+	assert.Equal(t, int64(1), acceptCount.Load(),
+		"a NOP-then-data reply must be served on a single connection — no redial/retry should occur")
+}
+
+// TestReadEC4Cmd0_TrueStaleness_TriggersRetry verifies that a genuinely dead
+// CS connection (the server closes without replying — EOF) still triggers the
+// transparent retry-with-fresh-dial policy, distinguishing real staleness from
+// the legitimate NOP keepalive covered by TestReadEC4Cmd0_NOPIgnored (CA4).
+func TestReadEC4Cmd0_TrueStaleness_TriggersRetry(t *testing.T) {
+	const block = uint32(65536)
+	const logicalID = uint64(0xc0de2)
+
+	shardData := [4][]byte{
+		makeShardBytes(0, int(block)),
+		makeShardBytes(1, int(block)),
+		makeShardBytes(2, int(block)),
+		makeShardBytes(3, int(block)),
+	}
+
 	physID := ECPhysicalChunkID(logicalID, 0)
 	innerCS := newFakeCSServer()
 	innerCS.SetChunkData(physID, shardData[0])
 
-	// NOP-then-OK listener for shard 0:
-	//   - connection 1: read CLTOCS_READ, reply ANTOAN_NOP (cmd=0), close.
-	//   - connection 2+: delegate to innerCS.handleConn (serves real data).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	// firstConnCh carries one token; consuming it marks the first connection done.
+	// firstConnCh carries one token; consuming it marks the first connection.
 	firstConnCh := make(chan struct{}, 1)
 	firstConnCh <- struct{}{}
 
@@ -403,12 +569,10 @@ func TestReadEC4StaleConnection_Cmd0(t *testing.T) {
 			}
 			select {
 			case <-firstConnCh:
-				// First connection: simulate stale socket returning cmd=0.
-				go func(c net.Conn) {
-					defer c.Close()
-					_, _, _ = ReadFrame(c)           // consume CLTOCS_READ
-					_ = WriteFrame(c, ANTOAN_NOP, nil) // reply with cmd=0 frame
-				}(conn)
+				// First connection: genuine staleness — the CS closes the
+				// socket without any reply (EOF), simulating a connection
+				// that died between being pooled and being reused.
+				_ = conn.Close()
 			default:
 				// Retry connection: serve the real shard data.
 				go innerCS.handleConn(conn)
@@ -424,16 +588,13 @@ func TestReadEC4StaleConnection_Cmd0(t *testing.T) {
 	ip0 := binary.BigEndian.Uint32(addr.IP.To4())
 	port0 := uint16(addr.Port)
 
-	// Start normal CS servers for shards 1-3; override shard 0 with our server.
 	info, _ := startFourCSServers(t, logicalID, shardData)
 	info.Servers[0] = ChunkServer{IP: ip0, Port: port0}
 
-	c := makeECClient()
+	c := makeECClient(t, info)
 
-	// readEC4At must detect cmd=0 as retriable, silently retry, and return the
-	// correct shard 0 data without exposing an error to the caller.
-	got, err := c.readEC4At(info, 0, 0, block)
-	require.NoError(t, err, "must succeed after transparent cmd=0 retry")
+	got, err := c.readEC4At(1, info, 0, 0, block)
+	require.NoError(t, err, "a truly stale (EOF) connection must still trigger a transparent retry")
 	assert.Equal(t, shardData[0], got, "data must match shard 0 after retry")
 }
 
@@ -530,16 +691,16 @@ func serveEC4Master(conn net.Conn, logicalID uint64, fileLen uint64, csIP [4]uin
 				return
 			}
 			msgid, off, _ := ReadUint32(payload, 0)
-			_, off, _ = ReadUint32(payload, off)    // nodeID (ignored)
-			_, _, _ = ReadUint32(payload, off)      // chunkIndex (always 0 in this test)
+			_, off, _ = ReadUint32(payload, off) // nodeID (ignored)
+			_, _, _ = ReadUint32(payload, off)   // chunkIndex (always 0 in this test)
 
 			// Build proto=3 response with 4 CS entries.
 			var resp []byte
 			resp = PutUint32(resp, msgid)
-			resp = PutUint8(resp, 3)            // protocolid = 3
-			resp = PutUint64(resp, fileLen)     // file length
-			resp = PutUint64(resp, logicalID)   // logical chunk ID
-			resp = PutUint32(resp, 1)           // version
+			resp = PutUint8(resp, 3)          // protocolid = 3
+			resp = PutUint64(resp, fileLen)   // file length
+			resp = PutUint64(resp, logicalID) // logical chunk ID
+			resp = PutUint32(resp, 1)         // version
 			for i := 0; i < 4; i++ {
 				resp = PutUint32(resp, csIP[i])
 				resp = PutUint16(resp, csPort[i])
@@ -697,7 +858,7 @@ func serveEC4MasterMultiChunk(conn net.Conn, fileLen uint64, chunks []ecChunkSpe
 			spec := chunks[chunkIndex]
 			var resp []byte
 			resp = PutUint32(resp, msgid)
-			resp = PutUint8(resp, 3)              // protocolid = 3
+			resp = PutUint8(resp, 3)               // protocolid = 3
 			resp = PutUint64(resp, fileLen)        // file length
 			resp = PutUint64(resp, spec.logicalID) // per-chunk logical ID
 			resp = PutUint32(resp, 1)              // version
@@ -714,4 +875,3 @@ func serveEC4MasterMultiChunk(conn net.Conn, fileLen uint64, chunks []ecChunkSpe
 		}
 	}
 }
-

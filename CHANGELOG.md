@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- fix(moosefs): trame keepalive ANTOAN_NOP mal gérée dans lecture EC4 — le protocole CS attendait une trame non vide après NOP, causant des échecs intermittents et lenteurs d'ouverture (jusqu'à ~1 min). Durcissement du transport : timeout d'inactivité réarmé à chaque trame (5s, conforme client officiel), invalidation de localisation de chunk sur retry (re-query master au lieu de réattaque du même CS), backoff exponentiel aligné sur barème officiel MooseFS (#160)
+- fix(placeholder): fichier de cache tronqué servi comme complet — un téléchargement interrompu laissait un fichier tronqué dans le cache jusqu'à TTL (1h), causant une perte de données silencieuse jusqu'à la détection de taille. Correction structurelle : écriture atomique (temp + rename), validation par taille distante, déduplication des téléchargements concurrents, relances bornées (3 tentatives, backoff 500ms→1s→2s) (#162)
 - fix(moosefs): corriger la gestion des connexions stales (cmd=0) dans readEC4At — le retry-once interne s'active désormais correctement sur socket half-closed (#114)
 - fix(moosefs): afficher la taille réelle et la date de modification dans GhD: — List() appelle désormais GetAttr par entrée (#116)
 

@@ -5,6 +5,16 @@
 **Testeur** : QA  
 **Scope** : Plugin MooseFS — lecture de chunks erasure-coded EC4+1
 
+> **Mise à jour 2026-08-12** — ajout du Scénario 6 (bugfix #160 : keepalive
+> `ANTOAN_NOP` traité à tort comme erreur fatale pendant une lecture CS lente,
+> provoquant l'échec systématique de l'ouverture de gros fichiers et des
+> relances d'`Open` en boucle côté Windows) et du Scénario 7 (bugfix #162 —
+> plan révision 2 : un téléchargement interrompu laissait un fichier tronqué
+> servi comme complet pendant jusqu'à une heure, perte de données silencieuse
+> corrigée dans `internal/placeholder`). Voir
+> `_work/reports/plan-20260812-102022.md` et
+> `docs/diagrams/moosefs-ec4-read-statemachine.md`.
+
 ---
 
 ## Prérequis
@@ -130,6 +140,70 @@ bash poc/generate_ec_test_files.sh
 
 ---
 
+### Scénario 6 — Bugfix #160 : ouverture rapide d'un gros fichier MP4 (régression NOP keepalive)
+
+**Contexte** : l'issue #160 documente un `unexpected response cmd 0` provoquant l'échec
+systématique de l'ouverture de gros fichiers EC4+1 (~1 min avant l'échec observé, puis Windows
+relance l'`Open` en boucle sans jamais aboutir). La cause racine est un keepalive
+`ANTOAN_NOP` légitime émis par le chunk server pendant une lecture lente, traité à tort comme
+une erreur fatale (voir `docs/diagrams/moosefs-ec4-read-statemachine.md`). Ce scénario valide
+le correctif et sert de non-régression pour toute évolution future du protocole de lecture CS.
+
+**Rappel — règle d'accès MooseFS** : accès en **LECTURE SEULE ABSOLUE** au cluster MooseFS
+pendant tout ce scénario — ne jamais créer, modifier ni supprimer de contenu sur le cluster
+réel ; n'utiliser que des fichiers déjà existants (ex. `ec_large.bin` ou tout MP4/fichier
+volumineux déjà présent sur le volume de test).
+
+**Objectif** : vérifier qu'un gros fichier MP4 (ou tout fichier EC4+1 volumineux) s'ouvre et se
+prévisualise sans erreur `unexpected response cmd`, en un temps très inférieur à la ligne de
+base (~1 min) mesurée avant #160.
+
+| Étape | Action | Résultat Attendu | Résultat Obtenu | OK ? |
+|-------|--------|-----------------|----------------|------|
+| 1 | Vider/invalider le cache local GhostDrive pour le fichier de test si applicable | Placeholder non hydraté avant le test | | |
+| 2 | Noter l'heure de référence puis ouvrir un gros fichier MP4 EC4+1 (> 100 Mio si disponible) depuis l'Explorateur Windows (double-clic ou aperçu) | La lecture démarre sans blocage visible | | |
+| 3 | Mesurer le temps écoulé entre le déclenchement de l'`Open` et l'affichage de la preview / le premier octet lu | Temps < 10 s (ligne de base avant #160 : ~1 min) | | |
+| 4 | Répéter les étapes 2-3 en ouvrant plusieurs fichiers volumineux d'un même dossier (dossier multi-fichiers) | Chaque fichier s'ouvre en un temps comparable, pas de dégradation cumulative | | |
+| 5 | `grep "unexpected response cmd" ghostdrive.log` sur la fenêtre de temps du test | Aucune occurrence | | |
+| 6 | Compter les `Open` du/des fichier(s) testé(s) dans les logs CF API | Un seul `Open` par fichier — pas de relance en boucle par Windows | | |
+| 7 | Comparer le temps mesuré à l'étape 3 avec la ligne de base historique (~1 min, cf. issue #160) | Amélioration nette et reproductible | | |
+
+**Verdict** : [ ] PASS  [ ] FAIL
+
+---
+
+### Scénario 7 — Bugfix #162 : intégrité du cache après échec de téléchargement (perte de données)
+
+**Contexte** : le diagnostic de #160 (révision 2) a révélé un défaut d'intégrité distinct et
+plus sévère (D7) : un téléchargement interrompu (keepalive mal géré, coupure réseau, arrêt de
+GhostDrive) laissait un fichier **tronqué** dans le cache local, servi ensuite **comme s'il
+était complet** pendant jusqu'à une heure (`cacheTTL`), alors que `Getattr` annonçait la taille
+réelle distante. Le correctif (téléchargement vers fichier temporaire + renommage atomique,
+validation du cache par comparaison de taille) rend cette troncature persistante structurellement
+impossible. Voir `docs/diagrams/moosefs-ec4-read-statemachine.md` §2bis.
+
+**Rappel — règle d'accès MooseFS** : accès en **LECTURE SEULE ABSOLUE** au cluster MooseFS —
+ne provoquer l'échec que côté GhostDrive (coupure réseau locale, arrêt du process, kill de la
+connexion), jamais en modifiant ou en arrêtant un service MooseFS.
+
+**Objectif** : vérifier qu'après un téléchargement interrompu en cours de route, la
+**prochaine** lecture du même fichier retourne des données **complètes et intègres** — jamais
+un fichier tronqué servi silencieusement comme complet.
+
+| Étape | Action | Résultat Attendu | Résultat Obtenu | OK ? |
+|-------|--------|-----------------|----------------|------|
+| 1 | Choisir un fichier EC4+1 volumineux (> 64 MiB, plusieurs chunks) non encore présent dans le cache local | Cache absent pour ce fichier | | |
+| 2 | Déclencher l'ouverture du fichier puis, pendant le téléchargement (avant la fin), couper la connexion réseau locale (désactiver l'interface Wi-Fi/Ethernet quelques secondes) ou tuer le process GhostDrive | Le téléchargement échoue en cours de route | | |
+| 3 | Vérifier dans le dossier de cache temporaire (`%TEMP%\ghostdrive\...`) qu'**aucun** fichier tronqué n'est présent au chemin de cache final (seul un `.ghostdrive.tmp` éventuel, ou rien) | Pas de fichier partiel exploitable au chemin final | | |
+| 4 | Rétablir la connexion réseau / relancer GhostDrive si nécessaire, puis rouvrir le même fichier | Un nouveau téléchargement complet démarre (pas de faux "cache frais") | | |
+| 5 | Comparer la taille du fichier servi à la taille distante (`mfsfileinfo` ou propriétés Explorateur) | Tailles identiques | | |
+| 6 | Comparer la somme de contrôle (`sha256sum` / `Get-FileHash`) du fichier servi avec l'original MooseFS | Checksums identiques — aucune troncature | | |
+| 7 | Ouvrir simultanément (2 fenêtres/onglets) le même gros fichier pendant qu'aucun cache n'existe encore | Un seul téléchargement observé dans les logs (`ensureDownloaded`/`Download` appelé une seule fois), les deux ouvertures aboutissent | | |
+
+**Verdict** : [ ] PASS  [ ] FAIL
+
+---
+
 ## Critères de Validation
 
 - [ ] Tous les fichiers EC4+1 (< 64 MiB et > 64 MiB) se téléchargent sans erreur
@@ -138,6 +212,12 @@ bash poc/generate_ec_test_files.sh
 - [ ] Aucune régression sur les fichiers non-EC (proto=0/1/2)
 - [ ] Le log `parseChunkInfo: proto=3 EC chunk ECParts=4` est présent
 - [ ] Aucune erreur `erasure-coded` ou `EC not supported` dans les logs
+- [ ] **#160** : aucune erreur `unexpected response cmd` lors de l'ouverture de gros fichiers EC4+1
+- [ ] **#160** : le temps d'ouverture d'un gros fichier EC4+1 est très inférieur à la ligne de base ~1 min
+- [ ] **#160** : un seul `Open` par fichier — pas de relance en boucle côté Windows CF API
+- [ ] **#162** : après un échec de téléchargement provoqué, aucun fichier tronqué n'est jamais servi comme complet
+- [ ] **#162** : la relecture après échec retourne un fichier de taille et de somme de contrôle identiques à l'original
+- [ ] **#162** : deux ouvertures concurrentes du même fichier ne déclenchent qu'un seul téléchargement
 
 ---
 
@@ -154,6 +234,36 @@ go test ./plugins/moosefs/... -race -v -count=1
 ```
 
 Résultat attendu : tous les tests `TestEC*` et `TestReadEC4*` PASS.
+
+### Tests bugfix #160 (protocole — keepalive NOP en lecture CS / retry / pool)
+
+```bash
+go test ./plugins/moosefs/internal/mfsclient/... -race -v -run \
+  "TestReadChunk_NOPskip|TestReadChunk_NOPBadLength|TestReadChunk_NOPFlood|TestReadChunk_UnknownCmd|TestReadChunk_InactivityTimeout|TestReadEC4Cmd0|TestRetry_|TestCSPool_MaxIdleAge"
+```
+
+Note : `TestReadChunk_InactivityTimeout` exécute volontairement un sous-test de ~20-25 s
+(lecture lente mais progressive qui doit survivre à `csReadChunkDeadline`) — ne pas s'inquiéter
+d'un temps d'exécution total de la suite `mfsclient` de l'ordre de la minute.
+
+Résultat attendu : tous PASS, y compris `TestWriteChunk_*` et `TestCSPool_*` existants
+(non-régression du chemin d'écriture — le correctif #160 ne touche que la boucle de lecture).
+
+### Tests bugfix #162 (intégrité du cache local — `internal/placeholder`)
+
+```bash
+# Windows uniquement (build tag) — vérification de compilation croisée possible depuis un autre OS :
+#   GOOS=windows go vet ./internal/placeholder/...
+go test ./internal/placeholder/... -race -v -run \
+  "TestIsCacheFresh_SizeMismatch_ReturnsFalse|TestEnsureDownloaded_PartialRemovedOnError|TestEnsureDownloaded_RedownloadsTruncatedCache|TestEnsureDownloaded_ConcurrentOpensSingleDownload"
+
+# Non-régression backend-agnostique (Phase 3 touche ensureDownloaded, commun à tous les backends) :
+go test ./plugins/webdav/... ./plugins/local/... -race -v
+```
+
+Résultat attendu : tous PASS. `TestEnsureDownloaded_RedownloadsTruncatedCache` est le test de
+non-régression de la perte de données (D7) — un fichier tronqué pré-existant dans le cache ne
+doit jamais être servi tel quel.
 
 ---
 

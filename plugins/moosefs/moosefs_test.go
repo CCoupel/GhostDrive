@@ -53,6 +53,15 @@ type integFakeCSServer struct {
 	mu       sync.Mutex
 	chunks   map[uint64][]byte
 	done     chan struct{}
+	// padReadsToRequestedSize, when true, makes readRange zero-pad its
+	// response to exactly the requested size instead of truncating to the
+	// actual stored data length — mimicking a real MooseFS chunk server,
+	// which always returns a full block within a chunk boundary even past
+	// the file's real data (see moosefs.go Download's chunkSize comment,
+	// #160 CA12). Off by default so every other test keeps the exact-length
+	// read semantics it was written against; set explicitly by tests that
+	// need to reproduce the real padding behaviour.
+	padReadsToRequestedSize bool
 }
 
 func newIntegFakeCSServer() *integFakeCSServer {
@@ -120,6 +129,13 @@ func (s *integFakeCSServer) readRange(chunkID uint64, offset, size uint32) []byt
 	}
 	end := offset + size
 	if end > uint32(len(data)) {
+		if s.padReadsToRequestedSize {
+			// Real MooseFS CS behaviour: the block comes back at exactly the
+			// requested size, zero-padded past the real data, not truncated.
+			out := make([]byte, size)
+			copy(out, data[offset:])
+			return out
+		}
 		end = uint32(len(data))
 	}
 	out := make([]byte, end-offset)
@@ -1232,6 +1248,49 @@ func TestUpload_withProgress(t *testing.T) {
 		assert.Greater(t, done, int64(0))
 	}))
 	assert.Greater(t, calls, 0)
+}
+
+// TestDownload_TruncatesFinalPaddedBlock verifies that Download() truncates
+// the final chunkSize-sized read to the file's real remaining length instead
+// of writing the zero-padding a real MooseFS chunk server returns for a read
+// near a chunk boundary (#160/#162 fast-follow, QA report qa-20260812-112858).
+//
+// Without the fix, a file whose size is not a multiple of chunkSize (64 KiB)
+// — i.e. almost every real file — ends up on local disk larger than the
+// remote size. With the strict size-equality cache-freshness check
+// (isCacheFresh, #160 revision 2 / CA12) that then never validates the cache
+// as fresh: every Open() redownloads the whole file, silently defeating the
+// fix #160 set out to deliver. The default fake CS in this file returns
+// exactly len(content) bytes (no padding), which is why this gap went
+// uncaught until QA measured it arithmetically against a real cluster.
+func TestDownload_TruncatesFinalPaddedBlock(t *testing.T) {
+	srv := newIntegFakeServer()
+	srv.cs.padReadsToRequestedSize = true // reproduce real MooseFS CS zero-padding
+	addr := srv.start(t)
+	b := newTestBackend(t, addr)
+	ctx := context.Background()
+
+	// Size deliberately NOT a multiple of chunkSize (64 KiB) — the case none
+	// of the existing fixtures exercised.
+	const size = 3*chunkSize + 12345
+	content := make([]byte, size)
+	for i := range content {
+		content[i] = byte(i)
+	}
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/padded.bin", nil))
+
+	dst := filepath.Join(t.TempDir(), "padded_out.bin")
+	require.NoError(t, b.Download(ctx, "/padded.bin", dst, nil))
+
+	fi, err := os.Stat(dst)
+	require.NoError(t, err)
+	assert.Equal(t, int64(size), fi.Size(),
+		"downloaded file must match the remote size exactly, never padded up to a chunkSize boundary")
+
+	got, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	assert.Equal(t, content, got, "downloaded content must be byte-for-byte identical, with no trailing zero padding")
 }
 
 func TestDownload_withProgress(t *testing.T) {
