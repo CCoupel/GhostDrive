@@ -1099,6 +1099,10 @@ const moosefsChunkSize = 67_108_864
 // Returns ErrFileNotFound (wrapped) when remote does not exist.
 // Pre-condition: IsConnected() == true, else returns nil, ErrNotConnected.
 func (b *Backend) ReadAt(ctx context.Context, remote string, offset, length int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("moosefs: readAt %s: context cancelled: %w", remote, err)
+	}
+
 	connected, c, subDir := b.state()
 	if !connected {
 		return nil, ErrNotConnected

@@ -52,6 +52,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CCoupel/GhostDrive/internal/backoff"
 	"github.com/CCoupel/GhostDrive/internal/logger"
 )
 
@@ -263,89 +264,95 @@ const (
 	// idle pooled connections are detected (and the OS informed) before a
 	// silent server-side close leaves a half-open socket in the pool.
 	csKeepAlive = 30 * time.Second
-	// csReadChunkDeadline bounds the *entire* ReadChunk call (send + all
-	// CSTOCL_READ_DATA / ANTOAN_NOP / CSTOCL_READ_STATUS frames), matching the
-	// "échéance globale" invariant in docs/diagrams/moosefs-ec4-read-statemachine.md.
-	// A single block read (≤ mfsBlockSize) completing within this window is
-	// generous even accounting for keepalives on a slow CS disk.
-	csReadChunkDeadline = 20 * time.Second
-	// csWriteIdleDeadline bounds the *gap* between consecutive frames on a
-	// WriteChunk connection (reset before every read/write), NOT the total
-	// call duration — a large upload legitimately takes far longer than this
-	// to complete, but the CS must not go this long without producing (or
-	// consuming) a single frame. Using an idle deadline rather than a global
-	// one here avoids the false positives flagged in the bugfix #160 plan's
-	// risk table for the WriteChunk reader goroutine (csclient.go).
-	csWriteIdleDeadline = 20 * time.Second
+	// csInactivityTimeout bounds the *gap* between consecutive frames on a CS
+	// connection (reset before every read/write, both in ReadChunk and
+	// WriteChunk), NOT the total call duration. This mirrors the official
+	// MooseFS client's model — CHUNKSERVER_ACTIVITY_TIMEOUT 5.0
+	// (readdata.c:78, evaluated continuously at :1395) — deliberately chosen
+	// over a single deadline covering the whole call: a slow read or a large
+	// upload that keeps *progressing* must never be killed, only a CS that
+	// goes silent should be. A single static value is shared by both
+	// directions; ReadChunk and WriteChunk each reset it independently, so
+	// tuning stays simple without risking the read-side value starving a
+	// legitimately long write (the risk flagged in the bugfix #160 plan for
+	// the WriteChunk reader goroutine, csclient.go).
+	csInactivityTimeout = 5 * time.Second
 )
 
-// ── Retry / backoff policy (#160 D3, D6) ───────────────────────────────────
+// ── Retry policy (#160 D3, D3bis, D6) ──────────────────────────────────────
 //
 // Shared by doCSRead (Client.Read, readEC4At). Previously each caller
-// implemented its own "retry-once, reuse the pool" loop, which never
-// guaranteed a fresh dial (#160 D3) and had no bound on cumulative wait.
+// implemented its own "retry-once, reuse the pool, same cached location"
+// loop: no guaranteed fresh dial (D3), no invalidation of the chunk location
+// before retrying (D3bis — GhostDrive kept re-attacking the very CS that had
+// just failed instead of asking the master for a fresh placement), and no
+// bound on cumulative wait (D6).
 
-const (
-	// maxCSAttempts is the maximum number of CS I/O attempts per doCSRead call
-	// (1 initial + up to maxCSAttempts-1 retries).
-	maxCSAttempts = 4
-	// backoffBase is the delay before the second attempt; it doubles on each
-	// subsequent attempt (backoffDelay), capped at backoffCap.
-	backoffBase = 20 * time.Millisecond
-	// backoffCap bounds any single backoff step.
-	backoffCap = 200 * time.Millisecond
-	// maxRetryBudget bounds the *cumulative* backoff wait across all attempts
-	// of a single doCSRead call. Deliberately kept far below the interval at
-	// which Windows Cloud Filter API reissues a failed placeholder Open()
-	// (observed at roughly a second or more in #160 production logs) — if the
-	// low-level retry here took as long as that, it would stack with the CF
-	// API's own retry instead of transparently absorbing a transient failure,
-	// multiplying perceived latency rather than hiding it (see plan risk
-	// table, bugfix #160).
-	maxRetryBudget = 500 * time.Millisecond
-)
+// maxCSAttempts is the maximum number of CS I/O attempts per doCSRead call
+// (1 initial + up to maxCSAttempts-1 retries). Kept well below the 30-attempt
+// threshold at which the MooseFS backoff schedule (internal/backoff) would
+// hit its own cap, since each retry here also costs a master round-trip
+// (locateFunc re-query) on top of the backoff sleep.
+const maxCSAttempts = 6
 
-// backoffDelay returns the backoff duration before retry attempt n (n ≥ 1;
-// n=1 is the delay before the second attempt), doubling from backoffBase and
-// capped at backoffCap.
-func backoffDelay(n int) time.Duration {
-	if n < 1 {
-		return 0
-	}
-	if n > 16 { // guard against overflow of the bit shift below
-		return backoffCap
-	}
-	d := backoffBase << uint(n-1)
-	if d <= 0 || d > backoffCap {
-		d = backoffCap
-	}
-	return d
+// maxRetryBudget bounds the *cumulative* backoff wait across all attempts of
+// a single doCSRead call, on top of the internal/backoff.MooseFS schedule's
+// own per-step values. Deliberately kept far below the interval at which
+// Windows Cloud Filter API / WinFsp reissues a failed placeholder Open()
+// (observed at roughly a second or more in #160 production logs) — if the
+// low-level retry here took as long as that, it would stack with the
+// higher-level retry instead of transparently absorbing a transient failure,
+// multiplying perceived latency rather than hiding it (see plan risk table,
+// bugfix #160).
+const maxRetryBudget = 2 * time.Second
+
+// csLocateResult is what a locateFunc resolves for one doCSRead attempt.
+type csLocateResult struct {
+	ip   uint32
+	port uint16
+	// read performs the actual chunk-server operation once connected.
+	read func(cs net.Conn) ([]byte, error)
+	// eof, when true, tells doCSRead to return (nil, nil) immediately without
+	// attempting any I/O — used when a retry's re-query discovers the file
+	// has shrunk past the requested offset in the meantime.
+	eof bool
 }
+
+// locateFunc resolves the chunk-server address (and the operation to run
+// against it) for one doCSRead attempt. attempt is 0 for the first try and
+// increases by one per retry. Implementations MUST re-resolve the location
+// from the master — rather than reusing a cached ChunkInfo — whenever
+// attempt > 0 (#160 D3bis / CA7): retrying against the same cached server
+// that just failed is exactly what let #160 degrade into a storm of
+// failures against one bad CS instead of failing over.
+type locateFunc func(attempt int) (csLocateResult, error)
 
 // doCSRead executes a chunk-server read with the retry policy shared by
 // Client.Read (normal chunks) and readEC4At (EC4+1 shard reads), implementing
-// invariants 5-7 of docs/diagrams/moosefs-ec4-read-statemachine.md:
+// invariants 5-11 of docs/diagrams/moosefs-ec4-read-statemachine.md:
 //
 //   - attempt 0 may reuse a pooled connection; every later attempt forces a
-//     freshly dialled connection, bypassing the pool entirely (CA5) — a
+//     freshly dialled connection, bypassing the pool entirely (CA6) — a
 //     pooled connection that just failed is never handed out again blindly.
+//   - every attempt after the first re-resolves the chunk location via
+//     locate (CA7) instead of re-attacking the same cached server.
 //   - non-retryable errors (isStaleConnErr == false, e.g. CRC mismatch, a
 //     non-OK server status, or a truly unexpected opcode) fail immediately
-//     without consuming any retry budget (CA7).
-//   - retryable (stale-connection) errors back off exponentially, capped per
-//     step, with a hard ceiling on the cumulative wait for the whole call
-//     (CA6).
+//     without consuming any retry budget (CA8).
+//   - retryable (stale-connection) errors back off per the official MooseFS
+//     schedule (internal/backoff.MooseFS), with a hard ceiling on the
+//     cumulative wait for the whole call (CA8).
 //
 // opDesc identifies the caller for error messages (e.g. "Read(node=5, off=0)"
 // or "readEC4At chunkID=42 shard=1").
-func doCSRead(pool *csPool, ip uint32, port uint16, opDesc string, read func(cs net.Conn) ([]byte, error)) ([]byte, error) {
+func doCSRead(pool *csPool, opDesc string, locate locateFunc) ([]byte, error) {
 	var lastErr error
 	var waited time.Duration
 	attemptsMade := 0
 
 	for i := 0; i < maxCSAttempts; i++ {
 		if i > 0 {
-			d := backoffDelay(i)
+			d := backoff.MooseFS.Delay(i)
 			if waited+d > maxRetryBudget {
 				break // budget exhausted — stop retrying, report lastErr below
 			}
@@ -354,26 +361,35 @@ func doCSRead(pool *csPool, ip uint32, port uint16, opDesc string, read func(cs 
 		}
 		attemptsMade++
 
+		loc, locErr := locate(i)
+		if locErr != nil {
+			lastErr = fmt.Errorf("locate: %w", locErr)
+			continue
+		}
+		if loc.eof {
+			return nil, nil
+		}
+
 		var cs net.Conn
 		var dialErr error
 		if i == 0 {
-			cs, dialErr = pool.Get(ip, port) // may legitimately reuse a pooled connection
+			cs, dialErr = pool.Get(loc.ip, loc.port) // may legitimately reuse a pooled connection
 		} else {
-			cs, dialErr = DialCS(ip, port) // CA5 — never re-serve the pool on retry
+			cs, dialErr = DialCS(loc.ip, loc.port) // CA6 — never re-serve the pool on retry
 		}
 		if dialErr != nil {
 			lastErr = fmt.Errorf("dial CS: %w", dialErr)
 			continue
 		}
 
-		result, readErr := read(cs)
+		result, readErr := loc.read(cs)
 		if readErr == nil {
-			pool.Put(cs, ip, port)
+			pool.Put(cs, loc.ip, loc.port)
 			return result, nil
 		}
 		cs.Close() // never pool a broken connection
 		if !isStaleConnErr(readErr) {
-			return nil, fmt.Errorf("mfsclient: %s: %w", opDesc, readErr) // CA7 — fail fast
+			return nil, fmt.Errorf("mfsclient: %s: %w", opDesc, readErr) // CA8 — fail fast
 		}
 		lastErr = readErr
 	}
@@ -417,14 +433,12 @@ const maxConsecutiveNOPs = 64
 //
 // The CS may interleave ANTOAN_NOP (0) keepalives at any point before
 // CSTOCL_READ_STATUS; these are skipped transparently (#160), bounded by
-// maxConsecutiveNOPs and by csReadChunkDeadline, which covers the whole call.
+// maxConsecutiveNOPs and by csInactivityTimeout (rearmed on every frame
+// received — see its comment for why this is not a single global deadline).
 func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size uint32) ([]byte, error) {
-	if err := cs.SetDeadline(time.Now().Add(csReadChunkDeadline)); err != nil {
-		return nil, fmt.Errorf("csclient: ReadChunk %d: set deadline: %w", chunkID, err)
-	}
-	// Clear the deadline before returning so a connection later handed back
-	// to the pool (or reused directly) does not inherit a stale absolute
-	// deadline from this call.
+	// Clear any deadline before returning so a connection later handed back
+	// to the pool (or reused directly) does not inherit a stale deadline
+	// from this call.
 	defer cs.SetDeadline(time.Time{})
 
 	// Build and send CLTOCS_READ request.
@@ -434,6 +448,9 @@ func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size 
 	payload = PutUint32(payload, offset)
 	payload = PutUint32(payload, size)
 
+	if err := cs.SetWriteDeadline(time.Now().Add(csInactivityTimeout)); err != nil {
+		return nil, fmt.Errorf("csclient: ReadChunk %d: set write deadline: %w", chunkID, err)
+	}
 	if err := WriteFrame(cs, CltocsFuseRead, payload); err != nil {
 		return nil, fmt.Errorf("csclient: ReadChunk %d: send: %w", chunkID, err)
 	}
@@ -442,6 +459,12 @@ func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size 
 	var result []byte
 	nopCount := 0
 	for {
+		// Inactivity deadline, rearmed on every frame received (DATA or NOP)
+		// — see csInactivityTimeout: a read that keeps progressing must never
+		// be killed, only a connection that goes silent.
+		if err := cs.SetReadDeadline(time.Now().Add(csInactivityTimeout)); err != nil {
+			return nil, fmt.Errorf("csclient: ReadChunk %d: set read deadline: %w", chunkID, err)
+		}
 		cmd, data, err := ReadFrame(cs)
 		if err != nil {
 			return nil, fmt.Errorf("csclient: ReadChunk %d: recv: %w", chunkID, err)
@@ -453,13 +476,19 @@ func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size 
 
 		switch cmd {
 		case ANTOAN_NOP:
-			// Legitimate keepalive (#160) — skip it and keep reading. See the
-			// package comment and errUnexpectedCmd for why this used to be
-			// (wrongly) treated as a fatal "stale connection" error.
+			// Legitimate keepalive (#160) — skip it and keep reading, after
+			// validating it carries no payload (readdata.c:1683: a non-empty
+			// NOP is a real protocol error, not a keepalive). See the package
+			// comment and errUnexpectedCmd for why this used to be (wrongly)
+			// treated as a fatal "stale connection" error.
+			if len(data) != 0 {
+				return nil, fmt.Errorf("csclient: ReadChunk %d: malformed ANTOAN_NOP (peer=%s, length=%d, want 0)",
+					chunkID, cs.RemoteAddr(), len(data))
+			}
 			nopCount++
 			if nopCount > maxConsecutiveNOPs {
 				return nil, fmt.Errorf("csclient: ReadChunk %d: exceeded %d consecutive ANTOAN_NOP keepalives"+
-					" (chunk server unresponsive or protocol desync)", chunkID, maxConsecutiveNOPs)
+					" (peer=%s unresponsive or protocol desync)", chunkID, maxConsecutiveNOPs, cs.RemoteAddr())
 			}
 			continue
 
@@ -506,9 +535,12 @@ func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size 
 			// A genuinely unrecognised opcode (not NOP, DATA or STATUS) means
 			// the client and CS have desynchronised on the frame stream, or the
 			// CS sent something this client does not implement. This is fatal
-			// and non-retryable (CA3) — see errUnexpectedCmd for why it is
-			// deliberately NOT treated as a stale-connection signal.
-			return nil, fmt.Errorf("csclient: ReadChunk %d: unexpected response cmd %d: %w", chunkID, cmd, errUnexpectedCmd)
+			// and non-retryable (CA4) — see errUnexpectedCmd for why it is
+			// deliberately NOT treated as a stale-connection signal. The peer
+			// address is logged (readdata.c:1694) to make any residual
+			// desync diagnosable instead of an anonymous "cmd %d".
+			return nil, fmt.Errorf("csclient: ReadChunk %d: unexpected response cmd %d (peer=%s): %w",
+				chunkID, cmd, cs.RemoteAddr(), errUnexpectedCmd)
 		}
 	}
 }
@@ -544,7 +576,7 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 	// deadline from this call. Unlike ReadChunk (a single small block, bounded
 	// by one global deadline), WriteChunk legitimately runs for as long as the
 	// whole chunk takes to transfer, so every I/O below resets its own
-	// deadline (csWriteIdleDeadline) instead of sharing one fixed absolute
+	// deadline (csInactivityTimeout) instead of sharing one fixed absolute
 	// deadline for the entire call — see the goroutines below.
 	defer cs.SetDeadline(time.Time{})
 
@@ -561,7 +593,7 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 		initPayload = PutUint16(initPayload, srv.Port)
 	}
 
-	if err := cs.SetWriteDeadline(time.Now().Add(csWriteIdleDeadline)); err != nil {
+	if err := cs.SetWriteDeadline(time.Now().Add(csInactivityTimeout)); err != nil {
 		return fmt.Errorf("csclient: WriteChunk %d: set write deadline: %w", chunkID, err)
 	}
 	if err := WriteFrame(cs, CltocsFuseWrite, initPayload); err != nil {
@@ -579,7 +611,7 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 		// Idle deadline, reset before every frame: bounds the *gap* between
 		// frames (a mute CS — invariant 9), not the total ACK wait, since a
 		// chain with several peers may legitimately need a few keepalives.
-		if err := cs.SetReadDeadline(time.Now().Add(csWriteIdleDeadline)); err != nil {
+		if err := cs.SetReadDeadline(time.Now().Add(csInactivityTimeout)); err != nil {
 			return fmt.Errorf("csclient: WriteChunk %d: set read deadline: %w", chunkID, err)
 		}
 		ackCmd, ackResp, err := ReadFrame(cs)
@@ -643,7 +675,7 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 			// top of WriteChunk. SetReadDeadline is safe to call concurrently
 			// with the sender goroutine's SetWriteDeadline calls below (both
 			// only update independent read/write deadline state on the conn).
-			if err := cs.SetReadDeadline(time.Now().Add(csWriteIdleDeadline)); err != nil {
+			if err := cs.SetReadDeadline(time.Now().Add(csInactivityTimeout)); err != nil {
 				err = fmt.Errorf("csclient: WriteChunk %d: set read deadline: %w", chunkID, err)
 				select { case earlyErr <- err: default: }
 				finalResult <- err
@@ -742,7 +774,7 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 
 		// Idle deadline, reset before every frame — see the comment at the
 		// top of WriteChunk.
-		if err := cs.SetWriteDeadline(time.Now().Add(csWriteIdleDeadline)); err != nil {
+		if err := cs.SetWriteDeadline(time.Now().Add(csInactivityTimeout)); err != nil {
 			closeSendDone()
 			return fmt.Errorf("csclient: WriteChunk %d: set write deadline (block %d): %w", chunkID, blockNum, err)
 		}
@@ -782,7 +814,7 @@ func WriteChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, data
 	endPayload = PutUint64(endPayload, chunkID)
 	endPayload = PutUint32(endPayload, version)
 
-	if err := cs.SetWriteDeadline(time.Now().Add(csWriteIdleDeadline)); err != nil {
+	if err := cs.SetWriteDeadline(time.Now().Add(csInactivityTimeout)); err != nil {
 		closeSendDone()
 		go func() { <-finalResult }()
 		return fmt.Errorf("csclient: WriteChunk %d: set write deadline (end): %w", chunkID, err)

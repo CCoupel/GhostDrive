@@ -919,14 +919,70 @@ func (c *Client) WriteChunkData(nodeID uint32, offset uint64, data []byte) error
 	return c.Write(nodeID, offset, data)
 }
 
+// locateChunk queries the master for the location of chunk index within file
+// nodeID (CLTOMA_FUSE_READ_CHUNK), returning (nil, nil) at EOF. c.mu is held
+// only for the duration of the master roundtrip.
+//
+// Used both for the initial lookup in Read and to re-resolve a fresh location
+// before a retry (#160 D3bis, mirroring chunksdatacache_invalidate in the
+// official client, readdata.c:1989): the master's answer may name a
+// different, healthy chunk server on a retry, whereas blindly reusing the
+// first response's info.Servers keeps re-attacking the very CS that just
+// failed.
+func (c *Client) locateChunk(nodeID, index uint32) (*ChunkInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, nodeID)
+	req = PutUint32(req, index)
+
+	ans, err := c.roundtrip(CltomFuseReadChunk, MatoclFuseReadChunk, req)
+	if err != nil {
+		return nil, fmt.Errorf("mfsclient: locateChunk(node=%d, index=%d): READ_CHUNK: %w", nodeID, index, err)
+	}
+
+	// A 5-byte response is an error or EOF: [msgid:32][status:8].
+	if len(ans) == 5 {
+		status := ans[4]
+		switch status {
+		case StatusOK:
+			return nil, nil // empty chunk (EOF) — info==nil, err==nil
+		case StatusENOENT:
+			return nil, fmt.Errorf("mfsclient: locateChunk(node=%d, index=%d): %w", nodeID, index, plugins.ErrFileNotFound)
+		default:
+			return nil, fmt.Errorf("mfsclient: locateChunk(node=%d, index=%d): status 0x%02x", nodeID, index, status)
+		}
+	}
+
+	info, err := parseChunkInfo(ans)
+	if err != nil {
+		return nil, fmt.Errorf("mfsclient: locateChunk(node=%d, index=%d): parse chunk info: %w", nodeID, index, err)
+	}
+	if len(info.Servers) == 0 {
+		// A MooseFS master may return a proto response with nCS=0 (rather
+		// than a 5-byte StatusOK) when the requested chunk slot is at or past
+		// the file boundary — this happens when the file size is a multiple
+		// of ChunkSize (e.g. exactly 64 MiB), or when a concurrent write
+		// shrank the file between attempts. In that case info.Length names
+		// the real end of the file, and the correct interpretation is EOF.
+		if info.Length > 0 && uint64(index)*ChunkSize >= info.Length {
+			return nil, nil // treat as EOF — caller (Download) will stop iterating
+		}
+		return nil, fmt.Errorf("mfsclient: locateChunk(node=%d, index=%d): no chunk servers available", nodeID, index)
+	}
+	return info, nil
+}
+
 // Read reads up to size bytes from file node nodeID starting at offset using
 // the real MooseFS chunk-server protocol.
 //
 // Steps:
-//  1. CLTOMA_FUSE_READ_CHUNK (432) → master returns ChunkInfo (CS location).
-//     c.mu is held only during this master roundtrip.
-//  2. DialCS + ReadChunk: data is fetched from the chunk server (no lock held —
-//     CS I/O does not touch c.conn).
+//  1. locateChunk (CLTOMA_FUSE_READ_CHUNK, 432) → master returns ChunkInfo
+//     (CS location). c.mu is held only during this master roundtrip.
+//  2. DialCS + ReadChunk: data is fetched from the chunk server (no lock held
+//     — CS I/O does not touch c.conn). A retry re-runs step 1 first (#160
+//     D3bis) instead of reusing the possibly-stale location from step 1.
 //
 // Returns an empty (nil) slice when the requested offset is past the end of
 // the file (EOF).
@@ -934,52 +990,9 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 	index := uint32(offset / ChunkSize)
 	chunkOffset := uint32(offset % ChunkSize)
 
-	// Phase 1: roundtrip master sous mutex — localiser le chunk.
-	info, err := func() (*ChunkInfo, error) {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-
-		req := PutUint32(nil, 0) // msgid
-		req = PutUint32(req, nodeID)
-		req = PutUint32(req, index)
-
-		ans, err := c.roundtrip(CltomFuseReadChunk, MatoclFuseReadChunk, req)
-		if err != nil {
-			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): READ_CHUNK: %w", nodeID, offset, err)
-		}
-
-		// A 5-byte response is an error or EOF: [msgid:32][status:8].
-		if len(ans) == 5 {
-			status := ans[4]
-			switch status {
-			case StatusOK:
-				return nil, nil // empty chunk (EOF) — info==nil, err==nil
-			case StatusENOENT:
-				return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): %w", nodeID, offset, plugins.ErrFileNotFound)
-			default:
-				return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): status 0x%02x", nodeID, offset, status)
-			}
-		}
-
-		info, err := parseChunkInfo(ans)
-		if err != nil {
-			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): parse chunk info: %w", nodeID, offset, err)
-		}
-		if len(info.Servers) == 0 {
-			// A MooseFS master may return a proto response with nCS=0 (rather
-			// than a 5-byte StatusOK) when the requested chunk slot is at
-			// exactly the file boundary — this happens when the file size is a
-			// precise multiple of ChunkSize (e.g. exactly 64 MiB).  In this
-			// case info.Length == offset, and the correct interpretation is EOF.
-			if info.Length > 0 && offset >= info.Length {
-				return nil, nil // treat as EOF — caller (Download) will stop iterating
-			}
-			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): no chunk servers available", nodeID, offset)
-		}
-		return info, nil
-	}()
+	info, err := c.locateChunk(nodeID, index)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): %w", nodeID, offset, err)
 	}
 	if info == nil {
 		return nil, nil // EOF
@@ -988,7 +1001,7 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 	// EC routing: delegate EC4+1 chunks to readEC4At (shard-granular read).
 	// EC8+2 and other EC configurations are not yet supported.
 	if info.ECParts == 4 {
-		return c.readEC4At(info, index, chunkOffset, size)
+		return c.readEC4At(nodeID, info, index, chunkOffset, size)
 	}
 	if info.ECParts != 0 {
 		return nil, fmt.Errorf("mfsclient: Read(%d): EC%d+%d not supported (only EC4+1 implemented)",
@@ -997,21 +1010,45 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 
 	// Phase 2: I/O chunk server hors mutex — c.conn n'est pas utilisé ici.
 	//
-	// doCSRead (csclient.go) implements the shared retry/backoff/fresh-dial
-	// policy for stale pool connections (#160):
+	// doCSRead (csclient.go) implements the shared retry policy for stale or
+	// faulty chunk-server connections (#160):
 	//   A pooled connection may have been closed server-side (CS idle timeout,
-	//   network interruption) between two consecutive reads.  On the first
-	//   attempt, if ReadChunk returns a stale-connection error (EOF, reset…),
-	//   the bad connection is discarded and a fresh one is dialled immediately
-	//   — with exponential backoff bounded by a total retry budget.  This
-	//   prevents callers from receiving EIO and retrying the Open() in a
-	//   tight loop (Windows Explorer behaviour) — which manifested as a storm
-	//   of "parseChunkInfo" debug log lines with no download progress (#112).
-	srv := info.Servers[0]
-	return doCSRead(c.pool, srv.IP, srv.Port, fmt.Sprintf("Read(%d, off=%d)", nodeID, offset),
-		func(cs net.Conn) ([]byte, error) {
-			return ReadChunk(cs, info.ChunkID, info.Version, chunkOffset, size)
-		})
+	//   network interruption) between two consecutive reads, or the CS itself
+	//   may be misbehaving. On the first attempt, if ReadChunk returns a
+	//   stale-connection error (EOF, reset…), the bad connection is discarded,
+	//   the location is re-resolved from the master (D3bis, locate below),
+	//   and a fresh connection is dialled — with backoff (internal/backoff)
+	//   bounded by a total retry budget. This prevents callers from receiving
+	//   EIO and retrying the Open() in a tight loop (Windows Explorer
+	//   behaviour) — which manifested as a storm of "parseChunkInfo" debug
+	//   log lines with no download progress (#112).
+	opDesc := fmt.Sprintf("Read(%d, off=%d)", nodeID, offset)
+	locate := func(attempt int) (csLocateResult, error) {
+		curInfo := info
+		if attempt > 0 {
+			fresh, lErr := c.locateChunk(nodeID, index)
+			if lErr != nil {
+				return csLocateResult{}, lErr
+			}
+			if fresh == nil {
+				return csLocateResult{eof: true}, nil
+			}
+			curInfo = fresh
+		}
+		if len(curInfo.Servers) == 0 {
+			return csLocateResult{}, fmt.Errorf("no chunk servers available")
+		}
+		srv := curInfo.Servers[0]
+		ci := curInfo
+		return csLocateResult{
+			ip:   srv.IP,
+			port: srv.Port,
+			read: func(cs net.Conn) ([]byte, error) {
+				return ReadChunk(cs, ci.ChunkID, ci.Version, chunkOffset, size)
+			},
+		}, nil
+	}
+	return doCSRead(c.pool, opDesc, locate)
 }
 
 // ─── Internal: chunk info parsing ────────────────────────────────────────────
