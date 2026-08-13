@@ -149,9 +149,17 @@ func (c *Client) readEC4At(
 	var result []byte
 	curOffset := chunkOffset
 	remaining := size
+	// currentInfo is the ChunkInfo used to resolve the *next* segment. It
+	// starts as the caller-supplied info and is advanced to whatever a
+	// segment's retry last obtained from the master (code review MINOR-2):
+	// without this, a later segment would keep resolving against the
+	// original (possibly now-stale) info even after an earlier segment
+	// already learned a fresher one — reachable for the first time once a
+	// single readEC4At call can span multiple shards (#163 B2).
+	currentInfo := info
 
 	for remaining > 0 {
-		loc0, err := locateEC4Shard(info, chunkIndex, curOffset)
+		loc0, err := locateEC4Shard(currentInfo, chunkIndex, curOffset)
 		if err != nil {
 			if errors.Is(err, errEC4EOF) {
 				break // reached the end of the chunk's real data
@@ -165,13 +173,13 @@ func (c *Client) readEC4At(
 		}
 
 		logger.Debug("[mfsclient] readEC4At chunkID=%d chunkIndex=%d shardIdx=%d physicalID=0x%x offsetInShard=%d segSize=%d",
-			info.ChunkID, chunkIndex, loc0.shardIdx, loc0.physicalID, loc0.offsetInShard, segSize)
+			currentInfo.ChunkID, chunkIndex, loc0.shardIdx, loc0.physicalID, loc0.offsetInShard, segSize)
 
-		opDesc := fmt.Sprintf("readEC4At chunkID=%d shard=%d", info.ChunkID, loc0.shardIdx)
+		opDesc := fmt.Sprintf("readEC4At chunkID=%d shard=%d", currentInfo.ChunkID, loc0.shardIdx)
 		segOffset := curOffset // captured by value for the closure below
 
 		locate := func(attempt int) (csLocateResult, error) {
-			curInfo := info
+			segInfo := currentInfo
 			loc := loc0
 			if attempt > 0 {
 				// D3bis: invalidate the cached chunk location and re-query the
@@ -184,9 +192,10 @@ func (c *Client) readEC4At(
 				if fresh == nil {
 					return csLocateResult{eof: true}, nil
 				}
-				curInfo = fresh
+				segInfo = fresh
+				currentInfo = fresh // propagate to subsequent segments (code review MINOR-2)
 
-				freshLoc, lErr := locateEC4Shard(curInfo, chunkIndex, segOffset)
+				freshLoc, lErr := locateEC4Shard(segInfo, chunkIndex, segOffset)
 				if lErr != nil {
 					if errors.Is(lErr, errEC4EOF) {
 						return csLocateResult{eof: true}, nil
@@ -197,7 +206,7 @@ func (c *Client) readEC4At(
 			}
 
 			physicalID := loc.physicalID
-			version := curInfo.Version
+			version := segInfo.Version
 			offsetInShard := loc.offsetInShard
 			segLen := segSize
 			return csLocateResult{

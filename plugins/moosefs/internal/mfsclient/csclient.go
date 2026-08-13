@@ -211,6 +211,25 @@ func (p *csPool) CloseAll() {
 // than a string match) so callers can use errors.Is regardless of wrapping.
 var errUnexpectedCmd = errors.New("unexpected response cmd")
 
+// errServerStatus is the sentinel wrapped by ReadChunk when the chunk server
+// answers CSTOCL_READ_STATUS with a non-OK status.
+//
+// This is deliberately NOT matched by isStaleConnErr: most non-OK statuses
+// are genuine application-level failures (CRC mismatch reported by the
+// server, permission/data errors) that a retry — with or without a fresh
+// dial — cannot fix, so they must fail fast (CA7/CA8).
+//
+// But since #163 introduced a chunk-location cache (chunklocationcache.go),
+// one specific cause of a non-OK status changed meaning: the chunk server
+// legitimately no longer having the chunk this Client asked for, because its
+// location was cached up to chunkLocationCacheTTL ago and has since moved
+// (rebalance, rewrite, another client). doCSRead grants errServerStatus
+// exactly ONE forced chunk-location refresh (never the full retry/backoff
+// budget isStaleConnErr-classified errors get) before treating it as
+// terminal — see doCSRead's dedicated branch. A persistent, non-location
+// status rejection still fails fast on the second occurrence.
+var errServerStatus = errors.New("chunk server rejected request")
+
 // isStaleConnErr reports whether err indicates a stale TCP connection —
 // one that was pooled successfully but later closed or timed out on the
 // remote side (server-side idle timeout, OS keepalive expiry, network
@@ -218,9 +237,11 @@ var errUnexpectedCmd = errors.New("unexpected response cmd")
 // the CS I/O deadlines in ReadChunk/WriteChunk).
 //
 // Deliberately does NOT match errUnexpectedCmd (#160 — see its comment) nor
-// any other application/protocol-level error (CRC mismatch, non-OK server
-// status): those are not connection problems and retrying them changes
-// nothing, so they must fail fast (CA7) instead of consuming retry budget.
+// errServerStatus (#163 — see its comment; that error gets its own bounded
+// one-shot handling in doCSRead, not the general connection-retry budget)
+// nor any other application/protocol-level error (CRC mismatch): those are
+// not connection problems and retrying them changes nothing, so they must
+// fail fast (CA7) instead of consuming retry budget.
 //
 // Detection is typed, not string-matched: matching on error text (as this
 // function used to) is fragile and silently absorbs errors it was never
@@ -336,9 +357,14 @@ type locateFunc func(attempt int) (csLocateResult, error)
 //     pooled connection that just failed is never handed out again blindly.
 //   - every attempt after the first re-resolves the chunk location via
 //     locate (CA7) instead of re-attacking the same cached server.
-//   - non-retryable errors (isStaleConnErr == false, e.g. CRC mismatch, a
-//     non-OK server status, or a truly unexpected opcode) fail immediately
-//     without consuming any retry budget (CA8).
+//   - non-retryable errors (isStaleConnErr == false, e.g. CRC mismatch or a
+//     truly unexpected opcode) fail immediately without consuming any retry
+//     budget (CA8).
+//   - errServerStatus (a non-OK CSTOCL_READ_STATUS) gets exactly ONE forced
+//     chunk-location refresh — never the full retry/backoff budget — since
+//     #163's chunk-location cache means this specific error can legitimately
+//     be a stale cached placement, not just a data/permission failure. See
+//     errServerStatus's comment.
 //   - retryable (stale-connection) errors back off per the official MooseFS
 //     schedule (internal/backoff.MooseFS), with a hard ceiling on the
 //     cumulative wait for the whole call (CA8).
@@ -349,6 +375,11 @@ func doCSRead(pool *csPool, opDesc string, locate locateFunc) ([]byte, error) {
 	var lastErr error
 	var waited time.Duration
 	attemptsMade := 0
+	// #163 code-review MAJOR fix: bounds the errServerStatus special case
+	// (below) to exactly one forced chunk-location refresh, never a loop —
+	// a persistent, non-location status rejection must still fail fast on
+	// its second occurrence rather than burning through the retry budget.
+	locationRefreshUsed := false
 
 	for i := 0; i < maxCSAttempts; i++ {
 		if i > 0 {
@@ -388,6 +419,24 @@ func doCSRead(pool *csPool, opDesc string, locate locateFunc) ([]byte, error) {
 			return result, nil
 		}
 		cs.Close() // never pool a broken connection
+
+		if errors.Is(readErr, errServerStatus) {
+			// A non-OK status can mean this call's cached chunk location
+			// (#163 chunklocationcache.go) is stale — grant exactly one
+			// forced relocate (the next locate(attempt) call, attempt>0,
+			// always forces a fresh master query) before giving up. This is
+			// deliberately NOT the same as isStaleConnErr's full retry
+			// budget: a status rejection that is NOT about location (e.g. a
+			// server-side data/permission error) must still fail fast once
+			// the one relocate attempt has been given.
+			if !locationRefreshUsed {
+				locationRefreshUsed = true
+				lastErr = readErr
+				continue
+			}
+			return nil, fmt.Errorf("mfsclient: %s: %w", opDesc, readErr)
+		}
+
 		if !isStaleConnErr(readErr) {
 			return nil, fmt.Errorf("mfsclient: %s: %w", opDesc, readErr) // CA8 — fail fast
 		}
@@ -527,7 +576,7 @@ func ReadChunk(cs net.Conn, chunkID uint64, version uint32, offset uint32, size 
 			}
 			status := data[8]
 			if status != StatusOK {
-				return nil, fmt.Errorf("csclient: ReadChunk %d: server status 0x%02x", chunkID, status)
+				return nil, fmt.Errorf("csclient: ReadChunk %d: server status 0x%02x: %w", chunkID, status, errServerStatus)
 			}
 			return result, nil
 

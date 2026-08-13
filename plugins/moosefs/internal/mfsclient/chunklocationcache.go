@@ -24,12 +24,16 @@
 //     identified for #163).
 //   - No separate "chunk version" validation before use: the wire protocol
 //     already carries the cached Version in every CLTOCS_READ request
-//     (csclient.go ReadChunk), so a stale entry naturally surfaces as a
-//     non-OK server status from the chunk server — which is already a
-//     read error, already routed through doCSRead's re-locate-on-retry path
-//     (locateChunk with forceRefresh=true). Re-validating the version against
-//     the master before every use would require a master roundtrip on every
-//     read, which defeats the point of caching at all.
+//     (csclient.go ReadChunk), so a stale entry surfaces as a non-OK server
+//     status from the chunk server (errServerStatus, csclient.go). That
+//     specific error is granted exactly one forced chunk-location refresh by
+//     doCSRead before failing (code review fast-follow, #163) — it is NOT
+//     classified as isStaleConnErr (a connection problem), and is NOT given
+//     the full retry/backoff budget either, since a persistent non-location
+//     status rejection must still fail fast. Re-validating the version
+//     against the master before every use would require a master roundtrip
+//     on every read, which defeats the point of caching at all — this
+//     bounded, error-triggered refresh is the compromise.
 package mfsclient
 
 import (

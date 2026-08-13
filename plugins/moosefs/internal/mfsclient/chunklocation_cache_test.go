@@ -353,6 +353,132 @@ func TestChunkLocationCache_VersionMismatchRefetches(t *testing.T) {
 		"the chunk server must be contacted with the FRESH version from the re-query, never a stale cached version (CA3)")
 }
 
+// ─── TestChunkLocationCache_ServerStatusRejection* (code review fast-follow, CA3) ──
+
+// startRejectingCSServer starts a fake chunk server that answers every
+// CLTOCS_READ with a non-OK CSTOCL_READ_STATUS (StatusERROR) and no
+// CSTOCL_READ_DATA frame at all — the real shape of a chunk server refusing
+// a request for a chunk/version it no longer has, which is exactly what a
+// STALE chunk-location-cache entry produces in production (rebalance,
+// rewrite, another client) — as opposed to a connection-level failure
+// (closed/refused socket), which TestChunkLocationCache_VersionMismatchRefetches
+// already covers via a different mechanism. Returns a counter of how many
+// CLTOCS_READ requests this CS received.
+func startRejectingCSServer(t *testing.T) (ip uint32, port uint16, requestCount *atomic.Int64) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	var count atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				cmd, payload, readErr := ReadFrame(c)
+				if readErr != nil || cmd != CltocsFuseRead || len(payload) < 8 {
+					return
+				}
+				count.Add(1)
+				chunkID, _, _ := ReadUint64(payload, 0)
+				var status []byte
+				status = PutUint64(status, chunkID)
+				status = PutUint8(status, StatusERROR) // non-OK, no READ_DATA — a real rejection
+				_ = WriteFrame(c, CstoclFuseReadStatus, status)
+			}(conn)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+
+	addr := ln.Addr().(*net.TCPAddr)
+	return binary.BigEndian.Uint32(addr.IP.To4()), uint16(addr.Port), &count
+}
+
+// TestChunkLocationCache_ServerStatusRejectionForcesRelocate is the code
+// review fast-follow for the [MAJEUR] finding in
+// _work/reports/code-reviewer-20260813-093106.md: a stale cached location
+// manifests as a chunk-server STATUS rejection, not a connection error —
+// isStaleConnErr does not (and must not) match that, so it needs its own
+// bounded relocate path in doCSRead (errServerStatus). This test exercises
+// exactly that path black-box through Client.Read(): the cached location
+// (from the master's first answer) is rejected by the chunk server; the
+// SECOND master answer (after the forced relocate) points to a chunk server
+// that actually has the data.
+func TestChunkLocationCache_ServerStatusRejectionForcesRelocate(t *testing.T) {
+	const nodeID = uint32(1)
+	const block = uint32(4096)
+	const chunkID = uint64(0x444)
+	content := makeShardBytes(4, int(block))
+
+	rejectIP, rejectPort, rejectCount := startRejectingCSServer(t)
+
+	goodCS := newFakeCSServer()
+	goodIP, goodPort := goodCS.Start()
+	t.Cleanup(goodCS.Stop)
+	goodCS.SetChunkData(chunkID, content)
+
+	cfg := &countingMasterConfig{
+		chunkID: chunkID,
+		fileLen: uint64(len(content)),
+		locations: []countingMasterLocation{
+			{ip: rejectIP, port: rejectPort, version: 1}, // stale — rejected by the CS
+			{ip: goodIP, port: goodPort, version: 1},     // fresh, after the forced relocate
+		},
+	}
+	c, callCount := startCountingMaster(t, cfg)
+
+	got, err := c.Read(nodeID, 0, block)
+	require.NoError(t, err, "a status rejection must trigger exactly one forced relocate and then succeed")
+	assert.Equal(t, content, got)
+	assert.Equal(t, int64(2), callCount.Load(),
+		"exactly 2 master roundtrips expected: the initial locateChunk (cache miss) plus the one forced relocate on status rejection")
+	assert.Equal(t, int64(1), rejectCount.Load(),
+		"the rejecting CS must be contacted exactly once — the relocate must move to a DIFFERENT server, not retry the same one")
+}
+
+// TestChunkLocationCache_ServerStatusRejectionIsBoundedNotLooped verifies the
+// other half of the [MAJEUR] fix: a status rejection that is NOT about a
+// stale location (both the cached AND the freshly re-queried location are
+// rejected by their chunk servers) must still fail fast after exactly one
+// forced relocate — never consume the full connection-retry budget
+// (maxCSAttempts / internal/backoff.MooseFS), which would needlessly slow
+// down what CA8 requires to fail fast.
+func TestChunkLocationCache_ServerStatusRejectionIsBoundedNotLooped(t *testing.T) {
+	const nodeID = uint32(1)
+	const block = uint32(4096)
+	const chunkID = uint64(0x555)
+
+	rejectIP1, rejectPort1, rejectCount1 := startRejectingCSServer(t)
+	rejectIP2, rejectPort2, rejectCount2 := startRejectingCSServer(t)
+
+	cfg := &countingMasterConfig{
+		chunkID: chunkID,
+		fileLen: uint64(block),
+		locations: []countingMasterLocation{
+			{ip: rejectIP1, port: rejectPort1, version: 1},
+			{ip: rejectIP2, port: rejectPort2, version: 1},
+		},
+	}
+	c, callCount := startCountingMaster(t, cfg)
+
+	_, err := c.Read(nodeID, 0, block)
+	require.Error(t, err, "a persistent status rejection must ultimately fail, not hang or succeed")
+	assert.ErrorIs(t, err, errServerStatus)
+	assert.Equal(t, int64(2), callCount.Load(),
+		"exactly 2 master roundtrips: initial lookup + the ONE forced relocate — never more")
+	assert.Equal(t, int64(1), rejectCount1.Load(), "the first (cached) rejecting CS must be contacted exactly once")
+	assert.Equal(t, int64(1), rejectCount2.Load(), "the second (relocated) rejecting CS must be contacted exactly once — not looped")
+}
+
 // ─── TestChunkLocationCache_Eviction (task 14, CA6) ──────────────────────────
 
 // TestChunkLocationCache_Eviction verifies the cache does not grow without
