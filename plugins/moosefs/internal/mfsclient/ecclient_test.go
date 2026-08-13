@@ -598,6 +598,78 @@ func TestReadEC4Cmd0_TrueStaleness_TriggersRetry(t *testing.T) {
 	assert.Equal(t, shardData[0], got, "data must match shard 0 after retry")
 }
 
+// ─── TestReadEC4At_MultiMiBRead / ShardBoundarySplit (issue #163, B2) ────────
+//
+// Bugfix #163 (_work/reports/plan-20260812-155238.md, task 6, CA4):
+// readEC4At's documented precondition today is "size ≤ mfsBlockSize (64 KiB)
+// and the read must not cross a shard boundary" — exactly the granularity
+// B2 relaxes, since a shard is 16 MiB and ReadChunk already collects
+// multiple CSTOCL_READ_DATA frames per call. These two tests are expected to
+// fail against the pre-B2 implementation (still enforcing the 64 KiB
+// precondition) and pass once size is allowed up to shardSize, with
+// internal splitting across shard boundaries.
+
+// TestReadEC4At_MultiMiBRead verifies that a single read of several MiB
+// within one shard returns EXACTLY the same bytes as the concatenation of
+// the equivalent sequence of 64 KiB reads (CA4).
+func TestReadEC4At_MultiMiBRead(t *testing.T) {
+	const shardBlock = uint32(65536)
+	const logicalID = uint64(0x4D1B00)
+	const shardSize = 8 * 1024 * 1024 // 8 MiB — well within the 16 MiB EC4 shard size
+
+	var shardData [4][]byte
+	for i := range shardData {
+		shardData[i] = makeShardBytes(i, shardSize)
+	}
+	info, _ := startFourCSServers(t, logicalID, shardData)
+	info.Length = uint64(4 * shardSize)
+
+	c := makeECClient(t, info)
+
+	const bigRead = uint32(4 * 1024 * 1024) // 4 MiB — far beyond the old 64 KiB cap
+	got, err := c.readEC4At(1, info, 0, 0, bigRead)
+	require.NoError(t, err, "a multi-MiB read within a single shard must succeed once the size precondition is relaxed (CA4, #163 B2)")
+
+	var want []byte
+	for off := uint32(0); off < bigRead; off += shardBlock {
+		block, err := c.readEC4At(1, info, 0, off, shardBlock)
+		require.NoError(t, err)
+		want = append(want, block...)
+	}
+	assert.Equal(t, want, got, "a large read must return EXACTLY the same bytes as the concatenation of equivalent 64 KiB reads")
+}
+
+// TestReadEC4At_ShardBoundarySplit verifies that a read straddling the
+// boundary between two data shards is split internally into a per-shard
+// request each, and the concatenated result is byte-correct across the
+// boundary (CA4, #163 B2). Today's precondition explicitly forbids this
+// ("the read must not cross a shard boundary"); B2 must handle it instead
+// of leaving it to the caller.
+func TestReadEC4At_ShardBoundarySplit(t *testing.T) {
+	const logicalID = uint64(0x5B0D00)
+	const shardSize = uint32(1 * 1024 * 1024) // 1 MiB per shard — fast test, still multi-block
+
+	var shardData [4][]byte
+	for i := range shardData {
+		shardData[i] = makeShardBytes(i, int(shardSize))
+	}
+	info, _ := startFourCSServers(t, logicalID, shardData)
+	info.Length = uint64(4 * shardSize)
+
+	c := makeECClient(t, info)
+
+	// Straddle shard 0 → shard 1: last 4 KiB of shard 0 + first 4 KiB of shard 1.
+	const straddle = 4096
+	offset := shardSize - straddle
+	size := uint32(2 * straddle)
+
+	got, err := c.readEC4At(1, info, 0, offset, size)
+	require.NoError(t, err, "a read crossing a shard boundary must be split and served correctly, not rejected (CA4, #163 B2)")
+
+	want := append(append([]byte{}, shardData[0][shardSize-straddle:]...), shardData[1][:straddle]...)
+	assert.Equal(t, want, got, "a shard-straddling read must return the correct bytes from BOTH shards, in order")
+}
+
 // ─── TestReadEC4Via_ClientRead ────────────────────────────────────────────────
 
 // TestReadEC4Via_ClientRead exercises the full Client.Read() path with a fake

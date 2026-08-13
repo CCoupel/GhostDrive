@@ -1280,6 +1280,160 @@ func TestReadChunk_NOPBadLength(t *testing.T) {
 	require.Error(t, err, "a NOP frame with a non-zero payload length must be a protocol error, not a silently skipped keepalive")
 }
 
+// ── Bugfix #163 (B2 — larger multi-frame reads) ───────────────────────────────
+
+// TestReadChunk_MultiFrameCRC verifies that CRC-32 is checked on EVERY
+// CSTOCL_READ_DATA frame of a multi-frame response, not just the first: a
+// corrupted frame anywhere in the sequence must be detected, even when
+// preceded by valid frames. This is what makes the larger, multi-frame reads
+// introduced by #163 B2 (a single CLTOCS_READ served as many frames) safe —
+// task 17, CA5.
+func TestReadChunk_MultiFrameCRC(t *testing.T) {
+	const chunkID = uint64(30030)
+	block1 := []byte("first-good-block-of-data-000000")
+	block2 := []byte("second-block-with-corrupted-crc0")
+	block3 := []byte("third-good-block-never-reached-0")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		cmd, payload, readErr := ReadFrame(conn)
+		if readErr != nil || cmd != CltocsFuseRead || len(payload) < 20 {
+			return
+		}
+		gotChunkID, _, _ := ReadUint64(payload, 0)
+
+		sendBlock := func(blockNum, blockOff uint16, data []byte, badCRC bool) bool {
+			checksum := crc32.ChecksumIEEE(data)
+			if badCRC {
+				checksum ^= 0xDEADBEEF
+			}
+			var resp []byte
+			resp = PutUint64(resp, gotChunkID)
+			resp = PutUint16(resp, blockNum)
+			resp = PutUint16(resp, blockOff)
+			resp = PutUint32(resp, uint32(len(data)))
+			resp = PutUint32(resp, checksum)
+			resp = append(resp, data...)
+			return WriteFrame(conn, CstoclFuseReadData, resp) == nil
+		}
+
+		if !sendBlock(0, 0, block1, false) {
+			return
+		}
+		if !sendBlock(0, uint16(len(block1)), block2, true) { // corrupted — must be caught here
+			return
+		}
+		_ = sendBlock(0, uint16(len(block1)+len(block2)), block3, false)
+
+		var status []byte
+		status = PutUint64(status, gotChunkID)
+		status = PutUint8(status, StatusOK)
+		_ = WriteFrame(conn, CstoclFuseReadStatus, status)
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+
+	addr := ln.Addr().(*net.TCPAddr)
+	ip := binary.BigEndian.Uint32(addr.IP.To4())
+	port := uint16(addr.Port)
+
+	conn, err := DialCS(ip, port)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = ReadChunk(conn, chunkID, 1, 0, uint32(len(block1)+len(block2)+len(block3)))
+	require.Error(t, err, "a corrupted frame anywhere in a multi-frame response must be detected, not silently accepted")
+	assert.Contains(t, err.Error(), "CRC mismatch",
+		"error must identify the CRC mismatch even though earlier frames in the same response were valid")
+}
+
+// TestReadChunk_NOPSkip_LargeMultiFrame is #163 task 19: replays the #160
+// NOP-skip invariant (TestReadChunk_NOPskip, CA1) at the larger multi-frame
+// granularity B2 introduces — many more CSTOCL_READ_DATA frames concatenated
+// per call, with keepalives interleaved throughout, not just around one or
+// two frames. Non-regression: #160's skip-and-continue logic must scale to
+// the frame counts B2 now produces for a single ReadChunk call.
+func TestReadChunk_NOPSkip_LargeMultiFrame(t *testing.T) {
+	const chunkID = uint64(40040)
+	const blockSize = 65536
+	const numBlocks = 32 // 2 MiB total — far more frames than #160's original test exercised
+	content := make([]byte, blockSize*numBlocks)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		cmd, payload, readErr := ReadFrame(conn)
+		if readErr != nil || cmd != CltocsFuseRead || len(payload) < 20 {
+			return
+		}
+		gotChunkID, _, _ := ReadUint64(payload, 0)
+
+		for i := 0; i < numBlocks; i++ {
+			// A NOP keepalive every 8 blocks — a slow CS flushing a large
+			// multi-MiB read to the client.
+			if i%8 == 0 {
+				if writeErr := WriteFrame(conn, ANTOAN_NOP, nil); writeErr != nil {
+					return
+				}
+			}
+			block := content[i*blockSize : (i+1)*blockSize]
+			checksum := crc32.ChecksumIEEE(block)
+			var resp []byte
+			resp = PutUint64(resp, gotChunkID)
+			resp = PutUint16(resp, uint16(i))
+			resp = PutUint16(resp, 0)
+			resp = PutUint32(resp, uint32(len(block)))
+			resp = PutUint32(resp, checksum)
+			resp = append(resp, block...)
+			if writeErr := WriteFrame(conn, CstoclFuseReadData, resp); writeErr != nil {
+				return
+			}
+		}
+		var status []byte
+		status = PutUint64(status, gotChunkID)
+		status = PutUint8(status, StatusOK)
+		_ = WriteFrame(conn, CstoclFuseReadStatus, status)
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+
+	addr := ln.Addr().(*net.TCPAddr)
+	ip := binary.BigEndian.Uint32(addr.IP.To4())
+	port := uint16(addr.Port)
+
+	conn, err := DialCS(ip, port)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	got, err := ReadChunk(conn, chunkID, 1, 0, uint32(len(content)))
+	require.NoError(t, err, "NOP keepalives interleaved throughout a large multi-frame read must still be skipped correctly at #163 granularity")
+	assert.Equal(t, content, got, "all frames must be concatenated in order, intact, despite interleaved NOPs")
+}
+
 // TestReadChunk_NOPFlood verifies that a chunk server which only ever sends
 // ANTOAN_NOP keepalives (never READ_DATA nor READ_STATUS) cannot make
 // ReadChunk block forever: the anti-flood guard must return a bounded error

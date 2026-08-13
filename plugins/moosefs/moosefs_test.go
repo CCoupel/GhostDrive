@@ -1299,70 +1299,118 @@ func TestDownload_TruncatesFinalPaddedBlock(t *testing.T) {
 	assert.Equal(t, content, got, "downloaded content must be byte-for-byte identical, with no trailing zero padding")
 }
 
-// TestDownload_NetworkRoundtripBaseline is issue #163's Phase 0 baseline
-// measurement (task 2 of the plan, _work/reports/plan-20260812-155238.md) —
-// NOT a pass/fail regression test. It counts, against a reference file that
-// spans multiple 64 KiB blocks but stays within one 64 MiB MooseFS chunk, how
-// many CLTOMA_FUSE_READ_CHUNK requests (locateChunk) and CLTOCS_READ requests
-// (ReadChunk) a single Download() issues.
+// TestDownload_ChunkLocationCacheHitRate is issue #163's post-B1/B2 baseline
+// / regression guard (plan task 2 + CA1, _work/reports/plan-20260812-155238.md).
 //
-// This in-memory fake server has near-zero network latency, so the *wall
-// time* it reports is not representative of the real ~4.03-4.25 ms/roundtrip
-// plateau measured from the issue's production logs (see the plan's
-// arithmetic proof) — that real-world duration/throughput baseline is cited
-// from the issue logs directly, not re-derived here. What this test DOES
-// give, deterministically and reproducibly, is the *call count* baseline
-// that CA1 is about: before B1 (chunk-location cache), locateChunk is called
-// once per 64 KiB block, i.e. redundantly for every block of the same 64 MiB
-// chunk. Re-run after implementing B1+B2 to see the post-fix counts — the
-// numbers from both runs belong in the dev-plugin handoff for #163.
-func TestDownload_NetworkRoundtripBaseline(t *testing.T) {
+// Measured PRE-FIX (chunkSize=64 KiB, no location cache; captured before this
+// commit, same reference-file methodology, file=2,109,497 B / 33 blocks):
+// locateChunk_calls=33, ReadChunk_calls=33 — one master roundtrip AND one
+// chunk-server roundtrip per 64 KiB block, exactly the pattern the plan's
+// arithmetic proof (from the issue's production logs, ~4.03-4.25 ms/RT,
+// ~8 MB/s) attributes the latency plateau to.
+//
+// Measured POST-FIX (chunkSize=4 MiB, B1 chunk-location cache + B2 shard-
+// aware multi-MiB reads), this test's reference file (3 chunkSize blocks +
+// a partial 4th, still one 64 MiB MooseFS chunk): locateChunk_calls=1 —
+// every block after the first is a cache hit — ReadChunk_calls=4 (one per
+// Download iteration; B2 raises the bytes per roundtrip, it does not by
+// itself reduce the iteration count below what the read granularity
+// requires — B1 is what collapses the *master* roundtrips specifically).
+//
+// This in-memory fake server has near-zero network latency, so *wall time*
+// here is not representative of the real ~4 ms/roundtrip plateau — the
+// authoritative duration/throughput baseline remains the issue's own
+// production logs, cited above and in the dev-plugin handoff for #163. What
+// this test gives, deterministically and reproducibly, is the *call count*
+// that CA1 is about, guarded as a regression test going forward.
+func TestDownload_ChunkLocationCacheHitRate(t *testing.T) {
 	srv := newIntegFakeServer()
 	addr := srv.start(t)
 	b := newTestBackend(t, addr)
 	ctx := context.Background()
 
-	// Deliberately not a multiple of chunkSize (64 KiB) — exercises the same
-	// final-block truncation path as TestDownload_TruncatesFinalPaddedBlock —
-	// and well within a single 64 MiB MooseFS chunk, so every block belongs
-	// to chunkIndex 0: the ratio this test reports is exactly "calls per
-	// chunk", not diluted by multiple chunks.
-	const size = 2*1024*1024 + 12345
+	// Several chunkSize (4 MiB) blocks, still within one 64 MiB MooseFS
+	// chunk — every block belongs to chunkIndex 0, so this proves the cache
+	// keeps paying off across multiple Download iterations, not just
+	// trivially for a file that fits in a single block.
+	const size = 3*chunkSize + 777777
 	content := make([]byte, size)
 	for i := range content {
 		content[i] = byte(i)
 	}
 	src := writeTempFile(t, content)
-	require.NoError(t, b.Upload(ctx, src, "/baseline.bin", nil))
+	require.NoError(t, b.Upload(ctx, src, "/cachehit.bin", nil))
 
 	srv.readChunkCount.Store(0)
 	srv.cs.csReadCount.Store(0)
 
-	dst := filepath.Join(t.TempDir(), "baseline_out.bin")
+	dst := filepath.Join(t.TempDir(), "cachehit_out.bin")
 	start := time.Now()
-	require.NoError(t, b.Download(ctx, "/baseline.bin", dst, nil))
+	require.NoError(t, b.Download(ctx, "/cachehit.bin", dst, nil))
 	elapsed := time.Since(start)
 
 	got, err := os.ReadFile(dst)
 	require.NoError(t, err)
-	require.Equal(t, content, got, "baseline download must still be byte-correct")
+	require.Equal(t, content, got, "download must be byte-correct at the larger read granularity")
 
 	locateChunkCalls := srv.readChunkCount.Load()
 	readChunkCalls := srv.cs.csReadCount.Load()
 	expectedBlocks := (size + chunkSize - 1) / chunkSize
 
-	t.Logf("#163 baseline — file=%d bytes (%d blocks of %d B) elapsed=%v locateChunk_calls=%d ReadChunk_calls=%d",
+	t.Logf("#163 post-fix — file=%d bytes (%d blocks of %d B) elapsed=%v locateChunk_calls=%d ReadChunk_calls=%d",
 		size, expectedBlocks, chunkSize, elapsed, locateChunkCalls, readChunkCalls)
 
-	// Documents current (pre-B1/B2) behaviour: one locateChunk + one
-	// ReadChunk per 64 KiB block, all against the same chunk. This assertion
-	// is expected to change (far fewer locateChunk calls) once the Phase 1
-	// location cache lands — update it alongside that change rather than
-	// deleting it, so the improvement stays proven rather than assumed.
-	assert.EqualValues(t, expectedBlocks, locateChunkCalls,
-		"pre-fix baseline: locateChunk is called once per 64 KiB block (B1 not yet applied)")
+	assert.EqualValues(t, 1, locateChunkCalls,
+		"CA1: the chunk location cache must serve every block of the same chunk after the first — locateChunk must be called exactly once")
 	assert.EqualValues(t, expectedBlocks, readChunkCalls,
-		"pre-fix baseline: ReadChunk is called once per 64 KiB block (B2 not yet applied)")
+		"one ReadChunk call per Download iteration is expected at this granularity")
+}
+
+// TestDownload_LastBlockTruncation is #163 Phase 4 task 18 (CA11): with
+// whatever new (larger) chunkSize B2 lands, Download() must still write
+// EXACTLY the remote size to disk — never padded to a chunkSize multiple —
+// across the file sizes most likely to break when chunkSize changes: an
+// exact multiple, one byte under, one byte over, and a small sub-block file.
+// Complements TestDownload_TruncatesFinalPaddedBlock (one fixed size) with
+// these boundary cases, and stays correct automatically as chunkSize is
+// retuned since every size below is derived from the package constant, never
+// a literal.
+func TestDownload_LastBlockTruncation(t *testing.T) {
+	sizes := map[string]int{
+		"exact_multiple_of_chunkSize": chunkSize * 2,
+		"one_byte_under_chunkSize":    chunkSize - 1,
+		"one_byte_over_chunkSize":     chunkSize + 1,
+		"sub_block":                   17,
+	}
+	for name, size := range sizes {
+		t.Run(name, func(t *testing.T) {
+			srv := newIntegFakeServer()
+			srv.cs.padReadsToRequestedSize = true // reproduce real MooseFS CS zero-padding
+			addr := srv.start(t)
+			b := newTestBackend(t, addr)
+			ctx := context.Background()
+
+			content := make([]byte, size)
+			for i := range content {
+				content[i] = byte(i)
+			}
+			src := writeTempFile(t, content)
+			remote := "/trunc_" + name + ".bin"
+			require.NoError(t, b.Upload(ctx, src, remote, nil))
+
+			dst := filepath.Join(t.TempDir(), name+"_out.bin")
+			require.NoError(t, b.Download(ctx, remote, dst, nil))
+
+			fi, err := os.Stat(dst)
+			require.NoError(t, err)
+			assert.Equal(t, int64(size), fi.Size(),
+				"downloaded file must match the remote size exactly regardless of chunkSize (currently %d bytes)", chunkSize)
+
+			got, err := os.ReadFile(dst)
+			require.NoError(t, err)
+			assert.Equal(t, content, got, "downloaded content must be byte-for-byte identical, with no trailing padding")
+		})
+	}
 }
 
 func TestDownload_withProgress(t *testing.T) {
