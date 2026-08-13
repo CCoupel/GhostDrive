@@ -39,6 +39,12 @@ type Client struct {
 	addr      string  // "host:port"
 	sessionID uint32  // assigned by master after Register
 	pool      *csPool // idle CS connection pool — prevents TIME_WAIT exhaustion (Windows #111)
+	// locCache caches chunk placement (chunklocationcache.go, #163 B1) so
+	// repeated reads within the same chunk skip the master roundtrip
+	// entirely. Guarded by its own mutex — never Client.mu — precisely so a
+	// cache hit does not serialize behind (or contend with) the single
+	// master connection.
+	locCache *chunkLocationCache
 }
 
 // Dial opens a TCP connection to host:port and returns a ready Client.
@@ -49,7 +55,12 @@ func Dial(host string, port int) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mfsclient: dial %s: %w", addr, err)
 	}
-	return &Client{conn: conn, addr: addr, pool: newCSPool()}, nil
+	return &Client{
+		conn:     conn,
+		addr:     addr,
+		pool:     newCSPool(),
+		locCache: newChunkLocationCache(chunkLocationCacheMaxEntries, chunkLocationCacheTTL),
+	}, nil
 }
 
 // Close closes the underlying TCP connection and all pooled CS connections.
@@ -919,17 +930,47 @@ func (c *Client) WriteChunkData(nodeID uint32, offset uint64, data []byte) error
 	return c.Write(nodeID, offset, data)
 }
 
-// locateChunk queries the master for the location of chunk index within file
-// nodeID (CLTOMA_FUSE_READ_CHUNK), returning (nil, nil) at EOF. c.mu is held
-// only for the duration of the master roundtrip.
+// locateChunk resolves the location of chunk index within file nodeID,
+// consulting the chunk-location cache (#163 B1) before ever touching the
+// master connection.
 //
-// Used both for the initial lookup in Read and to re-resolve a fresh location
-// before a retry (#160 D3bis, mirroring chunksdatacache_invalidate in the
-// official client, readdata.c:1989): the master's answer may name a
-// different, healthy chunk server on a retry, whereas blindly reusing the
-// first response's info.Servers keeps re-attacking the very CS that just
-// failed.
-func (c *Client) locateChunk(nodeID, index uint32) (*ChunkInfo, error) {
+//   - forceRefresh=false (the common case: first attempt of a read) — a
+//     cache hit returns immediately, no master roundtrip, no c.mu contention
+//     with any other in-flight master operation.
+//   - forceRefresh=true (a retry, #160 D3bis, mirroring
+//     chunksdatacache_invalidate in the official client, readdata.c:1989) —
+//     the cached entry (if any) is invalidated first and a fresh master
+//     roundtrip is always performed, so a retry can never re-attack the same
+//     cached, possibly-faulty placement it just failed against.
+//
+// A successful master roundtrip always (re)populates the cache, including on
+// forceRefresh, so the next read in the same chunk benefits from this call.
+// Returns (nil, nil) at EOF.
+func (c *Client) locateChunk(nodeID, index uint32, forceRefresh bool) (*ChunkInfo, error) {
+	key := chunkLocationKey{nodeID: nodeID, chunkIndex: index}
+
+	if forceRefresh {
+		c.locCache.invalidate(key)
+	} else if info, ok := c.locCache.find(key); ok {
+		return info, nil
+	}
+
+	info, err := c.locateChunkFromMaster(nodeID, index)
+	if err != nil {
+		return nil, err
+	}
+	if info != nil {
+		c.locCache.insert(key, info)
+	}
+	return info, nil
+}
+
+// locateChunkFromMaster performs the actual CLTOMA_FUSE_READ_CHUNK
+// roundtrip, unconditionally — no cache lookup, no cache write. c.mu is held
+// only for the duration of the roundtrip. Called exclusively by locateChunk;
+// every other caller should go through locateChunk so the cache stays
+// authoritative.
+func (c *Client) locateChunkFromMaster(nodeID, index uint32) (*ChunkInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -990,7 +1031,7 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 	index := uint32(offset / ChunkSize)
 	chunkOffset := uint32(offset % ChunkSize)
 
-	info, err := c.locateChunk(nodeID, index)
+	info, err := c.locateChunk(nodeID, index, false)
 	if err != nil {
 		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): %w", nodeID, offset, err)
 	}
@@ -1026,7 +1067,7 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 	locate := func(attempt int) (csLocateResult, error) {
 		curInfo := info
 		if attempt > 0 {
-			fresh, lErr := c.locateChunk(nodeID, index)
+			fresh, lErr := c.locateChunk(nodeID, index, true)
 			if lErr != nil {
 				return csLocateResult{}, lErr
 			}

@@ -58,8 +58,22 @@ var (
 	ErrFileNotFound = fmt.Errorf("moosefs: %w", plugins.ErrFileNotFound)
 )
 
-// chunkSize is the I/O chunk size used by Upload and Download.
-const chunkSize = 64 * 1024 // 64 KiB
+// chunkSize is the I/O block size used by Upload and Download for each local
+// read/write and each mfsclient Read/WriteChunkData call.
+//
+// #163 B2: this used to be 64 KiB, forcing one CLTOCS_READ chunk-server
+// roundtrip per 64 KiB of a download even though the wire protocol already
+// serves an arbitrarily large CLTOCS_READ as a stream of CSTOCL_READ_DATA
+// frames (ReadChunk, csclient.go) and readEC4At now splits a request across
+// shard boundaries as needed (ecclient.go) rather than requiring one call
+// per block. 4 MiB divides the 16 MiB shard size of a full 64 MiB EC4+1
+// chunk evenly (mfsclient.ChunkSize / 4), so the common case never needs
+// more than one shard-boundary split per Download iteration; a smaller last
+// chunk's smaller shards may still need a handful — readEC4At handles that
+// transparently. Not named "chunk" (unlike the historical 64 KiB name) to
+// avoid confusion with mfsclient.ChunkSize, the real 64 MiB MooseFS chunk —
+// see the cfapi ReadAt/ChunkSize() mismatch noted in the #163 plan (→ #161).
+const chunkSize = 4 * 1024 * 1024 // 4 MiB
 
 // ─── Backend ──────────────────────────────────────────────────────────────────
 
@@ -381,7 +395,7 @@ func dialAndRegister(cfg plugins.BackendConfig) (*mfsclient.Client, error) {
 // ─── File operations ──────────────────────────────────────────────────────────
 
 // Upload reads the local file at local and writes it to the remote path
-// remote in 64 KiB chunks via Mknod + Write.
+// remote in chunkSize blocks via Mknod + Write.
 // The remote parent directory must already exist.
 // On connection loss (EOF), it reconnects and retries once.
 func (b *Backend) Upload(ctx context.Context, local, remote string, progress plugins.ProgressCallback) error {
@@ -453,8 +467,9 @@ func (b *Backend) upload(ctx context.Context, local, remote string, progress plu
 	}
 
 	// ── Producer / consumer pipeline ─────────────────────────────────────────
-	// The producer goroutine reads the file sequentially in 64 KiB blocks and
-	// groups consecutive blocks into per-MooseFS-chunk jobs (64 MiB boundary).
+	// The producer goroutine reads the file sequentially in chunkSize blocks
+	// (#163 B2: 4 MiB) and groups consecutive blocks into per-MooseFS-chunk
+	// jobs (64 MiB boundary).
 	// Jobs are sent on a buffered channel (capacity = uploadConcurrency).
 	//
 	// The consumer loop (main goroutine) reads from the channel and spawns up to
@@ -477,7 +492,7 @@ func (b *Backend) upload(ctx context.Context, local, remote string, progress plu
 	go func() {
 		defer close(jobs)
 
-		readBuf := make([]byte, chunkSize) // 64 KiB I/O buffer (reused across reads)
+		readBuf := make([]byte, chunkSize) // I/O buffer (reused across reads), chunkSize bytes
 		var fileOffset uint64
 		var cur *chunkJob // chunk currently being accumulated
 
