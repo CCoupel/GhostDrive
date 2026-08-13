@@ -734,6 +734,54 @@ func TestReadEC4At_PartialLastChunkEOF(t *testing.T) {
 	assert.Equal(t, want, got, "returned bytes must be byte-correct against the underlying (shardSize-padded) shard data")
 }
 
+// TestLocateEC4Shard_BoundaryCases pins the boundary sweep code-reviewer ran
+// (and discarded) while approving 91844b5 — see
+// _work/reports/code-reviewer-20260813-103203.md. locateEC4Shard has now
+// produced two successive edge-case regressions in a row (the [MAJEUR] on
+// server-status staleness in 77ffe04's predecessor, and the QUALIF-blocking
+// crash fixed in 91844b5): a permanent, explicit test of its magnitude
+// boundaries — down to a 1-byte chunk and an empty one — is cheap insurance
+// against a future change silently breaking one of them again without any
+// test noticing.
+//
+// White-box, direct calls to locateEC4Shard (same package as ecclient.go) —
+// pure arithmetic, no network servers needed.
+func TestLocateEC4Shard_BoundaryCases(t *testing.T) {
+	tests := []struct {
+		name        string
+		chunkLength uint64 // info.Length, chunkIndex is always 0 so chunkDataSize == chunkLength here
+		chunkOffset uint32
+		wantEOF     bool
+		wantShard   uint32 // only checked when !wantEOF
+	}{
+		{"1-byte chunk, offset 0 (the only valid byte)", 1, 0, false, 0},
+		{"1-byte chunk, offset 1 (one past the only byte)", 1, 1, true, 0},
+		{"17-byte chunk, last valid offset", 17, 16, false, 0},
+		{"17-byte chunk, one past the end", 17, 17, true, 0},
+		{"empty chunk (Length=0) — pre-existing chunkDataSize==0 path, not touched by 91844b5", 0, 0, true, 0},
+		{"chunkDataSize exactly 4*mfsBlockSize (no rounding margin at all), offset at the exact boundary", 4 * 65536, 4 * 65536, true, 0},
+		{"same chunk, one byte before the boundary — still valid, in shard 3", 4*65536 - 1, 4*65536 - 2, false, 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &ChunkInfo{
+				ChunkID: 0xB0DA12,
+				Length:  tt.chunkLength,
+				Servers: make([]ChunkServer, 4), // placeholders — locateEC4Shard only needs len(Servers)==4
+			}
+			loc, err := locateEC4Shard(info, 0, tt.chunkOffset)
+			if tt.wantEOF {
+				assert.ErrorIs(t, err, errEC4EOF,
+					"chunkOffset=%d against a %d-byte chunk must be EOF", tt.chunkOffset, tt.chunkLength)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantShard, loc.shardIdx)
+		})
+	}
+}
+
 // ─── TestReadEC4Via_ClientRead ────────────────────────────────────────────────
 
 // TestReadEC4Via_ClientRead exercises the full Client.Read() path with a fake
