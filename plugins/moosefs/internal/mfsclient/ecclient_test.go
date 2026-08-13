@@ -598,6 +598,190 @@ func TestReadEC4Cmd0_TrueStaleness_TriggersRetry(t *testing.T) {
 	assert.Equal(t, shardData[0], got, "data must match shard 0 after retry")
 }
 
+// ─── TestReadEC4At_MultiMiBRead / ShardBoundarySplit (issue #163, B2) ────────
+//
+// Bugfix #163 (_work/reports/plan-20260812-155238.md, task 6, CA4):
+// readEC4At's documented precondition today is "size ≤ mfsBlockSize (64 KiB)
+// and the read must not cross a shard boundary" — exactly the granularity
+// B2 relaxes, since a shard is 16 MiB and ReadChunk already collects
+// multiple CSTOCL_READ_DATA frames per call. These two tests are expected to
+// fail against the pre-B2 implementation (still enforcing the 64 KiB
+// precondition) and pass once size is allowed up to shardSize, with
+// internal splitting across shard boundaries.
+
+// TestReadEC4At_MultiMiBRead verifies that a single read of several MiB
+// within one shard returns EXACTLY the same bytes as the concatenation of
+// the equivalent sequence of 64 KiB reads (CA4).
+func TestReadEC4At_MultiMiBRead(t *testing.T) {
+	const shardBlock = uint32(65536)
+	const logicalID = uint64(0x4D1B00)
+	const shardSize = 8 * 1024 * 1024 // 8 MiB — well within the 16 MiB EC4 shard size
+
+	var shardData [4][]byte
+	for i := range shardData {
+		shardData[i] = makeShardBytes(i, shardSize)
+	}
+	info, _ := startFourCSServers(t, logicalID, shardData)
+	info.Length = uint64(4 * shardSize)
+
+	c := makeECClient(t, info)
+
+	const bigRead = uint32(4 * 1024 * 1024) // 4 MiB — far beyond the old 64 KiB cap
+	got, err := c.readEC4At(1, info, 0, 0, bigRead)
+	require.NoError(t, err, "a multi-MiB read within a single shard must succeed once the size precondition is relaxed (CA4, #163 B2)")
+
+	var want []byte
+	for off := uint32(0); off < bigRead; off += shardBlock {
+		block, err := c.readEC4At(1, info, 0, off, shardBlock)
+		require.NoError(t, err)
+		want = append(want, block...)
+	}
+	assert.Equal(t, want, got, "a large read must return EXACTLY the same bytes as the concatenation of equivalent 64 KiB reads")
+}
+
+// TestReadEC4At_ShardBoundarySplit verifies that a read straddling the
+// boundary between two data shards is split internally into a per-shard
+// request each, and the concatenated result is byte-correct across the
+// boundary (CA4, #163 B2). Today's precondition explicitly forbids this
+// ("the read must not cross a shard boundary"); B2 must handle it instead
+// of leaving it to the caller.
+func TestReadEC4At_ShardBoundarySplit(t *testing.T) {
+	const logicalID = uint64(0x5B0D00)
+	const shardSize = uint32(1 * 1024 * 1024) // 1 MiB per shard — fast test, still multi-block
+
+	var shardData [4][]byte
+	for i := range shardData {
+		shardData[i] = makeShardBytes(i, int(shardSize))
+	}
+	info, _ := startFourCSServers(t, logicalID, shardData)
+	info.Length = uint64(4 * shardSize)
+
+	c := makeECClient(t, info)
+
+	// Straddle shard 0 → shard 1: last 4 KiB of shard 0 + first 4 KiB of shard 1.
+	const straddle = 4096
+	offset := shardSize - straddle
+	size := uint32(2 * straddle)
+
+	got, err := c.readEC4At(1, info, 0, offset, size)
+	require.NoError(t, err, "a read crossing a shard boundary must be split and served correctly, not rejected (CA4, #163 B2)")
+
+	want := append(append([]byte{}, shardData[0][shardSize-straddle:]...), shardData[1][:straddle]...)
+	assert.Equal(t, want, got, "a shard-straddling read must return the correct bytes from BOTH shards, in order")
+}
+
+// TestReadEC4At_PartialLastChunkEOF is the regression test for the v2.2.2
+// QUALIF-blocking bug (qa-20260813-101152.md): 8/8 real large files failed
+// to download with "shardIdx 4 out of range".
+//
+// shardSize is rounded UP (divCeil + alignToBlock), so for a chunk whose
+// real data is NOT an exact multiple of 4*shardSize — i.e. the last MooseFS
+// chunk of almost every real file — a read that asks for more than the
+// chunk's remaining real data (exactly what Download() does: it always
+// requests a fixed block size, relying on the callee to report how much is
+// actually available, not the other way around) used to walk readEC4At's
+// internal segment loop past the real data and land exactly on
+// chunkOffset == 4*shardSize — one past the 4 valid shards (0-3) — instead
+// of stopping at the chunk's real length. Both TestReadEC4At_MultiMiBRead
+// and TestReadEC4At_ShardBoundarySplit use an info.Length that IS an exact
+// multiple of 4*shardSize and so never exercised this.
+func TestReadEC4At_PartialLastChunkEOF(t *testing.T) {
+	const logicalID = uint64(0x7A47C0)
+
+	// chunkDataSize deliberately NOT a multiple of 4*shardSize (computed
+	// exactly as locateEC4Shard computes it) — the case both existing #163
+	// B2 tests missed, since they use an info.Length that IS an exact
+	// multiple of 4*shardSize.
+	const chunkDataSize = uint32(3*1024*1024 + 12345)
+	shardSize := alignToBlock(divCeil(chunkDataSize, 4), 65536)
+
+	// Each shard is provisioned at the FULL computed shardSize, mirroring a
+	// real chunk server: a physical shard is always shardSize bytes
+	// (zero-padded past its share of the real data, #160-style), never
+	// exactly chunkDataSize/4.
+	var shardData [4][]byte
+	for i := range shardData {
+		shardData[i] = makeShardBytes(i, int(shardSize))
+	}
+	info, _ := startFourCSServers(t, logicalID, shardData)
+	info.Length = uint64(chunkDataSize) // the chunk's REAL data, not a multiple of 4*shardSize
+
+	c := makeECClient(t, info)
+
+	// Ask for far more than the chunk's real data — comfortably past
+	// 4*shardSize, the exact boundary where the v2.2.2 bug triggered
+	// ("shardIdx 4 out of range" at chunkOffset == 4*shardSize) — mirroring
+	// Download() asking for a fixed block size without knowing in advance
+	// how much of this chunk is real.
+	requestSize := 8 * shardSize
+	got, err := c.readEC4At(1, info, 0, 0, requestSize)
+	require.NoError(t, err,
+		"reading past the chunk's real data must return a clean (short) result, never an error — v2.2.2 regression")
+
+	// readEC4At's contract (documented on the function) is "never reference
+	// a nonexistent 5th shard", not "trim to the exact real length" — that
+	// final byte-exact truncation is Download()'s job (#160 4e0cbd3),
+	// exactly as for non-EC chunks. With shards 0-3 each fully provisioned
+	// and requestSize comfortably exceeding 4*shardSize, every one of the 4
+	// segments is read in full, so the result is deterministically the
+	// entire nominal 4-shard span — never more (the fixed bug), never less
+	// (nothing here should produce a short read).
+	require.Len(t, got, int(4*shardSize),
+		"must read exactly the 4 valid shards in full, never attempt a 5th nonexistent one")
+
+	want := append(append(append([]byte{}, shardData[0]...), shardData[1]...), shardData[2]...)
+	want = append(want, shardData[3]...)
+	assert.Equal(t, want, got, "returned bytes must be byte-correct against the underlying (shardSize-padded) shard data")
+}
+
+// TestLocateEC4Shard_BoundaryCases pins the boundary sweep code-reviewer ran
+// (and discarded) while approving 91844b5 — see
+// _work/reports/code-reviewer-20260813-103203.md. locateEC4Shard has now
+// produced two successive edge-case regressions in a row (the [MAJEUR] on
+// server-status staleness in 77ffe04's predecessor, and the QUALIF-blocking
+// crash fixed in 91844b5): a permanent, explicit test of its magnitude
+// boundaries — down to a 1-byte chunk and an empty one — is cheap insurance
+// against a future change silently breaking one of them again without any
+// test noticing.
+//
+// White-box, direct calls to locateEC4Shard (same package as ecclient.go) —
+// pure arithmetic, no network servers needed.
+func TestLocateEC4Shard_BoundaryCases(t *testing.T) {
+	tests := []struct {
+		name        string
+		chunkLength uint64 // info.Length, chunkIndex is always 0 so chunkDataSize == chunkLength here
+		chunkOffset uint32
+		wantEOF     bool
+		wantShard   uint32 // only checked when !wantEOF
+	}{
+		{"1-byte chunk, offset 0 (the only valid byte)", 1, 0, false, 0},
+		{"1-byte chunk, offset 1 (one past the only byte)", 1, 1, true, 0},
+		{"17-byte chunk, last valid offset", 17, 16, false, 0},
+		{"17-byte chunk, one past the end", 17, 17, true, 0},
+		{"empty chunk (Length=0) — pre-existing chunkDataSize==0 path, not touched by 91844b5", 0, 0, true, 0},
+		{"chunkDataSize exactly 4*mfsBlockSize (no rounding margin at all), offset at the exact boundary", 4 * 65536, 4 * 65536, true, 0},
+		{"same chunk, one byte before the boundary — still valid, in shard 3", 4*65536 - 1, 4*65536 - 2, false, 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &ChunkInfo{
+				ChunkID: 0xB0DA12,
+				Length:  tt.chunkLength,
+				Servers: make([]ChunkServer, 4), // placeholders — locateEC4Shard only needs len(Servers)==4
+			}
+			loc, err := locateEC4Shard(info, 0, tt.chunkOffset)
+			if tt.wantEOF {
+				assert.ErrorIs(t, err, errEC4EOF,
+					"chunkOffset=%d against a %d-byte chunk must be EOF", tt.chunkOffset, tt.chunkLength)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantShard, loc.shardIdx)
+		})
+	}
+}
+
 // ─── TestReadEC4Via_ClientRead ────────────────────────────────────────────────
 
 // TestReadEC4Via_ClientRead exercises the full Client.Read() path with a fake

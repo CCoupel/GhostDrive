@@ -14,6 +14,11 @@
 > corrigée dans `internal/placeholder`). Voir
 > `_work/reports/plan-20260812-102022.md` et
 > `docs/diagrams/moosefs-ec4-read-statemachine.md`.
+>
+> **Mise à jour 2026-08-13** — bugfix #163 (copies de masse lentes, cache de
+> localisation de chunk + granularité de lecture) : voir la procédure dédiée
+> [`mass-copy-performance-163.md`](mass-copy-performance-163.md) (mesure de
+> débit avant/après, obligatoire pour valider ce correctif).
 
 ---
 

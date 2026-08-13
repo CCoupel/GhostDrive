@@ -62,6 +62,9 @@ type integFakeCSServer struct {
 	// read semantics it was written against; set explicitly by tests that
 	// need to reproduce the real padding behaviour.
 	padReadsToRequestedSize bool
+	// csReadCount counts CLTOCS_READ requests (#163 baseline: one call per
+	// Client/ReadChunk invocation reaching the chunk server).
+	csReadCount atomic.Int32
 }
 
 func newIntegFakeCSServer() *integFakeCSServer {
@@ -176,6 +179,7 @@ func (s *integFakeCSServer) handleConn(conn net.Conn) {
 }
 
 func (s *integFakeCSServer) serveRead(conn net.Conn, payload []byte) {
+	s.csReadCount.Add(1) // #163 baseline: one call per ReadChunk invocation
 	if len(payload) < 20 {
 		return
 	}
@@ -273,6 +277,7 @@ type integFakeServer struct {
 	csIP            uint32             // CS listen IP (uint32 big-endian)
 	csPort          uint16             // CS listen port
 	registerCount   atomic.Int32       // counts successful NewSession REGISTER calls
+	readChunkCount  atomic.Int32       // counts CLTOMA_FUSE_READ_CHUNK requests (#163 baseline)
 	getAttrErrIDs   map[uint32]bool    // nodeIDs for which svrGetAttr returns StatusENOENT
 }
 
@@ -771,6 +776,7 @@ func (s *integFakeServer) svrRead(conn net.Conn, payload []byte) {
 // svrReadChunk handles CLTOMA_FUSE_READ_CHUNK (432).
 // Pre-loads node content into the CS, then replies with ChunkInfo (proto 2).
 func (s *integFakeServer) svrReadChunk(conn net.Conn, payload []byte) {
+	s.readChunkCount.Add(1) // #163 baseline: one call per Client.locateChunk invocation
 	if len(payload) < 12 {
 		return
 	}
@@ -1291,6 +1297,120 @@ func TestDownload_TruncatesFinalPaddedBlock(t *testing.T) {
 	got, err := os.ReadFile(dst)
 	require.NoError(t, err)
 	assert.Equal(t, content, got, "downloaded content must be byte-for-byte identical, with no trailing zero padding")
+}
+
+// TestDownload_ChunkLocationCacheHitRate is issue #163's post-B1/B2 baseline
+// / regression guard (plan task 2 + CA1, _work/reports/plan-20260812-155238.md).
+//
+// Measured PRE-FIX (chunkSize=64 KiB, no location cache; captured before this
+// commit, same reference-file methodology, file=2,109,497 B / 33 blocks):
+// locateChunk_calls=33, ReadChunk_calls=33 — one master roundtrip AND one
+// chunk-server roundtrip per 64 KiB block, exactly the pattern the plan's
+// arithmetic proof (from the issue's production logs, ~4.03-4.25 ms/RT,
+// ~8 MB/s) attributes the latency plateau to.
+//
+// Measured POST-FIX (chunkSize=4 MiB, B1 chunk-location cache + B2 shard-
+// aware multi-MiB reads), this test's reference file (3 chunkSize blocks +
+// a partial 4th, still one 64 MiB MooseFS chunk): locateChunk_calls=1 —
+// every block after the first is a cache hit — ReadChunk_calls=4 (one per
+// Download iteration; B2 raises the bytes per roundtrip, it does not by
+// itself reduce the iteration count below what the read granularity
+// requires — B1 is what collapses the *master* roundtrips specifically).
+//
+// This in-memory fake server has near-zero network latency, so *wall time*
+// here is not representative of the real ~4 ms/roundtrip plateau — the
+// authoritative duration/throughput baseline remains the issue's own
+// production logs, cited above and in the dev-plugin handoff for #163. What
+// this test gives, deterministically and reproducibly, is the *call count*
+// that CA1 is about, guarded as a regression test going forward.
+func TestDownload_ChunkLocationCacheHitRate(t *testing.T) {
+	srv := newIntegFakeServer()
+	addr := srv.start(t)
+	b := newTestBackend(t, addr)
+	ctx := context.Background()
+
+	// Several chunkSize (4 MiB) blocks, still within one 64 MiB MooseFS
+	// chunk — every block belongs to chunkIndex 0, so this proves the cache
+	// keeps paying off across multiple Download iterations, not just
+	// trivially for a file that fits in a single block.
+	const size = 3*chunkSize + 777777
+	content := make([]byte, size)
+	for i := range content {
+		content[i] = byte(i)
+	}
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/cachehit.bin", nil))
+
+	srv.readChunkCount.Store(0)
+	srv.cs.csReadCount.Store(0)
+
+	dst := filepath.Join(t.TempDir(), "cachehit_out.bin")
+	start := time.Now()
+	require.NoError(t, b.Download(ctx, "/cachehit.bin", dst, nil))
+	elapsed := time.Since(start)
+
+	got, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	require.Equal(t, content, got, "download must be byte-correct at the larger read granularity")
+
+	locateChunkCalls := srv.readChunkCount.Load()
+	readChunkCalls := srv.cs.csReadCount.Load()
+	expectedBlocks := (size + chunkSize - 1) / chunkSize
+
+	t.Logf("#163 post-fix — file=%d bytes (%d blocks of %d B) elapsed=%v locateChunk_calls=%d ReadChunk_calls=%d",
+		size, expectedBlocks, chunkSize, elapsed, locateChunkCalls, readChunkCalls)
+
+	assert.EqualValues(t, 1, locateChunkCalls,
+		"CA1: the chunk location cache must serve every block of the same chunk after the first — locateChunk must be called exactly once")
+	assert.EqualValues(t, expectedBlocks, readChunkCalls,
+		"one ReadChunk call per Download iteration is expected at this granularity")
+}
+
+// TestDownload_LastBlockTruncation is #163 Phase 4 task 18 (CA11): with
+// whatever new (larger) chunkSize B2 lands, Download() must still write
+// EXACTLY the remote size to disk — never padded to a chunkSize multiple —
+// across the file sizes most likely to break when chunkSize changes: an
+// exact multiple, one byte under, one byte over, and a small sub-block file.
+// Complements TestDownload_TruncatesFinalPaddedBlock (one fixed size) with
+// these boundary cases, and stays correct automatically as chunkSize is
+// retuned since every size below is derived from the package constant, never
+// a literal.
+func TestDownload_LastBlockTruncation(t *testing.T) {
+	sizes := map[string]int{
+		"exact_multiple_of_chunkSize": chunkSize * 2,
+		"one_byte_under_chunkSize":    chunkSize - 1,
+		"one_byte_over_chunkSize":     chunkSize + 1,
+		"sub_block":                   17,
+	}
+	for name, size := range sizes {
+		t.Run(name, func(t *testing.T) {
+			srv := newIntegFakeServer()
+			srv.cs.padReadsToRequestedSize = true // reproduce real MooseFS CS zero-padding
+			addr := srv.start(t)
+			b := newTestBackend(t, addr)
+			ctx := context.Background()
+
+			content := make([]byte, size)
+			for i := range content {
+				content[i] = byte(i)
+			}
+			src := writeTempFile(t, content)
+			remote := "/trunc_" + name + ".bin"
+			require.NoError(t, b.Upload(ctx, src, remote, nil))
+
+			dst := filepath.Join(t.TempDir(), name+"_out.bin")
+			require.NoError(t, b.Download(ctx, remote, dst, nil))
+
+			fi, err := os.Stat(dst)
+			require.NoError(t, err)
+			assert.Equal(t, int64(size), fi.Size(),
+				"downloaded file must match the remote size exactly regardless of chunkSize (currently %d bytes)", chunkSize)
+
+			got, err := os.ReadFile(dst)
+			require.NoError(t, err)
+			assert.Equal(t, content, got, "downloaded content must be byte-for-byte identical, with no trailing padding")
+		})
+	}
 }
 
 func TestDownload_withProgress(t *testing.T) {
