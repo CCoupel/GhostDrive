@@ -62,6 +62,9 @@ type integFakeCSServer struct {
 	// read semantics it was written against; set explicitly by tests that
 	// need to reproduce the real padding behaviour.
 	padReadsToRequestedSize bool
+	// csReadCount counts CLTOCS_READ requests (#163 baseline: one call per
+	// Client/ReadChunk invocation reaching the chunk server).
+	csReadCount atomic.Int32
 }
 
 func newIntegFakeCSServer() *integFakeCSServer {
@@ -176,6 +179,7 @@ func (s *integFakeCSServer) handleConn(conn net.Conn) {
 }
 
 func (s *integFakeCSServer) serveRead(conn net.Conn, payload []byte) {
+	s.csReadCount.Add(1) // #163 baseline: one call per ReadChunk invocation
 	if len(payload) < 20 {
 		return
 	}
@@ -273,6 +277,7 @@ type integFakeServer struct {
 	csIP            uint32             // CS listen IP (uint32 big-endian)
 	csPort          uint16             // CS listen port
 	registerCount   atomic.Int32       // counts successful NewSession REGISTER calls
+	readChunkCount  atomic.Int32       // counts CLTOMA_FUSE_READ_CHUNK requests (#163 baseline)
 	getAttrErrIDs   map[uint32]bool    // nodeIDs for which svrGetAttr returns StatusENOENT
 }
 
@@ -771,6 +776,7 @@ func (s *integFakeServer) svrRead(conn net.Conn, payload []byte) {
 // svrReadChunk handles CLTOMA_FUSE_READ_CHUNK (432).
 // Pre-loads node content into the CS, then replies with ChunkInfo (proto 2).
 func (s *integFakeServer) svrReadChunk(conn net.Conn, payload []byte) {
+	s.readChunkCount.Add(1) // #163 baseline: one call per Client.locateChunk invocation
 	if len(payload) < 12 {
 		return
 	}
@@ -1291,6 +1297,72 @@ func TestDownload_TruncatesFinalPaddedBlock(t *testing.T) {
 	got, err := os.ReadFile(dst)
 	require.NoError(t, err)
 	assert.Equal(t, content, got, "downloaded content must be byte-for-byte identical, with no trailing zero padding")
+}
+
+// TestDownload_NetworkRoundtripBaseline is issue #163's Phase 0 baseline
+// measurement (task 2 of the plan, _work/reports/plan-20260812-155238.md) —
+// NOT a pass/fail regression test. It counts, against a reference file that
+// spans multiple 64 KiB blocks but stays within one 64 MiB MooseFS chunk, how
+// many CLTOMA_FUSE_READ_CHUNK requests (locateChunk) and CLTOCS_READ requests
+// (ReadChunk) a single Download() issues.
+//
+// This in-memory fake server has near-zero network latency, so the *wall
+// time* it reports is not representative of the real ~4.03-4.25 ms/roundtrip
+// plateau measured from the issue's production logs (see the plan's
+// arithmetic proof) — that real-world duration/throughput baseline is cited
+// from the issue logs directly, not re-derived here. What this test DOES
+// give, deterministically and reproducibly, is the *call count* baseline
+// that CA1 is about: before B1 (chunk-location cache), locateChunk is called
+// once per 64 KiB block, i.e. redundantly for every block of the same 64 MiB
+// chunk. Re-run after implementing B1+B2 to see the post-fix counts — the
+// numbers from both runs belong in the dev-plugin handoff for #163.
+func TestDownload_NetworkRoundtripBaseline(t *testing.T) {
+	srv := newIntegFakeServer()
+	addr := srv.start(t)
+	b := newTestBackend(t, addr)
+	ctx := context.Background()
+
+	// Deliberately not a multiple of chunkSize (64 KiB) — exercises the same
+	// final-block truncation path as TestDownload_TruncatesFinalPaddedBlock —
+	// and well within a single 64 MiB MooseFS chunk, so every block belongs
+	// to chunkIndex 0: the ratio this test reports is exactly "calls per
+	// chunk", not diluted by multiple chunks.
+	const size = 2*1024*1024 + 12345
+	content := make([]byte, size)
+	for i := range content {
+		content[i] = byte(i)
+	}
+	src := writeTempFile(t, content)
+	require.NoError(t, b.Upload(ctx, src, "/baseline.bin", nil))
+
+	srv.readChunkCount.Store(0)
+	srv.cs.csReadCount.Store(0)
+
+	dst := filepath.Join(t.TempDir(), "baseline_out.bin")
+	start := time.Now()
+	require.NoError(t, b.Download(ctx, "/baseline.bin", dst, nil))
+	elapsed := time.Since(start)
+
+	got, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	require.Equal(t, content, got, "baseline download must still be byte-correct")
+
+	locateChunkCalls := srv.readChunkCount.Load()
+	readChunkCalls := srv.cs.csReadCount.Load()
+	expectedBlocks := (size + chunkSize - 1) / chunkSize
+
+	t.Logf("#163 baseline — file=%d bytes (%d blocks of %d B) elapsed=%v locateChunk_calls=%d ReadChunk_calls=%d",
+		size, expectedBlocks, chunkSize, elapsed, locateChunkCalls, readChunkCalls)
+
+	// Documents current (pre-B1/B2) behaviour: one locateChunk + one
+	// ReadChunk per 64 KiB block, all against the same chunk. This assertion
+	// is expected to change (far fewer locateChunk calls) once the Phase 1
+	// location cache lands — update it alongside that change rather than
+	// deleting it, so the improvement stays proven rather than assumed.
+	assert.EqualValues(t, expectedBlocks, locateChunkCalls,
+		"pre-fix baseline: locateChunk is called once per 64 KiB block (B1 not yet applied)")
+	assert.EqualValues(t, expectedBlocks, readChunkCalls,
+		"pre-fix baseline: ReadChunk is called once per 64 KiB block (B2 not yet applied)")
 }
 
 func TestDownload_withProgress(t *testing.T) {
