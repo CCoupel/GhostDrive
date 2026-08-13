@@ -83,6 +83,21 @@ func locateEC4Shard(info *ChunkInfo, chunkIndex uint32, chunkOffset uint32) (ec4
 	if chunkDataSize == 0 {
 		return ec4ShardLocation{}, errEC4EOF
 	}
+	// QA regression (v2.2.2, qa-20260813-101152.md): chunkOffset can legally
+	// reach or exceed chunkDataSize while still being LESS than 4*shardSize,
+	// because shardSize below is rounded UP (divCeil + alignToBlock). For a
+	// partial last MooseFS chunk (i.e. almost every real file), that rounding
+	// margin means the caller's segmented read loop (readEC4At, bounded by
+	// the requested size, not by chunkDataSize) can present an offset that is
+	// genuinely past the chunk's real data yet still lands inside what looks
+	// like a valid shard index arithmetic-wise — or, at the very edge, lands
+	// exactly on shardIdx==4 (out of the 4 valid shards), surfacing as
+	// "shardIdx 4 out of range" instead of a clean EOF. Must be checked here,
+	// before any shardSize-based division, so every offset at or past the
+	// real data is EOF regardless of the rounding margin.
+	if chunkOffset >= chunkDataSize {
+		return ec4ShardLocation{}, errEC4EOF
+	}
 
 	// shardSize: size of each data shard, aligned to a MooseFS block (65536 B).
 	// Each of the 4 data shards covers exactly shardSize bytes of the chunk.
