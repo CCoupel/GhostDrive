@@ -8,6 +8,21 @@
 
 ---
 
+## Objectifs Intrinseques (OBLIGATOIRE)
+
+Quel que soit son role, chaque agent DOIT rester attentif en permanence aux quatre axes suivants dans tout travail produit :
+
+| Axe | Attention portee |
+|-----|-------------------|
+| **Securite** | Prevenir la corruption des donnees, les intrusions (injection, XSS, secrets exposes...) et les atteintes a la disponibilite du service |
+| **Performance** | Eviter les regressions, les traitements inutilement couteux, les boucles/requetes non optimisees |
+| **Maintenabilite** | Code lisible, structure, coherent avec les conventions du projet |
+| **Mutualisation du code** | Reutiliser/factoriser l'existant plutot que dupliquer une logique deja presente ailleurs |
+
+Ces axes s'appliquent en continu pendant le travail (conception, implementation, revue), pas uniquement lors d'une revue dediee (`/code-review security`, `/code-review performance`, `/code-review rationalization`).
+
+---
+
 ## Gestion de la Todo List (OBLIGATOIRE)
 
 Vous DEVEZ utiliser le tool `TodoWrite` pour suivre votre progression de maniere visible.
@@ -185,6 +200,24 @@ Action requise : [ce dont j'ai besoin]
 
 ---
 
+## Gestion des Versions (OBLIGATOIRE)
+
+> **Reference complete** (cycle de vie detaille, exemple, regle du milestone) : `commands/context/COMMON.md` section 5.
+> **Qui incremente quoi** (agents dev/deploy) : `context/DEV_COMMON.md`.
+
+Format : `X.Y.Z.a` en dev/qualif, `X.Y.Z` en prod (le `a` n'est jamais publie en prod).
+
+Le milestone GitHub actif est la SEULE source de verite pour `X.Y.Z` — fixe des sa creation, jamais recalcule par les agents. Aucun developpement ne se fait hors milestone.
+
+| Segment | Role |
+|---------|------|
+| `X` | Compatibilite des donnees (DB, fichiers). Fixe par le milestone |
+| `Y` | Compteur de milestone/livraison. Fixe par le milestone |
+| `Z` | Compteur de bugfix au sein de la ligne `X.Y`. Fixe par le milestone |
+| `a` | Compteur de build, gere exclusivement par `deploy` (tache BUILD, agnostique a l'environnement). Les agents `dev-*` ne le touchent jamais. Jamais visible en prod |
+
+---
+
 ## Coordination Inter-Agents
 
 ### Workflow Standard
@@ -223,6 +256,8 @@ Chaque agent `xxx.template.md` peut avoir un fichier compagnon `xxx.md` dans le 
 **Si ce fichier existe, le lire après le fichier `.template.md`** — il contient les règles et adaptations spécifiques au projet.
 Pour toute modification du comportement de cet agent, écrire dans `xxx.md` (jamais dans `xxx.template.md`).
 
+Les fichiers `context/` partagés (`context/COMMON.md`, `context/GITHUB.md`, `context/DEV_COMMON.md`...) suivent le même pattern : `context/X.template.md` (sync) + `context/X.md` compagnon optionnel (tracké git). Le lire après le `.template.md` s'il existe. Pour adapter une règle partagée au projet, écrire dans le compagnon `context/X.md`, jamais dans `context/X.template.md`.
+
 ---
 
 ## References Projet
@@ -235,5 +270,5 @@ Pour toute modification du comportement de cet agent, écrire dans `xxx.md` (jam
 |---------|-------------|
 | `CLAUDE.md` | Architecture complete |
 | `CHANGELOG.md` | Historique des versions |
-| `{VERSION_FILE}` | Version actuelle |
+| `` | Version actuelle |
 | `contracts/*.md` | Contrats API |

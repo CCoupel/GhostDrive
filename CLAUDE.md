@@ -166,29 +166,34 @@ La source des donnees — varie selon le plugin :
 
 ---
 
-## Architecture des Agents
+## Agents Disponibles
 
-### Agents de Workflow
+> Le CDP (orchestrateur) est porté par le Claude principal (`teamleader.md`) — jamais un teammate séparé, voir "Rôle Teamleader" ci-dessous.
 
-| Agent | Role | Fichier |
-|-------|------|---------|
-| **CDP** | Orchestrateur | `.claude/agents/cdp.md` |
-| **Planner** | Plans d'implementation + contrats API | `.claude/agents/implementation-planner.md` |
-| **Reviewer** | Revue de code | `.claude/agents/code-reviewer.md` |
-| **QA** | Tests et validation | `.claude/agents/qa.md` |
-| **Security** | Audit securite | `.claude/agents/security.md` |
-| **Doc** | Documentation | `.claude/agents/doc-updater.md` |
-| **Deploy** | Deploiement binaires | `.claude/agents/deploy.md` |
-| **Infra** | CI/CD + pipelines | `.claude/agents/infra.md` |
-| **PR Reviewer** | Validation PR externes | `.claude/agents/pr-reviewer.md` |
-| **Marketing** | Communication de release | `.claude/agents/marketing-release.md` |
+| Nom | Rôle | Fichier | Spawn |
+|-----|------|---------|-------|
+| `planner` | Plans d'implémentation + contrats API | `.claude/agents/implementation-planner.template.md` | permanent |
+| `dev-backend` | Backend (Go + moteur sync + plugins) | `.claude/agents/dev-backend.md` | permanent |
+| `dev-frontend` | Frontend (Wails + React + TypeScript) | `.claude/agents/dev-frontend.md` | permanent |
+| `dev-plugin` | Plugins backends (StorageBackend : WebDAV, MooseFS...) | `.claude/agents/dev-plugin.md` | permanent |
+| `test-writer` | Scripts de tests + procédures QA | `.claude/agents/test-writer.template.md` | permanent |
+| `code-reviewer` | Revue de code | `.claude/agents/code-reviewer.template.md` | permanent |
+| `qa` | Exécution des tests et validation | `.claude/agents/qa.template.md` | permanent |
+| `doc-updater` | Documentation | `.claude/agents/doc-updater.template.md` | permanent |
+| `deploy` | Déploiement QUALIF/PROD | `.claude/agents/deploy.template.md` (+ `.claude/agents/deploy.md`) | permanent |
+| `security` | Audit sécurité | `.claude/agents/security.template.md` | ponctuel |
+| `infra` | Infrastructure (CI/CD, pipelines) | `.claude/agents/infra.template.md` | ponctuel |
+| `pr-reviewer` | Validation des PR externes | `.claude/agents/pr-reviewer.template.md` | ponctuel |
+| `marketing-release` | Communication de release | `.claude/agents/marketing-release.template.md` | ponctuel |
 
-### Agents de Developpement
+> **Fichier** pointe vers le `.template.md` — géré par sync, toujours présent. Un compagnon
+> `.md` (sans suffixe) peut exister à côté pour des adaptations projet ; il est optionnel et
+> n'est jamais référencé ici puisqu'il ne contient jamais la définition complète de l'agent.
+> Nom canonique `deploy` (pas `deployer` comme dans le template générique) — convention
+> ghostdrive-team, dérogation assumée au nom générique du template.
 
-| Agent | Role | Fichier |
-|-------|------|---------|
-| **dev-backend** | Go + moteur sync + plugins | `.claude/agents/dev-backend.md` |
-| **dev-frontend** | Wails + React + TypeScript | `.claude/agents/dev-frontend.md` |
+> **permanent** = spawné au `/start-session`, reste en IDLE toute la session.
+> **ponctuel** = spawné à la demande par la commande dédiée, fermé après DONE.
 
 ---
 
@@ -294,9 +299,19 @@ La source des donnees — varie selon le plugin :
 
 ### Versioning
 
+Format dev : `X.Y.Z.a` — Format prod : `X.Y.Z` (le `a` n'est jamais publie en prod).
+Regles completes (les 5 operations, regle d'or bug remonte, milestone comme source de la version cible) : voir `.claude/commands/context/COMMON.md` section 5.
+
+| Segment | Role |
+|---------|------|
+| X | Compatibilite des donnees (DB, fichiers) |
+| Y | Compteur de milestone/livraison — impair = dev, pair = prod, avance toujours de +1 |
+| Z | Compteur de bugfix — remis a 0 au demarrage d'un nouveau milestone |
+| a | Iteration dev interne — jamais visible en prod |
+
 Les 3 sources de verite doivent etre synchronisees avant un tag :
-- `config.json` : `"version": "X.Y.Z"`
-- `frontend/package.json` : `"version": "X.Y.Z"`
+- `config.json` : `"version": "X.Y.Z.a"` (dev) / `"X.Y.Z"` (prod)
+- `frontend/package.json` : idem
 - Git tag : `vX.Y.Z`
 
 ### Tests

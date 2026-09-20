@@ -77,14 +77,18 @@ gh issue create \
   --body "<description>" \
   --label "<label1>,<label2>" \
   --assignee "<login>" \
-  --milestone "<version>"
+  --milestone "<TITLE>"
 ```
+
+> `--milestone` exige le titre exact du milestone (pas seulement sa version — le titre peut
+> porter un nom apres " — ", voir section 3.1). Resoudre `<TITLE>` au prealable si on ne
+> dispose que de la version (voir section 3.1 "Milestone correspondant a une version").
 
 ### 2.4 Modifier une issue
 
 ```bash
 # Assigner un milestone
-gh issue edit <numero> --milestone "<version>"
+gh issue edit <numero> --milestone "<TITLE>"
 
 # Changer les labels
 gh issue edit <numero> --add-label "bug" --remove-label "feature"
@@ -127,12 +131,19 @@ gh api repos/{owner}/{repo}/milestones \
 gh api repos/{owner}/{repo}/milestones \
   --jq '[.[] | select(.state=="open")] | sort_by(.due_on) | .[0]'
 
-# Milestone correspondant a une version
+# Milestone correspondant a une version — matching par PREFIXE, jamais par titre exact ni sur
+# un separateur precis (le titre reel peut porter un nom descriptif apres le prefixe, avec un
+# separateur non garanti — convention " — " via /milestone new, mais milestones plus
+# anciens/manuels parfois en " - " ou autre ; voir context/COMMON.md section 5.7). Seul compte
+# le caractere suivant le prefixe : ni chiffre ni point.
 gh api repos/{owner}/{repo}/milestones \
-  --jq '.[] | select(.title=="<version>")'
+  --jq '.[] | select(.title == "<version>" or ((.title | ltrimstr("<version>")) as $rest
+        | $rest != .title and ($rest == "" or ($rest[0:1] | test("[0-9.]") | not))))'
 ```
 
 ### 3.2 Creer un milestone
+
+Titre = `<version>` seul, ou `<version> — <nom>` si un nom descriptif est fourni.
 
 ```bash
 # Sans echeance
@@ -141,10 +152,10 @@ gh api repos/{owner}/{repo}/milestones \
   -f title="<version>" \
   -f description="Release <version>"
 
-# Avec echeance (format ISO 8601)
+# Avec nom descriptif et echeance (format ISO 8601)
 gh api repos/{owner}/{repo}/milestones \
   --method POST \
-  -f title="<version>" \
+  -f title="<version> — <nom>" \
   -f description="Release <version>" \
   -f due_on="<YYYY-MM-DD>T23:59:59Z"
 ```
@@ -152,9 +163,10 @@ gh api repos/{owner}/{repo}/milestones \
 ### 3.3 Cloturer un milestone
 
 ```bash
-# Recuperer d'abord le numero du milestone
+# Recuperer d'abord le numero du milestone — matching par prefixe (voir 3.1)
 MILESTONE_NUM=$(gh api repos/{owner}/{repo}/milestones \
-  --jq '.[] | select(.title=="<version>") | .number')
+  --jq '.[] | select(.title == "<version>" or ((.title | ltrimstr("<version>")) as $rest
+        | $rest != .title and ($rest == "" or ($rest[0:1] | test("[0-9.]") | not)))) | .number')
 
 # Cloturer
 gh api repos/{owner}/{repo}/milestones/$MILESTONE_NUM \
@@ -165,9 +177,10 @@ gh api repos/{owner}/{repo}/milestones/$MILESTONE_NUM \
 ### 3.4 Progression d'un milestone
 
 ```bash
-# Calcul : closed / (open + closed) * 100
+# Calcul : closed / (open + closed) * 100 — matching par prefixe (voir 3.1)
 gh api repos/{owner}/{repo}/milestones \
-  --jq '.[] | select(.title=="<version>") |
+  --jq '.[] | select(.title == "<version>" or ((.title | ltrimstr("<version>")) as $rest
+        | $rest != .title and ($rest == "" or ($rest[0:1] | test("[0-9.]") | not)))) |
     {
       title,
       total: (.open_issues + .closed_issues),
@@ -363,11 +376,9 @@ fi
 
 | Element | Convention | Exemple |
 |---------|------------|---------|
-| Milestone | Version SemVer | `v1.2.0` |
-| Tag | Prefixe `v` + SemVer | `v1.2.0` |
-| Branche feature | `feature/<nom-court>` | `feature/auth-oauth` |
-| Branche bugfix | `fix/<nom-court>` | `fix/crash-login` |
-| Branche hotfix | `hotfix/<nom-court>` | `hotfix/security-patch` |
+| Milestone | `vX.Y.Z` complet (sans `a`), optionnellement suivi de `" — <nom>"` — seule source de verite de la version du cycle, matching toujours par prefixe | `v1.4.0` ou `v1.4.0 — Authentification OAuth2` |
+| Tag | Prefixe `v` + `X.Y.Z` | `v1.4.1` |
+| Branche milestone | `milestone/vX.Y.Z` — accueille tout le travail FEATURE/BUGFIX/HOTFIX/REFACTOR du cycle (un seul milestone en developpement a la fois) | `milestone/v1.4.0` |
 
 ### 8.2 Labels standards
 
@@ -378,12 +389,78 @@ fi
 | `hotfix`, `urgent`, `critical` | Correctif urgent → `/hotfix` |
 | `refactor`, `tech-debt` | Refactoring → `/refactor` |
 | `security`, `vulnerability` | Securite → `/secu` |
+| `breaking` | Rupture de compatibilite de donnees → impacte `X` |
 | `roadmap` | Visible sur le site marketing |
 | `in progress` | En cours de traitement |
+
+> **Mapping labels → segment de version** (utilise par `/milestone new`) : voir `commands/context/GITHUB.md` section 8.3.
 
 ### 8.3 Format des commits avec issue
 
 ```bash
 feat(scope): Description (#42)
 fix(scope): Description (#38)
+```
+
+---
+
+## 9. Gestion des Labels de Phase
+
+Le deployer utilise ces commandes pour mettre à jour les labels d'issue
+lors des transitions de phase du workflow CDP.
+
+### 9.1 Transition vers `EN COURS` (DEV démarré)
+
+```bash
+gh issue edit <numero> --add-label "EN COURS" --remove-label "EN REVIEW,EN QA,DONE"
+```
+
+### 9.2 Transition vers `EN REVIEW` (REVIEW en cours)
+
+```bash
+gh issue edit <numero> --add-label "EN REVIEW" --remove-label "EN COURS,EN QA,DONE"
+```
+
+### 9.3 Transition vers `EN QA` (QA en cours)
+
+```bash
+gh issue edit <numero> --add-label "EN QA" --remove-label "EN COURS,EN REVIEW,DONE"
+```
+
+### 9.4 Transition vers `DONE` (QA validée)
+
+```bash
+gh issue edit <numero> --add-label "DONE" --remove-label "EN COURS,EN REVIEW,EN QA"
+```
+
+### 9.5 Rejet à GATE 4 (validation utilisateur refusée)
+
+Le label `DONE` est retiré. La destination dépend de la nature de la correction
+(cf. `cdp.template.md`, GATE 4 — Cas A / Cas B) :
+
+```bash
+# Cas A — correction dans le scope (bug, régression, précision) → retour Phase DEV
+gh issue edit <numero> --add-label "EN COURS" --remove-label "DONE"
+
+# Cas B — scope invalide (approche erronée, exigences changées) → retour Phase 1
+gh issue edit <numero> --add-label "PLANNING" --remove-label "DONE"
+```
+
+### 9.6 Fermeture (validation utilisateur à GATE 4)
+
+L'issue porte déjà le label `DONE` — la fermeture suffit, aucun changement de label.
+
+```bash
+gh issue comment <numero> --body "✅ Validé — QA OK — documentation mise à jour"
+gh issue close <numero>
+```
+
+### 9.7 Création des labels (si absents du repo)
+
+```bash
+gh label create "PLANNING"  --color "c5def5" --description "Planification en cours"
+gh label create "EN COURS"  --color "0075ca" --description "En cours de developpement"
+gh label create "EN REVIEW" --color "e4e669" --description "En cours de revue"
+gh label create "EN QA"     --color "d93f0b" --description "En cours de validation QA"
+gh label create "DONE"      --color "0e8a16" --description "Implementation validee (QA OK)"
 ```
