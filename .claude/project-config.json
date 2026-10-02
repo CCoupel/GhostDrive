@@ -141,8 +141,8 @@
     "typecheck": "cd frontend && npm run typecheck"
   },
   "template_version": {
-    "tag": "v3.8.0",
-    "commit": "8c49482ee38f9172edbb99bbf7aa4bdc56e5c5bf"
+    "tag": "v3.9.0",
+    "commit": "cf187ca7904803728ca5f0828d85e5dec200b91a"
   },
   "docs": {
     "mockup_dir": "docs/mockup"

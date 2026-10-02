@@ -496,9 +496,17 @@ git rm --cached .claude/gitignore-for-projects 2>/dev/null || true
 ### Etape M3 — Appliquer le .gitignore
 
 ```bash
-cp TEMPLATE_claude/gitignore-for-projects .gitignore
-# (merger avec le .gitignore existant si necessaire)
+# Fusion non destructive : conserver les lignes du projet, ajouter uniquement les lignes template absentes
+if [ -f .gitignore ]; then
+  grep -vE '^\s*(#|$)' TEMPLATE_claude/gitignore-for-projects | while IFS= read -r l; do
+    grep -qxF "$l" .gitignore || echo "$l" >> .gitignore
+  done
+else
+  cp TEMPLATE_claude/gitignore-for-projects .gitignore
+fi
 ```
+
+Puis appliquer la section **"Site marketing — worktree `gh-pages`"** (migration d'un `MARKETING/` suivi).
 
 ### Etape M4 — Commiter la migration
 
@@ -545,6 +553,43 @@ Migration → v3 terminee.
     ✓ .claude/agents/dev-*.md (si presents)
     ✓ .claude/agents/*.md et context/*.md compagnons (si presents)
 ```
+
+---
+
+## Site marketing — worktree `gh-pages`
+
+Regle : le site marketing vit **uniquement sur `gh-pages`**, jamais commite sur la branche de code (`main`,
+`milestone/*`, `hotfix/*`). `MARKETING/` est le **worktree git de `gh-pages`**, exclu par le `.gitignore`
+(ligne `MARKETING/` de `gitignore-for-projects`, fusionnee sans ecraser les lignes du projet — voir
+Finalisation). Ce n'est pas une publication de `main`.
+
+Applique a l'init, a la migration v1/v2 → v3 et a la reinitialisation (option d) :
+
+```bash
+# Garde-fou : exclusion presente meme si le .gitignore du projet est personnalise
+grep -qxF 'MARKETING/' .gitignore 2>/dev/null || echo 'MARKETING/' >> .gitignore
+
+# Detecter un MARKETING/ suivi par la branche de code (doublon avec gh-pages)
+TRACKED=$(git ls-files MARKETING | wc -l)
+```
+
+- `TRACKED` = 0 → rien a migrer. Le worktree sera cree par l'agent `marketing` (`git worktree add MARKETING gh-pages`)
+  quand il en aura besoin.
+- `TRACKED` > 0 → AskUserQuestion : "`MARKETING/` est suivi par la branche de code (N fichiers) alors que le site
+  doit vivre uniquement sur `gh-pages`. Migrer ?"
+  - Migrer (Recommande) — comparer d'abord `MARKETING/` a `origin/gh-pages` (fichier par fichier :
+    `git show origin/gh-pages:<fichier> | diff - MARKETING/<fichier>`) ; si le contenu local diverge de
+    `gh-pages`, l'afficher et demander lequel garder AVANT toute suppression. Puis :
+    `git rm -r --cached MARKETING/` (les fichiers restent sur disque), deplacer le dossier
+    (`mv MARKETING /tmp/MARKETING.bak`), `git worktree add MARKETING gh-pages`, recopier les eventuelles
+    differences retenues dans le worktree et les commiter **sur `gh-pages`** (`git -C MARKETING ...`).
+    Commit de migration sur la branche de code : `chore(site): MARKETING/ devient le worktree de gh-pages`
+    (contient uniquement le `git rm --cached` et le `.gitignore`).
+  - Ignorer — ne rien changer (le doublon subsiste ; l'agent `marketing` refusera de publier tant que
+    `MARKETING/` est suivi).
+  - Annuler.
+
+Les release notes et posts ne font pas partie du site : ils restent sur la branche de code, dans `docs/releases/`.
 
 ---
 
@@ -774,8 +819,8 @@ preciser via "Autre")
 
 ```
 AskUserQuestion : "Quel systeme CI/CD utilises-tu ?"
-- GitHub Actions — genere le workflow release-*.yml adapte a la stack (backend+frontend)
-- GitLab CI — equivalent GitLab du workflow de release
+- GitHub Actions — audite le workflow de release existant, sinon le genere selon la stack et les livrables
+- GitLab CI — meme demarche avec `.gitlab-ci.yml`
 - Aucun — pas de pipeline CI/CD genere, /build et /publish resteront manuels
 (Autre — Jenkins, CircleCI, Azure DevOps, Bitbucket Pipelines... — preciser via "Autre")
 ```
@@ -948,7 +993,7 @@ Valeurs a deriver si elles ne sont pas fournies explicitement :
 | `commands.audit` | Stack : `govulncheck ./...` / `npm audit` / `pip-audit` |
 | `commands.typecheck` | Frontend TS : `npm run typecheck` / `tsc --noEmit` — vide sinon |
 | `commands.coverage` | Stack : `go test -cover ./...` / `npm run test -- --coverage` / `pytest --cov` |
-| `marketing.site` | Defaut `"auto"` : un site marketing est attendu (`gh-pages` ou `MARKETING/`) ; s'il n'existe pas, l'agent marketing declenche une initialisation (questions de cadrage + maquette). `false` = ordre direct de ne pas avoir de site (le CDP dispatche `PREPARE ... — SANS SITE`) |
+| `marketing.site` | Defaut `"auto"` : un site marketing est attendu (branche `gh-pages`, uniquement — `MARKETING/` en est le worktree git, jamais un dossier de la branche de code) ; s'il n'existe pas, l'agent marketing declenche une initialisation (questions de cadrage + maquette). `false` = ordre direct de ne pas avoir de site (le CDP dispatche `PREPARE ... — SANS SITE`) |
 | `docs.mockup_dir` | Defaut `docs/mockup` (dossier des maquettes validees — voir `context/COMMON.md` §14) |
 | `commands.test_fast` | Boucle DEV : tests hors tag `slow`. Stack : `go test -short ./...` / `npx vitest run --exclude "**/*.slow.*"` / `pytest -m "not slow"` — vide sinon (les dev-* retombent sur `commands.test_targeted`) |
 | `commands.test_targeted` | Tests d'un sous-ensemble, `{TARGETS}` = fichiers ou dossiers. Stack : `go test {TARGETS}` / `npx vitest run {TARGETS}` / `pytest {TARGETS}` |
@@ -980,13 +1025,27 @@ Valeurs a deriver si elles ne sont pas fournies explicitement :
 
 ### 3. Workflow CI/CD
 
-Copier depuis `TEMPLATE_claude/templates/workflows/` vers `.github/workflows/release.yml`
-et remplacer les placeholders :
+Le pipeline de release n'est plus copie d'un modele : il est **audite s'il existe, genere sinon**, selon le
+contrat de `TEMPLATE_claude/agents/infra.md` section 3bis (exigences C1 a C9). Si l'utilisateur a repondu
+« Aucun » a l'Etape 7, ne rien faire.
 
-| Stack | Template |
-|-------|----------|
-| Go + React/Vue | `TEMPLATE_claude/templates/workflows/release-go-react.yml` |
-| Autres | Generer un workflow minimal adapte |
+1. **Detecter** : `.github/workflows/*.y*ml`, `.gitlab-ci.yml`.
+2. **Pipeline existant → audit** : evaluer C1-C9 (verdict `CONFORME` / `ECART` / `NON APPLICABLE`, fichier et ligne
+   cites), afficher le tableau, puis AskUserQuestion :
+   - Corriger les ecarts (Recommande) — patch minimal, diff affiche et valide avant ecriture
+   - Garder tel quel — ecarts consignes dans le rapport final (un ecart C1/C5 reste signale comme bloquant
+     pour le mode `rebuild-ci`)
+   - Regenerer — remplace le pipeline apres sauvegarde (`.bak`)
+   Ne jamais ecraser ni modifier sans reponse.
+3. **Aucun pipeline → generation** : composer le pipeline a partir de `project-config.json` (stack, livrables,
+   `version_file`, `commands.*`) en suivant le contrat, l'afficher, le faire valider (AskUserQuestion :
+   Ecrire / Modifier / Annuler), l'ecrire a `infrastructure.environments[].publish.pipeline`
+   (par defaut `.github/workflows/release.yml`), puis le valider syntaxiquement (`actionlint` si present).
+   `TEMPLATE_claude/templates/workflows/release-go-react.yml` sert de **reference de niveau**, pas de modele.
+4. Les evolutions ulterieures (nouveau livrable, changement de stack) passent par l'agent `infra`
+   (Mode Modification) ; son Mode Validation rejoue l'audit avant `PUBLISH PROD`.
+
+Placeholders de l'exemple de reference (informatif) :
 
 | Placeholder | Exemple |
 |-------------|---------|
@@ -1225,9 +1284,18 @@ sed \
   TEMPLATE_claude/CLAUDE_TEMPLATE.md > CLAUDE.md
 echo "✓ CLAUDE.md généré"
 
-# .gitignore projet
-cp TEMPLATE_claude/gitignore-for-projects .gitignore
+# .gitignore projet — jamais ecrase : s'il existe deja, fusion non destructive
+# (les lignes ajoutees par le projet sont conservees, seules les lignes template absentes sont ajoutees)
+if [ -f .gitignore ]; then
+  grep -vE '^\s*(#|$)' TEMPLATE_claude/gitignore-for-projects | while IFS= read -r l; do
+    grep -qxF "$l" .gitignore || echo "$l" >> .gitignore
+  done
+else
+  cp TEMPLATE_claude/gitignore-for-projects .gitignore
+fi
 ```
+
+Puis appliquer la section **"Site marketing — worktree `gh-pages`"** (detection d'un `MARKETING/` deja suivi).
 
 #### Dossier des maquettes
 
@@ -1407,6 +1475,17 @@ AskUserQuestion : "Le projet est deja initialise — que veux-tu faire ?"
 
 > Le fetch GitHub a deja ete effectue au pre-menu — `TEMPLATE_claude/` est a jour.
 > Cette option calcule le diff precis et deploie les changements dans `.claude/`.
+
+#### Etape d1c — Audit du pipeline CI/CD de release
+
+Appliquer l'etape "3. Workflow CI/CD" (sections Generation de la Configuration) en mode audit : detecter le
+pipeline, evaluer C1-C9 (`agents/infra.md` section 3bis), proposer corrections ou generation si absent. Ne rien
+modifier sans reponse de l'utilisateur ; ne pas re-poser l'Etape 7 si le systeme CI/CD est deja connu.
+
+#### Etape d1a — Site marketing : worktree `gh-pages`
+
+Appliquer la section **"Site marketing — worktree `gh-pages`"** (ajout de `MARKETING/` au `.gitignore` et
+proposition de migration si `MARKETING/` est suivi par la branche de code).
 
 #### Etape d1b — Migration : renommer les commandes legacy *.template.md → *.md
 
