@@ -51,7 +51,7 @@
     ],
     "versioning": "semantic",
     "version_sources": [
-      "server-go/config.json",
+      "config.json",
       "frontend/package.json",
       "git-tag"
     ],
