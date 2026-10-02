@@ -111,7 +111,7 @@ Re-afficher le plan complet avec la progression :
 
 ### Au Demarrage de la Tache
 
-Envoyer immediatement via SendMessage au CDP :
+Envoyer immediatement via SendMessage au teamleader :
 
 ```
 [NOM-AGENT] EN COURS — 0% — demarrage [description courte]
@@ -134,9 +134,9 @@ Action requise : [ce dont j'ai besoin]
 ```
 
 > **REGLE** : Jamais de contenu de code, de diff, ni d'extraits de fichiers dans les messages SendMessage.
-> Les messages vers le CDP sont des metadonnees (statut, fichiers, SHA), pas des rapports techniques.
+> Les messages vers le teamleader sont des metadonnees (statut, fichiers, SHA), pas des rapports techniques.
 
-### Notifications Intermediaires (workflows longs uniquement)
+### Notifications Intermediaires (OBLIGATOIRES des que la tache compte plusieurs unites — voir `TEAMMATES_PROTOCOL.md` 4b)
 
 ```
 [NOM-AGENT] EN COURS — X% — [etape courante en < 10 mots]
@@ -184,7 +184,7 @@ Action requise : [ce dont j'ai besoin]
 
 1. **Documenter** l'erreur dans le rapport/summary
 2. **Proposer** une solution si possible
-3. **Signaler** au CDP/orchestrateur pour decision
+3. **Signaler** au teamleader/orchestrateur pour decision
 4. **Ne jamais rester bloque en silence**
 
 ### Format de Signalement
@@ -223,11 +223,12 @@ Le milestone GitHub actif est la SEULE source de verite pour `X.Y.Z` — fixe de
 ### Workflow Standard
 
 ```
-PLAN -> [validation] -> DEV -> [REVIEW ∥ TEST-WRITER] -> QA -> [validation] -> DOC -> DEPLOY -> [validation]
+PLAN -> [validation] -> DEV (TEST-WRITER en Batch 1) -> [REVIEW ∥ QA] -> DOC -> [DEPLOY QUALIF ∥ DOC finalize ∥ NR complete] -> [validation] -> PROD
 ```
 
 **[validation] = Points de validation utilisateur obligatoires**
-**[REVIEW ∥ TEST-WRITER] = executes en parallele apres DEV**
+**[REVIEW ∥ QA] = executes en parallele apres DEV** (repli sequentiel si `qa_parallelizable == false`, voir `context/QUALITY.md` section 12)
+**Plan de tests** : `context/COMMON.md` section 15
 
 ### Transmission de Contexte
 
@@ -270,5 +271,6 @@ Les fichiers `context/` partagés (`context/COMMON.md`, `context/GITHUB.md`, `co
 |---------|-------------|
 | `CLAUDE.md` | Architecture complete |
 | `CHANGELOG.md` | Historique des versions |
-| `` | Version actuelle |
+| `{VERSION_FILE}` | Version actuelle |
 | `contracts/*.md` | Contrats API |
+| `docs/mockup/INDEX.md`, `DECISIONS.md` | Maquettes actives et contraintes de conception (`commands/context/COMMON.md` section 14) |

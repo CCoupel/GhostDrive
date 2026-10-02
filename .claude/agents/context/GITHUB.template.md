@@ -407,7 +407,7 @@ fix(scope): Description (#38)
 ## 9. Gestion des Labels de Phase
 
 Le deployer utilise ces commandes pour mettre à jour les labels d'issue
-lors des transitions de phase du workflow CDP.
+lors des transitions de phase du workflow du teamleader.
 
 ### 9.1 Transition vers `EN COURS` (DEV démarré)
 

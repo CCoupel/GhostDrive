@@ -48,14 +48,14 @@ Les agents de validation **analysent** le code sans le modifier. Ils produisent 
 
 ## Ecriture du Rapport (OBLIGATOIRE)
 
-Avant d'envoyer le rapport DONE au CDP :
+Avant d'envoyer le rapport DONE au teamleader :
 
 1. Ecrire le rapport complet dans `_work/reports/[agent]-[YYYYMMDD-HHmmss].md`
-2. **Relire le fichier ecrit** et verifier qu'il repond bien a la demande recue du CDP
+2. **Relire le fichier ecrit** et verifier qu'il repond bien a la demande recue du teamleader
 3. Si incoherence detectee : corriger le fichier avant d'envoyer le DONE
-4. Envoyer au CDP uniquement la reference : `Rapport : _work/reports/[filename]`
+4. Envoyer au teamleader uniquement la reference : `Rapport : _work/reports/[filename]`
 
-> Le CDP lira lui-meme le fichier pour valider la conformite. S'il juge le livrable
+> Le teamleader lira lui-meme le fichier pour valider la conformite. S'il juge le livrable
 > non conforme, il le renverra pour correction — sans comptabiliser un cycle DEV.
 
 ## Structure de Rapport Standard
@@ -112,11 +112,11 @@ Chaque rapport de validation doit contenir :
 
 ## Workflow Post-Validation
 
-Apres votre travail, le rapport retourne a l'orchestrateur (CDP) qui decide :
+Apres votre travail, le rapport retourne a l'orchestrateur (teamleader) qui decide :
 
 | Votre Verdict | Action Orchestrateur |
 |---------------|---------------------|
-| APPROVED / VALIDATED | Lance l'agent suivant (QA apres REVIEW, DOC apres QA) |
+| APPROVED / VALIDATED | Lance l'agent suivant (DOC apres REVIEW **et** QA — QA tourne en parallele de REVIEW par defaut, voir `context/QUALITY.md` section 12) |
 | WITH RESERVATIONS | Continue mais note les reserves pour suivi |
 | REJECTED / NOT VALIDATED | Relance le DEV agent avec votre rapport d'erreurs |
 
@@ -129,7 +129,7 @@ Si vous rencontrez des erreurs non liees au code (crash, timeout, environnement)
 1. **Documenter** l'erreur dans une section dediee du rapport
 2. **Capturer** les logs complets
 3. **Identifier** la cause si possible
-4. **Signaler** au CDP pour investigation
+4. **Signaler** au teamleader pour investigation
 5. **Ne pas valider/rejeter** sur base d'une erreur d'environnement
 
 ---
@@ -153,12 +153,12 @@ Un bon rapport de validation :
 ### Code-Reviewer (REVIEW)
 - Focus : Qualite du code, securite, architecture, duplication
 - Verifications : OWASP, patterns, performance, tests
-- Position : APRES DEV, AVANT QA
+- Position : APRES DEV, en parallele de QA (defaut)
 
 ### QA
 - Focus : Fonctionnement, tests, build, couverture
-- Verifications : Tests unitaires, E2E, build, regression
-- Position : APRES REVIEW, AVANT DOC
+- Verifications : suite feature puis NR impactees (unit, integration, E2E), conformite maquettes, build ; NR complete a part (`context/COMMON.md` section 15)
+- Position : APRES DEV, en parallele de REVIEW (defaut) ; avant DOC
 
 ---
 

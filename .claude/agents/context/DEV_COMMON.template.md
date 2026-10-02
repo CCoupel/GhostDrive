@@ -14,13 +14,13 @@ Reference complete (cycle de vie detaille, exemple, regle du milestone) : `comma
 
 `X.Y.Z` est fixe integralement par le titre du milestone GitHub actif — **le milestone est la seule source de verite**, aucun agent DEV ne le calcule ni ne l'incremente. Tout developpement est rattache a un milestone (plus de cycle hors milestone). `a` est un **compteur de build, gere exclusivement par `deploy`** (tache BUILD, agnostique a l'environnement) : les agents DEV ne l'incrementent jamais et n'ont pas a y toucher lors d'un commit normal.
 
-**Vous ne modifiez jamais `` vous-meme.** L'ecriture initiale `X.Y.Z.0` (a l'ouverture du cycle, sur la branche rattachee au milestone) est faite en amont, avant que DEV ne commence a commiter. Pour tout commit normal (feature comme bugfix), ne jamais toucher `` — `a` sera incremente par `deploy` au prochain deploiement QUALIF, pas par vous.
+**Vous ne modifiez jamais `{VERSION_FILE}` vous-meme.** L'ecriture initiale `X.Y.Z.0` (a l'ouverture du cycle, sur la branche rattachee au milestone) est faite en amont, avant que DEV ne commence a commiter. Pour tout commit normal (feature comme bugfix), ne jamais toucher `{VERSION_FILE}` — `a` sera incremente par `deploy` au prochain deploiement QUALIF, pas par vous.
 
 ### Regles de Versioning
 
 | Qui | Incremente | Quand |
 |-----|------------|-------|
-| **CDP** | Ecriture initiale `X.Y.Z.0` (depuis le titre du milestone) | Phase Init (Git) — creation de la branche, avant meme l'appel a PLAN |
+| **teamleader** | Ecriture initiale `X.Y.Z.0` (depuis le titre du milestone) | Phase Init (Git) — creation de la branche, avant meme l'appel a PLAN |
 | **DEV** | — (jamais) | — |
 | **DEPLOY** | `a` (`a+1`) | Avant chaque BUILD — commit dedie, garantit un artefact unique par build |
 | **DEPLOY** | `a` (suppression) | Promotion dev -> prod — version livree = `X.Y.Z` exact du milestone |
@@ -110,9 +110,9 @@ Si vous devez modifier un contrat, documentez-le dans votre summary :
 | Verification | Description |
 |--------------|-------------|
 | Build | Le projet compile sans erreur |
-| Tests | Tous les tests passent |
+| Tests | Boucle rapide : tests **feature** de tes fichiers (`commands.test_fast`, sinon `commands.test_targeted`) — jamais la suite complete (QA la joue une fois par arbre, `context/COMMON.md` 15.2) |
 | Version | La version correspond au fichier de config |
-| Lint | Pas d'erreurs de linting |
+| Lint / typecheck | Pas d'erreurs de linting (`commands.lint`) ni de typage (`commands.typecheck`) |
 
 ### Validation Serveur (si applicable)
 
@@ -138,7 +138,7 @@ Apres le build, verifier que le serveur demarre correctement :
 - **Naming** : Respecter les conventions du langage utilise
 - **Error handling** : Toujours gerer les erreurs, ne jamais les ignorer
 - **Thread-safety** : Proteger l'etat partage (mutex, locks, etc.)
-- **Tests** : Chaque fonction publique doit avoir des tests
+- **Tests** : tests unitaires **internes** (boite blanche) pour la logique que tu ajoutes, dans des fichiers distincts colocalises avec le code, hors `tests/INDEX.md`. Les tests de specification (contrats, criteres d'acceptation, maquettes) sont ecrits par TEST-WRITER — ne pas les dupliquer
 
 ### Documentation du Code
 
@@ -156,8 +156,8 @@ Apres le build, verifier que le serveur demarre correctement :
 | Deployer | DEPLOY agent |
 | Incrementer y (version minor) | PLAN agent |
 | Incrementer a (version de build) | DEPLOY agent |
-| Executer les tests E2E | QA agent |
-| Ecrire les scenarios E2E | TEST-WRITER agent |
+| Executer les tests E2E et la suite complete | QA agent |
+| Ecrire les scenarios E2E et les tests de specification | TEST-WRITER agent |
 
 ---
 

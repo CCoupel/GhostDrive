@@ -9,6 +9,23 @@ Initialisation interactive du projet pour configurer l'environnement Claude Code
 - **Automatique** : Si `.claude/project-config.json` n'existe pas au demarrage
 - **Manuel** : Commande `/init-project` pour reinitialiser ou modifier
 
+## Convention d'interaction
+
+Toute sollicitation de l'utilisateur ci-dessous est posee avec l'outil **`AskUserQuestion`** —
+jamais du texte brut listant des lettres dans le chat :
+
+- **2 a 4 options** (contrainte de l'outil), chacune avec un **label court** ET une **description**
+  qui explique la consequence/le contexte du choix — jamais juste un mot.
+- Une option marquee **"(Recommande)"** dans son libelle quand un defaut raisonnable existe.
+- Jamais d'option "Autre" ajoutee manuellement : l'outil la propose deja automatiquement en saisie
+  libre. Quand une liste naturelle depasse 4 reponses (ex. choix d'une techno), ne garder que les
+  3-4 plus frequentes en options explicites et laisser "Autre" couvrir le reste.
+- Checklist a choix multiples → `multiSelect: true` (toujours dans la limite de 4 options ; au-dela,
+  scinder en plusieurs questions du meme appel — jusqu'a 4 questions groupees par appel).
+- Les questions de decouverte du workshop (Option a, phases 1-6) restent des questions ouvertes en
+  texte libre par nature (elles visent a faire emerger une reponse originale) — forcer des options
+  fermees leur ferait perdre leur but.
+
 ## Workflow d'Initialisation
 
 ```
@@ -109,7 +126,7 @@ else
 fi
 ```
 
-#### 2. Verifier si une mise a jour est disponible
+#### 2. Verifier si une mise a jour est disponible, et determiner la cible du fetch
 
 ```bash
 KNOWN_COMMIT=$([ -f TEMPLATE_claude/.template-source.json ] && \
@@ -125,19 +142,27 @@ if [ "$KNOWN_COMMIT" = "$LATEST_COMMIT" ]; then
   echo "Template deja a jour ($LATEST_TAG - $LATEST_COMMIT)"
   # Continuer quand meme (fichiers peuvent etre absents si gitignores)
 fi
+
+# FETCH_TAG/FETCH_COMMIT = cible reellement fetchee par l'etape 3 ci-dessous. Par defaut
+# la derniere version taggee (init, sync/option d). La section "Reinstallation des fichiers
+# template" (fichiers manquants sur un projet deja v3) peut les faire pointer a la place vers
+# le commit fige dans project-config.json.template_version, pour restaurer a l'identique sans
+# upgrade implicite.
+FETCH_TAG="$LATEST_TAG"
+FETCH_COMMIT="$LATEST_COMMIT"
 ```
 
 #### 3. Fetcher TEMPLATE_claude/ depuis GitHub
 
 ```bash
-# Fetch au commit du tag resolu a l'etape precedente (pas la branche) : les
+# Fetch au commit cible resolu a l'etape precedente (pas la branche) : les
 # fichiers deployes viennent toujours d'une version stabilisee et taggee.
-gh api repos/$TEMPLATE_REPO/git/trees/$LATEST_COMMIT?recursive=1 \
+gh api repos/$TEMPLATE_REPO/git/trees/$FETCH_COMMIT?recursive=1 \
   --jq '.tree[] | select(.type=="blob") | .path' \
   | grep -E '^TEMPLATE_claude/' \
   | while read FILE; do
       mkdir -p "$(dirname $FILE)"
-      gh api "repos/$TEMPLATE_REPO/contents/$FILE?ref=$LATEST_COMMIT" \
+      gh api "repos/$TEMPLATE_REPO/contents/$FILE?ref=$FETCH_COMMIT" \
         --jq '.content' | base64 -d > "$FILE"
       echo "  ✓ $FILE"
     done
@@ -180,7 +205,7 @@ for src in TEMPLATE_claude/commands/context/*.md; do
 done
 ```
 
-#### 5. Mettre a jour TEMPLATE_claude/.template-source.json
+#### 5. Mettre a jour TEMPLATE_claude/.template-source.json et project-config.json
 
 ```bash
 TODAY=$(date +%Y-%m-%d)
@@ -188,12 +213,25 @@ cat > TEMPLATE_claude/.template-source.json <<EOF
 {
   "repo": "$TEMPLATE_REPO",
   "branch": "$TEMPLATE_BRANCH",
-  "tag": "$LATEST_TAG",
-  "commit": "$LATEST_COMMIT",
+  "tag": "$FETCH_TAG",
+  "commit": "$FETCH_COMMIT",
   "synced_at": "$TODAY"
 }
 EOF
-echo "✓ TEMPLATE_claude/.template-source.json mis a jour ($LATEST_TAG - $LATEST_COMMIT)"
+echo "✓ TEMPLATE_claude/.template-source.json mis a jour ($FETCH_TAG - $FETCH_COMMIT)"
+
+# Copie durable (trackee git) — TEMPLATE_claude/.template-source.json ci-dessus est gitignore
+# avec le reste de TEMPLATE_claude/ et disparait sur un clone frais ; project-config.json est
+# le seul endroit ou cette info survit. Ne s'applique qu'a une mise a jour d'un projet deja
+# initialise — a la premiere initialisation, le champ est deja inclus a la creation du fichier
+# (section "Generation de la Configuration").
+if [ -f .claude/project-config.json ]; then
+  jq --arg tag "$FETCH_TAG" --arg commit "$FETCH_COMMIT" \
+    '.template_version = { "tag": $tag, "commit": $commit }' \
+    .claude/project-config.json > /tmp/project-config.json.tmp \
+    && mv /tmp/project-config.json.tmp .claude/project-config.json
+  echo "✓ project-config.json : template_version mis a jour ($FETCH_TAG - $FETCH_COMMIT)"
+fi
 ```
 
 ---
@@ -206,14 +244,70 @@ echo "✓ TEMPLATE_claude/.template-source.json mis a jour ($LATEST_TAG - $LATES
 HAS_CONFIG=$([ -f .claude/project-config.json ] && echo "yes" || echo "no")
 HAS_TEMPLATE_DIR=$([ -d TEMPLATE_claude ] && echo "yes" || echo "no")
 HAS_OLD_SOURCE=$([ -f .claude/.template-source.json ] && echo "yes" || echo "no")
+HAS_TEMPLATE_VERSION=$([ "$HAS_CONFIG" = "yes" ] && \
+  jq -e '.template_version.commit' .claude/project-config.json >/dev/null 2>&1 && \
+  echo "yes" || echo "no")
 ```
 
-| `project-config.json` | `TEMPLATE_claude/` | `.claude/.template-source.json` | Diagnostic |
-|-----------------------|--------------------|--------------------------------|------------|
-| absent | absent | absent | Nouveau projet → flux normal |
-| present | present | - | Projet v3 → Reinitialisation |
-| present | absent | present | **Projet v2 → Migration v3** |
-| present | absent | absent | **Projet v1 → Migration v3** |
+| `project-config.json` | `TEMPLATE_claude/` | `template_version` (dans `project-config.json`) | `.claude/.template-source.json` | Diagnostic |
+|-----------------------|--------------------|--------------------------------------------------|--------------------------------|------------|
+| absent | absent | - | absent | Nouveau projet → flux normal |
+| present | present | - | - | Projet v3 → Reinitialisation |
+| present | absent | present | - | **Projet v3, fichiers template manquants (clone frais) → Reinstallation a l'identique** (voir section dediee) |
+| present | absent | absent | present | **Projet v2 → Migration v3** |
+| present | absent | absent | absent | **Projet v1 → Migration v3** |
+
+> Le cas "fichiers manquants" (ligne 3) n'est **pas** une migration : le projet est deja en
+> architecture v3, seuls les fichiers gitignores (`TEMPLATE_claude/`, commandes/agents deployes)
+> sont absents — situation normale apres un `git clone`/`git pull` sur un projet deja initialise.
+> Le distinguer de la migration v1/v2 evite de rejouer inutilement tout le flux de conversion de
+> schema sur un projet qui n'en a pas besoin.
+
+---
+
+## Reinstallation des fichiers template (projet v3, fichiers manquants)
+
+Declenche quand `HAS_CONFIG=yes`, `HAS_TEMPLATE_DIR=no` et `HAS_TEMPLATE_VERSION=yes` (voir
+tableau de detection ci-dessus) — typiquement apres un `git clone`/`git pull` d'un projet deja
+initialise en v3, dont `TEMPLATE_claude/` et les commandes/agents deployes sont gitignores.
+
+```bash
+PINNED_TAG=$(jq -r '.template_version.tag' .claude/project-config.json)
+PINNED_COMMIT=$(jq -r '.template_version.commit' .claude/project-config.json)
+
+# Resoudre la derniere version disponible (etape 2 de la procedure de fetch ci-dessus,
+# sans encore fixer FETCH_TAG/FETCH_COMMIT)
+LATEST_TAG=$(gh api repos/$TEMPLATE_REPO/tags --jq '.[0].name // empty')
+LATEST_COMMIT=$(gh api repos/$TEMPLATE_REPO/tags --jq '.[0].commit.sha // empty')
+```
+
+Si `PINNED_COMMIT = LATEST_COMMIT` → aucun choix reel a proposer (reinstaller a l'identique
+*est* la derniere version) : fixer directement `FETCH_TAG=$PINNED_TAG`, `FETCH_COMMIT=$PINNED_COMMIT`
+et enchainer sur les etapes 3-5 de la procedure de fetch, sans poser de question.
+
+Sinon :
+
+```
+AskUserQuestion : "Les fichiers template (TEMPLATE_claude/, commandes, agents) sont absents de
+ce clone — ils sont gitignores et ne se recuperent pas avec git. Comment les restaurer ?"
+- Reinstaller a partir des templates <PINNED_TAG> (Recommande) — restaure exactement la version
+  deja utilisee par ce projet (celle enregistree dans project-config.json), aucun changement de
+  comportement, rien a revoir avant de continuer a travailler
+- Profiter pour mettre a jour les templates vers <LATEST_TAG> (derniere version) — equivalent a
+  une synchronisation complete (option "Appliquer les mises a jour detectees"), peut introduire
+  des changements de comportement a relire avant de continuer
+```
+
+- **Reinstaller a l'identique** → `FETCH_TAG=$PINNED_TAG`, `FETCH_COMMIT=$PINNED_COMMIT`, puis
+  etapes 3-5 de la procedure de fetch. `template_version` dans `project-config.json` ne change
+  pas (deja a cette valeur).
+- **Mettre a jour** → `FETCH_TAG=$LATEST_TAG`, `FETCH_COMMIT=$LATEST_COMMIT`, puis etapes 3-5 —
+  strictement equivalent a une reinitialisation normale (Option d), `template_version` est mis
+  a jour vers la nouvelle version.
+
+Dans les deux cas, enchainer ensuite sur le deploiement standard (etape 4 de la procedure de
+fetch) et la detection de doublons/conflits (d5b/d5c) si des fichiers compagnons `*.md` existent
+deja localement (customisations projet preservees, jamais ecrasees).
 
 ---
 
@@ -256,9 +350,12 @@ Conversion automatique proposee :
   PROD   : publish.mode = rebuild-ci   (merge + tag officiel, rebuild deterministe via CI)
   deploy.mechanism (les deux environnements) = "<MECH>" (normalise depuis "<OLD_DEPLOY>")
 
-Convertir maintenant ? [O/n] — Non bloquant : repondre "n" laisse infrastructure.deploy en
-l'etat (les commandes /build, /publish <env>, /deploy <env> nouvellement synchronisees ne
-fonctionneront pas correctement tant que la conversion n'est pas faite).
+AskUserQuestion : "Convertir maintenant vers le nouveau modele ?"
+- Oui, convertir automatiquement (Recommande) — applique QUALIF=promote / PROD=rebuild-ci /
+  deploy.mechanism="<MECH>" ; /build, /publish, /deploy fonctionnent immediatement apres
+- Non, laisser en l'etat — infrastructure.deploy reste tel quel ; /build, /publish <env>,
+  /deploy <env> nouvellement synchronisees ne fonctionneront pas correctement tant que la
+  conversion n'est pas faite
 ```
 
 Si confirme :
@@ -312,7 +409,11 @@ Architecture v3 (cible) :
   TEMPLATE_claude/ a la racine — fetche depuis GitHub, gitignore
   .claude/ contient uniquement les fichiers PROJET
 
-Migration requise. Continuer ? [O/n]
+AskUserQuestion : "Migration vers l'architecture v3 requise — continuer ?"
+- Oui, migrer maintenant (Recommande) — deplace les fichiers template vers TEMPLATE_claude/
+  gitignore ; .claude/ ne garde que les fichiers projet
+- Non, annuler l'initialisation — le projet reste sur l'architecture v1/v2, aucune commande
+  synchronisee depuis TEMPLATE_claude/ ne sera disponible
 ```
 
 ### Etape M1 — Fetch de TEMPLATE_claude/ depuis GitHub
@@ -501,10 +602,12 @@ Technologies detectees :
 - CI/CD : GitHub Actions (.github/workflows/)
 - Tests : Vitest, Playwright
 
-Voulez-vous :
-a) Initialiser avec cette configuration (recommande)
-b) Initialiser manuellement (questionnaire complet)
-c) Annuler
+AskUserQuestion : "Comment veux-tu initialiser le projet ?"
+- Initialiser avec cette configuration (Recommande) — utilise directement les technologies
+  detectees ci-dessus, aucune question supplementaire
+- Initialiser manuellement — reprend chaque technologie via le questionnaire complet (etapes
+  2 a 10), utile si une detection est incorrecte ou incomplete
+- Annuler — n'initialise rien, quitte /init-project
 ```
 
 **Si projet vide :**
@@ -514,12 +617,12 @@ Ce projet ne contient pas encore de code.
 
 Comment souhaitez-vous initialiser le projet ?
 
-a) Workshop de cadrage (recommande)
-   → Entretien guide pour definir vision, objectifs, stack et contraintes
-   → Genere un CLAUDE.md complet et project-config.json
-b) Questionnaire rapide
-   → Questions directes sur la stack technique
-c) Annuler
+AskUserQuestion : "Comment souhaites-tu initialiser le projet ?"
+- Workshop de cadrage (Recommande) — entretien guide en 6 phases pour definir vision,
+  objectifs, stack et contraintes ; genere un CLAUDE.md complet et project-config.json
+- Questionnaire rapide — questions directes sur la stack technique uniquement, sans phase de
+  cadrage produit
+- Annuler — n'initialise rien, quitte /init-project
 ```
 
 ### Option a : Workshop de Cadrage
@@ -590,16 +693,13 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 2 : Stack Backend
 
 ```
-3. Quelle technologie backend utilises-tu ?
-   a) Go
-   b) Node.js (JavaScript/TypeScript)
-   c) Python (FastAPI/Django/Flask)
-   d) Java / Kotlin (Spring)
-   e) C# / .NET
-   f) PHP (Laravel/Symfony)
-   g) Ruby (Rails)
-   h) Rust (Actix/Axum)
-   i) Aucun backend
+AskUserQuestion : "Quelle technologie backend utilises-tu ?"
+- Node.js (JavaScript/TypeScript) — Express, Fastify, NestJS... genere les agents et templates
+  dev-backend-node
+- Python (FastAPI/Django/Flask) — genere les agents et templates dev-backend-python
+- Go — genere les agents et templates dev-backend-go
+- Aucun backend — projet frontend/mobile/firmware seul, pas d'agent dev-backend genere
+(Autre technologie — Java/Kotlin, C#/.NET, PHP, Ruby, Rust... — saisie libre via "Autre")
 ```
 
 ---
@@ -607,15 +707,14 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 3 : Stack Frontend
 
 ```
-4. Quelle technologie frontend utilises-tu ?
-   a) React (Vite/CRA)
-   b) React (Next.js)
-   c) Vue.js (Vite)
-   d) Vue.js (Nuxt)
-   e) Angular
-   f) Svelte / SvelteKit
-   g) HTML/CSS/JS vanilla
-   h) Aucun frontend
+AskUserQuestion : "Quelle technologie frontend utilises-tu ?"
+- React (Vite/CRA) — SPA classique, genere les agents et templates dev-frontend-react
+- React (Next.js) — SSR/routing integre, genere les agents et templates dev-frontend-react
+  (variante Next.js)
+- Vue.js (Vite ou Nuxt — preciser lequel via "Autre" si besoin) — genere les agents et
+  templates dev-frontend-vue
+- Aucun frontend — backend/API seul ou mobile/firmware seul, pas d'agent dev-frontend genere
+(Autre technologie — Angular, Svelte/SvelteKit, HTML/CSS/JS vanilla... — saisie libre via "Autre")
 ```
 
 ---
@@ -623,13 +722,12 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 4 : Mobile (optionnel)
 
 ```
-5. As-tu une application mobile ?
-   a) React Native
-   b) Flutter
-   c) iOS natif (Swift/SwiftUI)
-   d) Android natif (Kotlin)
-   e) Capacitor/Ionic
-   f) Pas de mobile
+AskUserQuestion : "As-tu une application mobile ?"
+- React Native — partage du code avec le frontend React eventuel
+- Flutter — stack Dart independante, cross-platform
+- Natif (iOS Swift/SwiftUI ou Android Kotlin — preciser lequel via "Autre" si besoin)
+- Pas de mobile — aucun agent mobile genere
+(Autre techno — Capacitor/Ionic... — saisie libre via "Autre")
 ```
 
 ---
@@ -637,13 +735,11 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 5 : Firmware/Hardware (optionnel)
 
 ```
-6. As-tu du code firmware ou embarque ?
-   a) ESP32 (Arduino/PlatformIO)
-   b) ESP8266
-   c) Raspberry Pi
-   d) Arduino (AVR)
-   e) STM32
-   f) Pas de firmware
+AskUserQuestion : "As-tu du code firmware ou embarque ?"
+- ESP32 (Arduino/PlatformIO) — genere l'agent dev-firmware-esp32
+- Raspberry Pi — carte complete, souvent Linux embarque plutot que firmware bas niveau
+- Pas de firmware — aucun agent firmware genere
+(Autre carte/microcontroleur — ESP8266, Arduino AVR, STM32... — saisie libre via "Autre")
 ```
 
 ---
@@ -651,13 +747,11 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 5b : Plugin (optionnel)
 
 ```
-6b. Ton projet inclut-il un plugin pour une plateforme existante ?
-    a) VS Code Extension
-    b) Obsidian Plugin
-    c) WordPress Plugin
-    d) Browser Extension (Chrome/Firefox)
-    e) Plugin applicatif maison (preciser la plateforme)
-    f) Pas de plugin
+AskUserQuestion : "Ton projet inclut-il un plugin pour une plateforme existante ?"
+- VS Code Extension — genere les agents/templates plugin cibles VS Code
+- Browser Extension (Chrome/Firefox) — genere les agents/templates plugin navigateur
+- Pas de plugin — aucun agent plugin genere
+(Autre plateforme — Obsidian, WordPress, plugin applicatif maison... — preciser via "Autre")
 ```
 
 ---
@@ -665,16 +759,13 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 6 : Base de Donnees
 
 ```
-7. Quelle base de donnees utilises-tu ?
-   a) PostgreSQL
-   b) MySQL / MariaDB
-   c) MongoDB
-   d) SQLite
-   e) Redis
-   f) Firebase / Firestore
-   g) Supabase
-   h) Plusieurs (preciser)
-   i) Aucune
+AskUserQuestion : "Quelle base de donnees utilises-tu ?"
+- PostgreSQL — relationnel, choix par defaut pour la plupart des stacks backend generees
+- MySQL / MariaDB — relationnel, alternative a PostgreSQL
+- MongoDB — document, pour un modele de donnees non relationnel
+- Aucune — pas de persistance geree par le template
+(Autre — SQLite, Redis, Firebase/Firestore, Supabase, ou plusieurs bases combinees —
+preciser via "Autre")
 ```
 
 ---
@@ -682,14 +773,11 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 7 : CI/CD
 
 ```
-8. Quel systeme CI/CD utilises-tu ?
-   a) GitHub Actions
-   b) GitLab CI
-   c) Jenkins
-   d) CircleCI
-   e) Azure DevOps
-   f) Bitbucket Pipelines
-   g) Aucun
+AskUserQuestion : "Quel systeme CI/CD utilises-tu ?"
+- GitHub Actions — genere le workflow release-*.yml adapte a la stack (backend+frontend)
+- GitLab CI — equivalent GitLab du workflow de release
+- Aucun — pas de pipeline CI/CD genere, /build et /publish resteront manuels
+(Autre — Jenkins, CircleCI, Azure DevOps, Bitbucket Pipelines... — preciser via "Autre")
 ```
 
 ---
@@ -697,19 +785,22 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 8 : Environnements et Deploiement
 
 ```
-9. Comment deploies-tu ton application ? (mecanisme d'installation par defaut)
-   a) Docker / Docker Compose
-   b) Kubernetes / Helm
-   c) Serverless (AWS Lambda, Vercel, Netlify)
-   d) VPS / Bare metal
-   e) PaaS (Heroku, Railway, Render)
-   f) Cloud Run / App Engine
+AskUserQuestion : "Comment deploies-tu ton application ?" (mecanisme d'installation par defaut)
+- Docker / Docker Compose — genere le template environments/docker-compose
+- Kubernetes / Helm — genere le template environments/kubernetes-helm
+- Serverless (AWS Lambda, Vercel, Netlify) — genere le template environments/serverless
+- VPS / Bare metal — genere le template environments/vps
+(Autre mecanisme — PaaS type Heroku/Railway/Render, Cloud Run/App Engine... — preciser via
+"Autre")
 
-9bis. Quels environnements de release utilises-tu, dans l'ordre de promotion ?
-   a) QUALIF puis PROD (defaut)
-   b) DEV puis QUALIF puis PROD
-   c) QUALIF puis PRE-PROD puis PROD
-   d) Personnalise — lister les noms, dans l'ordre de promotion
+AskUserQuestion : "Quels environnements de release utilises-tu, dans l'ordre de promotion ?"
+- QUALIF puis PROD (Recommande) — chaine standard, seule cablee dans l'orchestration CDP
+  automatisee (GATE 1 a 4)
+- DEV puis QUALIF puis PROD — ajoute un environnement DEV manuel (hors flux CDP automatise)
+  avant QUALIF
+- QUALIF puis PRE-PROD puis PROD — ajoute un environnement PRE-PROD manuel (hors flux CDP
+  automatise) entre QUALIF et PROD
+(Autre chaine personnalisee — lister les noms dans l'ordre de promotion — via "Autre")
 ```
 
 Chaque environnement declare dans `infrastructure.environments[]` recoit un mecanisme
@@ -739,10 +830,11 @@ l'utilisateur de le personnaliser par environnement uniquement s'il le demande e
 ## Etape 9 : Tests
 
 ```
-10. Quels frameworks de tests utilises-tu ?
-    Tests unitaires backend: ___
-    Tests unitaires frontend: ___
-    Tests E2E: ___
+10. Quels frameworks de tests utilises-tu ? (propositions par defaut selon la stack choisie
+    aux etapes 2/3 — preciser si different)
+    a) Tests unitaires backend : [defaut deduit, ex. `go test` pour Go, Jest/Vitest pour Node]
+    b) Tests unitaires frontend : [defaut deduit, ex. Vitest/Jest pour React/Vue]
+    c) Tests E2E : Playwright (recommande)
 ```
 
 ---
@@ -750,13 +842,14 @@ l'utilisateur de le personnaliser par environnement uniquement s'il le demande e
 ## Etape 10 : Securite
 
 ```
-11. Quels aspects securite sont importants ?
-    [ ] Authentification utilisateurs
-    [ ] API publique
-    [ ] Donnees sensibles (RGPD, sante, finance)
-    [ ] Paiements (PCI-DSS)
-    [ ] Multi-tenant
-    [ ] Aucun aspect particulier
+AskUserQuestion (`multiSelect: true`) : "Quels aspects securite sont importants pour ce projet ?"
+- Authentification utilisateurs — active les checks de gestion de session/mots de passe pour
+  l'agent security
+- Donnees sensibles (RGPD, sante, finance) — active les checks de protection des donnees
+  personnelles/sensibles
+- Paiements (PCI-DSS) — active les checks specifiques au traitement de paiements
+- Aucun aspect particulier — n'active aucun check securite specifique (base uniquement)
+(Autre aspect — API publique, multi-tenant... — preciser via "Autre" ; plusieurs choix possibles)
 ```
 
 ---
@@ -775,6 +868,7 @@ l'utilisateur de le personnaliser par environnement uniquement s'il le demande e
   "version": "0.1.0",
   "initialized_at": "<TIMESTAMP>",
   "initialized_from": "analysis|manual|workshop",
+  "template_version": { "tag": "<LATEST_TAG>", "commit": "<LATEST_COMMIT>" },
   "src_dir": "<SRC_DIR>",
   "version_file": "<VERSION_FILE>",
   "stack": {
@@ -805,7 +899,13 @@ l'utilisateur de le personnaliser par environnement uniquement s'il le demande e
   "testing": {
     "backend": ["go-test"],
     "frontend": ["vitest"],
-    "e2e": ["playwright"]
+    "e2e": ["playwright"],
+    "components": { "<composant>": ["<glob des sources du composant>"] },
+    "regression_at_qa": "gated",
+    "full_regression_at": "qualif",
+    "coverage_min": 70,
+    "lot_max_tests": 50,
+    "perf": { "p95_ms": 200, "p99_ms": 500, "error_rate_max": 0.001 }
   },
   "security": {
     "concerns": ["auth", "api-public"]
@@ -816,7 +916,16 @@ l'utilisateur de le personnaliser par environnement uniquement s'il le demande e
     "lint": "<LINT_CMD>",
     "audit": "<AUDIT_CMD>",
     "typecheck": "<TYPECHECK_CMD>",
-    "coverage": "<COVERAGE_CMD>"
+    "coverage": "<COVERAGE_CMD>",
+    "test_fast": "<TEST_FAST_CMD>",
+    "test_targeted": "<TEST_TARGETED_CMD avec {TARGETS}>",
+    "smoke": "<SMOKE_CMD optionnel>"
+  },
+  "docs": {
+    "mockup_dir": "docs/mockup"
+  },
+  "marketing": {
+    "site": "auto"
   },
   "agents": {
     "idle_ttl_minutes": 15,
@@ -829,6 +938,7 @@ Valeurs a deriver si elles ne sont pas fournies explicitement :
 
 | Champ | Derivation |
 |-------|-----------|
+| `template_version` | `{tag, commit}` du template effectivement deploye (`$LATEST_TAG`/`$LATEST_COMMIT` resolus en section "Fetch du Template depuis GitHub"). Ecrit/mis a jour a **chaque** fetch (init, sync, reinstallation) — seule copie durable (trackee git) de cette info, `TEMPLATE_claude/.template-source.json` etant gitignore avec le reste de `TEMPLATE_claude/`. Sert a detecter et reinstaller a l'identique si les fichiers template disparaissent (clone frais) sans forcer une mise a jour — voir section "Reinstallation des fichiers template" |
 | `team_name` | `<PROJECT_NAME>-team` (minuscules, tirets) |
 | `org` | `git remote get-url origin` → extraire l'organisation GitHub |
 | `project` | `git remote get-url origin` → extraire le nom du repo (sans `.git`) |
@@ -838,6 +948,16 @@ Valeurs a deriver si elles ne sont pas fournies explicitement :
 | `commands.audit` | Stack : `govulncheck ./...` / `npm audit` / `pip-audit` |
 | `commands.typecheck` | Frontend TS : `npm run typecheck` / `tsc --noEmit` — vide sinon |
 | `commands.coverage` | Stack : `go test -cover ./...` / `npm run test -- --coverage` / `pytest --cov` |
+| `marketing.site` | Defaut `"auto"` : un site marketing est attendu (`gh-pages` ou `MARKETING/`) ; s'il n'existe pas, l'agent marketing declenche une initialisation (questions de cadrage + maquette). `false` = ordre direct de ne pas avoir de site (le CDP dispatche `PREPARE ... — SANS SITE`) |
+| `docs.mockup_dir` | Defaut `docs/mockup` (dossier des maquettes validees — voir `context/COMMON.md` §14) |
+| `commands.test_fast` | Boucle DEV : tests hors tag `slow`. Stack : `go test -short ./...` / `npx vitest run --exclude "**/*.slow.*"` / `pytest -m "not slow"` — vide sinon (les dev-* retombent sur `commands.test_targeted`) |
+| `commands.test_targeted` | Tests d'un sous-ensemble, `{TARGETS}` = fichiers ou dossiers. Stack : `go test {TARGETS}` / `npx vitest run {TARGETS}` / `pytest {TARGETS}` |
+| `commands.smoke` | Optionnel : tests tagues `smoke` (verification post-deploy). Absent → `curl /health` |
+| `testing.components` | Composant → globs de sources (ex. `"http_server": ["server-go/internal/server/**"]`) — sert a selectionner les NR impactees (`context/COMMON.md` 15.3). Derive de l'arborescence detectee (Etape 0) ; a defaut, un composant par dossier de premier niveau de `src_dir` |
+| `testing.regression_at_qa` | Defaut `gated` (`gated` \| `parallel` \| `none`) — `context/COMMON.md` 15.3 |
+| `testing.full_regression_at` | Defaut `qualif` (`qualif` \| `build` \| `prod`) — `context/COMMON.md` 15.4 |
+| `testing.coverage_min` | Defaut `70` (seuil minimal de couverture, en %) |
+| `testing.lot_max_tests` | Defaut `50` (nombre max de cas de test par lot ; QA execute et rapporte lot par lot) |
 | `src_dir` | Detection Etape 0 (repertoire source principal) ou stack par defaut : `src`, `cmd`... |
 | `version_file` | Fichier source de verite de la version (ex: `package.json`, `config.json`, `VERSION`) |
 | `infrastructure.environments` | Defaut `[QUALIF, PROD]` (Etape 8, question 9bis) ; `publish.mode` = `promote` pour tous sauf le dernier (`rebuild-ci`) ; `deploy.mechanism` reprend la reponse a la question 9 pour chaque environnement, sauf personnalisation explicite |
@@ -1109,6 +1229,75 @@ echo "✓ CLAUDE.md généré"
 cp TEMPLATE_claude/gitignore-for-projects .gitignore
 ```
 
+#### Dossier des maquettes
+
+Creer le squelette du dossier des maquettes (idempotent — ne jamais ecraser un fichier existant ;
+egalement execute a la reinitialisation d'un projet existant qui n'a pas encore `docs.mockup_dir`
+ni `INDEX.md`) :
+
+```bash
+MOCKUP_DIR=$(jq -r '.docs.mockup_dir // "docs/mockup"' .claude/project-config.json)
+mkdir -p "$MOCKUP_DIR"
+
+[ -f "$MOCKUP_DIR/INDEX.md" ] || cat > "$MOCKUP_DIR/INDEX.md" <<'INDEX_EOF'
+# Index des maquettes
+
+> Tenu exclusivement par le CDP — convention : `context/COMMON.md` section 14.
+
+## Actives
+| Composant | Feature | Fichier | Version | Relation |
+|-----------|---------|---------|---------|----------|
+
+## Obsolètes
+| Fichier | Remplacée par | Version |
+|---------|---------------|---------|
+INDEX_EOF
+
+[ -f "$MOCKUP_DIR/DECISIONS.md" ] || cat > "$MOCKUP_DIR/DECISIONS.md" <<'DECISIONS_EOF'
+# Contraintes de conception
+
+> Contraintes durables issues des refus/corrections de l'utilisateur, par composant.
+> Le planner les respecte, QA les vérifie. Tenu par le CDP.
+DECISIONS_EOF
+```
+
+Si `docs.mockup_dir` est absent de `project-config.json` (projet existant), l'ajouter avec la valeur par defaut
+(migration additive, sans autre modification du fichier).
+
+#### Index des tests
+
+Creer `tests/INDEX.md` et `tests/METRICS.md` (idempotent — ne jamais ecraser un fichier existant ;
+egalement execute a la reinitialisation d'un projet existant) :
+
+```bash
+mkdir -p tests
+
+[ -f tests/INDEX.md ] || cat > tests/INDEX.md <<'TESTS_INDEX_EOF'
+# Index des tests
+
+> Tests de specification ecrits par le test-writer, ranges en lots `<famille>/<theme>/<lot>/` ; statuts tenus par le CDP.
+> Le chemin porte l'identite ; cet index ne porte que l'etat : une ligne par lot (chemin termine par `/`),
+> plus des lignes fichier pour les exceptions (quarantaine). Lot sans ligne = `feature`.
+> Convention : `context/COMMON.md` section 15. Statuts : `feature` | `regression` | `quarantaine`.
+> Tags : `smoke`, `critical`, `slow`.
+
+| Chemin | Niveau | Composant | Feature | Statut | Tags |
+|--------|--------|-----------|---------|--------|------|
+TESTS_INDEX_EOF
+
+[ -f tests/METRICS.md ] || cat > tests/METRICS.md <<'TESTS_METRICS_EOF'
+# Metriques de tests
+
+> Une ligne par verdict QA (tenu par le CDP) — sert a mesurer le taux de retours dus a la regression.
+
+| Date | Milestone | Feature | Cycle | Verdict | feature | regression | quarantaine | environnement | flaky |
+|------|-----------|---------|-------|---------|---------|------------|-------------|---------------|-------|
+TESTS_METRICS_EOF
+```
+
+Si `testing.regression_at_qa`, `testing.full_regression_at`, `testing.coverage_min` ou `testing.lot_max_tests` sont absents de
+`project-config.json` (projet existant), les ajouter avec leurs valeurs par defaut (migration additive).
+
 #### Labels GitHub de suivi de phase
 
 Créer les labels de phase sur le repo GitHub (idempotent — `--force` met à jour si déjà existant) :
@@ -1203,12 +1392,15 @@ Changements disponibles :
 
   → Aucun changement detecte            ← afficher si tout est INCHANGE
 
-Voulez-vous :
-a) Reconfigurer completement (ecrase la config)
-b) Modifier certains parametres
-c) Re-analyser le code (detecter les changements)
-d) Appliquer les mises a jour detectees
-e) Annuler
+AskUserQuestion : "Le projet est deja initialise — que veux-tu faire ?"
+- Appliquer les mises a jour detectees (Recommande si seuls des [+]/[~]/[!] sont listes) —
+  synchronise commandes/agents/contextes depuis TEMPLATE_claude/, conserve project-config.json
+- Reconfigurer completement — relance tout le questionnaire/workshop, ecrase project-config.json
+  existant
+- Re-analyser le code — relance la detection automatique de stack pour rafraichir le diagnostic
+  avant de choisir
+- Annuler — ne modifie rien
+(Pour modifier un seul parametre precis sans tout reconfigurer — preciser via "Autre")
 ```
 
 ### Option d : Appliquer les mises a jour detectees
@@ -1438,10 +1630,12 @@ Synchronisation depuis github.com/<repo>
   Inchanges  : N
   Reliquats  : N  ← a supprimer
 
-Actions :
-  [A] Tout appliquer (nouveaux + modifies) et supprimer les reliquats
-  [B] Appliquer uniquement les nouveaux et modifies (garder les reliquats)
-  [C] Annuler
+AskUserQuestion : "Comment appliquer cette synchronisation ?"
+- Tout appliquer et supprimer les reliquats (Recommande) — deploie nouveaux/modifies, supprime
+  les fichiers reliquats listes ci-dessus
+- Appliquer uniquement les nouveaux et modifies — deploie sans toucher aux reliquats (a nettoyer
+  manuellement plus tard)
+- Annuler — ne deploie rien, la synchronisation s'arrete ici
 ```
 
 #### Etape d5 — Appliquer selon le choix
@@ -1589,9 +1783,11 @@ Analyse doublons template/projet :
 **Actions proposées :**
 
 ```
-  [N] Nettoyer automatiquement (supprimer IDENTIQUES, retirer les règles couvertes des DERIVE-TEMPLATE/MIXTE)
-  [I] Inspecter fichier par fichier
-  [S] Ignorer — continuer sans modification
+AskUserQuestion : "Comment traiter les doublons détectés entre template et fichiers projet ?"
+- Nettoyer automatiquement (Recommandé) — supprime les fichiers IDENTIQUES, retire les règles
+  couvertes des fichiers DERIVE-TEMPLATE/MIXTE, conserve le reste tel quel
+- Inspecter fichier par fichier — décide au cas par cas, fichier par fichier (voir Option I)
+- Ignorer — continue sans rien modifier, les doublons resteront signalés à la prochaine sync
 ```
 
 **Option N — Nettoyage automatique :**
@@ -1616,7 +1812,12 @@ Pour chaque fichier non-PROPRE, afficher le diff annoté et proposer l'action :
 
   [↓] Section "Règle X" — couverte par le template mis à jour → retirer ?
 
-  [R] Retirer les redondances  [C] Conserver tel quel  [E] Editer manuellement
+AskUserQuestion : "Cette section est couverte par le template mis à jour — que faire ?"
+- Retirer les redondances (Recommandé) — supprime la section du compagnon, le template
+  s'applique seul désormais
+- Conserver tel quel — garde la section dans le compagnon malgré le recouvrement (sera
+  re-signalée aux prochaines sync)
+- Éditer manuellement — n'applique rien automatiquement, ouvre le fichier pour édition
 ```
 
 > Le système fonctionne correctement quelle que soit l'action choisie.
@@ -1666,10 +1867,11 @@ Si aucun conflit → passer directement à l'étape d5d, sans afficher de rappor
   Template  (nouveau)  : "build/qualif_v<X.Y.Z>/"
   Compagnon (projet)   : "build/qualif/<X.Y.Z>/"
 
-  Lequel fait foi pour ce projet ?
-  [T] Le template — adapter/retirer la règle du compagnon
-  [P] Le compagnon — dérogation projet assumée, conserver telle quelle
-  [E] Éditer manuellement
+AskUserQuestion : "Lequel fait foi pour ce projet ?"
+- Le template (nouveau) — adapte/retire la règle du compagnon, le template s'applique seul
+- Le compagnon (projet) — dérogation projet assumée, conserve la règle telle quelle (sera
+  re-signalée en CONFLIT aux prochaines sync, c'est attendu)
+- Éditer manuellement — n'applique rien automatiquement, ouvre le fichier pour édition
 ```
 
 - **[T]** : retirer ou réécrire la règle du compagnon pour qu'elle ne contredise plus le
