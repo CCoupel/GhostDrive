@@ -37,6 +37,8 @@ export function GetConfig():Promise<config.AppConfig>;
 
 export function GetDriveStatuses():Promise<Record<string, placeholder.DriveStatus>>;
 
+export function GetFileState(arg1:string,arg2:string):Promise<string>;
+
 export function GetGhostDriveRoot():Promise<string>;
 
 export function GetLoadedPlugins():Promise<Array<app.PluginBuildInfo>>;

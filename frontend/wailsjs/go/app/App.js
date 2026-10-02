@@ -58,6 +58,10 @@ export function GetDriveStatuses() {
   return window['go']['app']['App']['GetDriveStatuses']();
 }
 
+export function GetFileState(arg1, arg2) {
+  return window['go']['app']['App']['GetFileState'](arg1, arg2);
+}
+
 export function GetGhostDriveRoot() {
   return window['go']['app']['App']['GetGhostDriveRoot']();
 }

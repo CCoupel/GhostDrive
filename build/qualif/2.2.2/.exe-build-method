@@ -1,0 +1,2 @@
+EXE_METHOD=WAILS
+EXE_NOTE=frontend embed, 18M, CGO_CFLAGS=-IC:/winfsp/inc/fuse CGO_LDFLAGS="-lcldapi -lole32" (go env -w temporaire, restauré après build) — cycle 2 (#163) : corrige régression critique 8/8 fichiers illisibles (locateEC4Shard EOF check manquant), SHA 3950a16. Écrase le build cycle 1 (SHA 77ffe04) invalidé par la régression.

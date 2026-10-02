@@ -1,0 +1,2 @@
+EXE_METHOD=WAILS
+EXE_NOTE=frontend embed, 18M, CGO_CFLAGS=-IC:/winfsp/inc/fuse CGO_LDFLAGS="-lcldapi -lole32" (go env -w temporaire, restauré après build)
