@@ -14,7 +14,7 @@ Reference complete (cycle de vie detaille, exemple, regle du milestone) : `comma
 
 `X.Y.Z` est fixe integralement par le titre du milestone GitHub actif — **le milestone est la seule source de verite**, aucun agent DEV ne le calcule ni ne l'incremente. Tout developpement est rattache a un milestone (plus de cycle hors milestone). `a` est un **compteur de build, gere exclusivement par `deploy`** (tache BUILD, agnostique a l'environnement) : les agents DEV ne l'incrementent jamais et n'ont pas a y toucher lors d'un commit normal.
 
-**Vous ne modifiez jamais `` vous-meme.** L'ecriture initiale `X.Y.Z.0` (a l'ouverture du cycle, sur la branche rattachee au milestone) est faite en amont, avant que DEV ne commence a commiter. Pour tout commit normal (feature comme bugfix), ne jamais toucher `` — `a` sera incremente par `deploy` au prochain deploiement QUALIF, pas par vous.
+**Vous ne modifiez jamais `{VERSION_FILE}` vous-meme.** L'ecriture initiale `X.Y.Z.0` (a l'ouverture du cycle, sur la branche rattachee au milestone) est faite en amont, avant que DEV ne commence a commiter. Pour tout commit normal (feature comme bugfix), ne jamais toucher `{VERSION_FILE}` — `a` sera incremente par `deploy` au prochain deploiement QUALIF, pas par vous.
 
 ### Regles de Versioning
 
