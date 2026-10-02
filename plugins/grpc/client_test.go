@@ -131,6 +131,22 @@ func (m *mockBackend) Move(_ context.Context, oldPath, newPath string) error {
 	return nil
 }
 
+func (m *mockBackend) Rename(_ context.Context, oldPath, newPath string) error {
+	return m.Move(context.Background(), oldPath, newPath)
+}
+
+func (m *mockBackend) Copy(_ context.Context, srcPath, dstPath string) error {
+	if !m.connected {
+		return fmt.Errorf("mock: %w", plugins.ErrNotConnected)
+	}
+	data, ok := m.files[srcPath]
+	if !ok {
+		return fmt.Errorf("mock: %w", plugins.ErrFileNotFound)
+	}
+	m.files[dstPath] = data
+	return nil
+}
+
 func (m *mockBackend) List(_ context.Context, path string) ([]plugins.FileInfo, error) {
 	if !m.connected {
 		return nil, fmt.Errorf("mock: %w", plugins.ErrNotConnected)

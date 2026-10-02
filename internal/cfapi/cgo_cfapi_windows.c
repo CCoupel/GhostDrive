@@ -299,6 +299,28 @@ HRESULT ghd_cf_report_error(uintptr_t callbackInfoPtr, HRESULT providerError) {
 // If the provider already created placeholders via CfCreatePlaceholders (out-of-band),
 // it must still call this function with PlaceholderCount=0 and completionStatus=S_OK
 // to release the pending OS operation — otherwise the Explorer window will time out.
+//
+// #158 — REVISION of #157 fix — HYPOTHESIS TEST re-applying DISABLE_ON_DEMAND_POPULATION.
+//
+// #157 original: FLAG_NONE caused FETCH_PLACEHOLDERS infinite loop (1550+ calls in
+// minutes) because the directory stays in "partial" state and CF re-fires on every
+// access → concurrent CfCreatePlaceholders → CF state corruption → 0x80070781.
+//
+// #157 fix attempted: DISABLE_ON_DEMAND_POPULATION → stopped the loop, but introduced
+// regression #158: bidirectional sync completely dead (LOCAL→GhD: and GhD:→LOCAL).
+// Hypothesis at the time: the flag's reparse-point modification interfered with
+// ReadDirectoryChangesW / CF file operations.
+//
+// However, #158 was diagnosed with Bugs C and D also present:
+//   - Bug C: localToRemote() case mismatch → wrong remote path → Upload failed silently
+//   - Bug D: OnDeleteCompletion/OnRenameCompletion never wired → deletes/renames dropped
+// It is plausible that the "sync dead" symptom in #158 was actually Bug C/D, not the flag.
+//
+// This commit re-applies DISABLE_ON_DEMAND_POPULATION now that Bugs C and D are fixed
+// (commits c5875ec + 857f42d + 1005670 + bdf0a43) and the mutex dedup is in place
+// (commit 1377bf5). If sync is alive with this flag active, the #158 root cause was
+// Bug C/D, not DISABLE_ON_DEMAND_POPULATION. If sync dies again, the flag is truly
+// at fault and must be reverted.
 HRESULT ghd_cf_ack_placeholders(uintptr_t callbackInfoPtr, HRESULT completionStatus) {
     if (!callbackInfoPtr) return E_INVALIDARG;
     const CF_CALLBACK_INFO* info = (const CF_CALLBACK_INFO*)callbackInfoPtr;
@@ -308,11 +330,13 @@ HRESULT ghd_cf_ack_placeholders(uintptr_t callbackInfoPtr, HRESULT completionSta
 
     CF_OPERATION_PARAMETERS params = {0};
     params.ParamSize = CF_SIZE_OF_OP_PARAM(TransferPlaceholders);
-    params.TransferPlaceholders.Flags             = CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE;
+    /* DISABLE_ON_DEMAND_POPULATION: tells CF the directory is fully populated,
+     * stopping FETCH_PLACEHOLDERS re-fire without needing PlaceholderTotalCount.
+     * Hypothesis: #158 sync breakage was caused by Bug C/D (now fixed), not this flag. */
+    params.TransferPlaceholders.Flags             = CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION;
     params.TransferPlaceholders.CompletionStatus  = completionStatus;
     params.TransferPlaceholders.PlaceholderArray  = NULL;
     params.TransferPlaceholders.PlaceholderCount  = 0;
-    /* PlaceholderTotalCount left zero-initialized — signals "population complete" */
 
     return CfExecute(&opInfo, &params);
 }
@@ -448,6 +472,19 @@ void ghd_notify_icon_refresh(LPCWSTR syncRootPath) {
                        (LPCVOID)syncRootPath, NULL);
     }
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSH, NULL, NULL);
+}
+
+// ghd_notify_dir_change fires SHCNE_UPDATEDIR for a specific directory.
+// Used after remote→local sync operations (download, delete, rename) to refresh
+// Explorer so the new file state is visible without requiring F5 (#150).
+// Lighter than ghd_notify_icon_refresh — does NOT reload shell extension
+// associations (no SHCNE_ASSOCCHANGED), avoiding a global Explorer reload.
+// dir: absolute path of the directory to refresh (wide string); NULL is no-op.
+void ghd_notify_dir_change(LPCWSTR dir) {
+    if (dir) {
+        SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH | SHCNF_FLUSH,
+                       (LPCVOID)dir, NULL);
+    }
 }
 
 #endif // _WIN32

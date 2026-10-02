@@ -142,6 +142,9 @@ char* ghd_wchar_to_utf8(LPCWSTR wstr);
 // Windows blocks the Explorer thread until this is called — always invoke it
 // after OnFetchPlaceholders returns, even when placeholders were already created
 // out-of-band via CfCreatePlaceholders.
+// Uses CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE to preserve CF directory state
+// (#158: DISABLE_ON_DEMAND_POPULATION broke bidirectional sync).
+// Anti-loop dedup is handled in ghdOnFetchPlaceholders (provider.go) via a 30s cooldown.
 // completionStatus: S_OK (0) on success, E_FAIL on error.
 // Returns HRESULT.
 HRESULT ghd_cf_ack_placeholders(uintptr_t callbackInfoPtr, HRESULT completionStatus);
@@ -210,6 +213,12 @@ HRESULT ghd_convert_dir_to_placeholder(LPCWSTR wPath);
 //   2. SHCNE_ASSOCCHANGED (global) — reloads cloudfilesshell.dll overlay handler
 // Call after any StorageProvider registration (WinRT or registry fallback).
 void ghd_notify_icon_refresh(LPCWSTR syncRootPath);
+
+// ghd_notify_dir_change fires SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH|SHCNF_FLUSH, dir, NULL).
+// Use after a remote→local file operation (create/delete/rename) to refresh Explorer
+// without reloading all shell extensions (lighter than ghd_notify_icon_refresh).
+// dir: absolute path of the directory to refresh (wide string); NULL is no-op.
+void ghd_notify_dir_change(LPCWSTR dir);
 
 // ghd_register_storage_provider_winrt calls WinRT
 // Windows.Storage.Provider.StorageProviderSyncRootManager::Register via the

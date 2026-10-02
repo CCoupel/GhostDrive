@@ -14,8 +14,10 @@ import (
 
 // mockBackend is a minimal in-memory StorageBackend for testing.
 type mockBackend struct {
-	files     map[string]plugins.FileInfo
-	connected bool
+	files       map[string]plugins.FileInfo
+	connected   bool
+	deleteCount int // incremented on each Delete call (#150 suppress tests)
+	renameCount int // incremented on each Rename call (#150 suppress tests)
 }
 
 func newMockBackend() *mockBackend {
@@ -66,6 +68,7 @@ func (m *mockBackend) Download(_ context.Context, remote, local string, _ plugin
 }
 
 func (m *mockBackend) Delete(_ context.Context, remote string) error {
+	m.deleteCount++
 	delete(m.files, remote)
 	return nil
 }
@@ -78,6 +81,24 @@ func (m *mockBackend) Move(_ context.Context, old, newPath string) error {
 	fi.Path = newPath
 	m.files[newPath] = fi
 	delete(m.files, old)
+	return nil
+}
+
+// Rename implements StorageBackend — delegates to Move for tests (#139).
+func (m *mockBackend) Rename(_ context.Context, old, newPath string) error {
+	m.renameCount++
+	return m.Move(context.Background(), old, newPath)
+}
+
+// Copy implements StorageBackend — duplicates the file in the mock (#140).
+func (m *mockBackend) Copy(_ context.Context, src, dst string) error {
+	fi, ok := m.files[src]
+	if !ok {
+		return os.ErrNotExist
+	}
+	cp := fi
+	cp.Path = dst
+	m.files[dst] = cp
 	return nil
 }
 

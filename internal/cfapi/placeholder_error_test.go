@@ -31,12 +31,13 @@ import (
 
 // ─── Spec helpers ────────────────────────────────────────────────────────────
 
-// HRESULT spec constants — mirror provider.go hrAlreadyExists / hrUserMappedFile.
+// HRESULT spec constants — mirror provider.go hrAlreadyExists / hrUserMappedFile / hrAlreadyPlaceholder.
 // Keeping them here as a cross-platform spec guard: if the production constants
 // change, this file's tests must be updated in sync.
 const (
-	specHRAlreadyExists  = uint32(0x800700b7) // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)
-	specHRUserMappedFile = uint32(0x800704c8) // HRESULT_FROM_WIN32(ERROR_USER_MAPPED_FILE)
+	specHRAlreadyExists      = uint32(0x800700b7) // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)
+	specHRUserMappedFile     = uint32(0x800704c8) // HRESULT_FROM_WIN32(ERROR_USER_MAPPED_FILE)
+	specHRAlreadyPlaceholder = uint32(0x8007017c) // HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_INVALID_REQUEST) — dir already a CF placeholder
 )
 
 // createPlaceholdersResultSpec mirrors the production error-handling logic inside
@@ -602,23 +603,29 @@ func convertFlagsSpec(isDirectory bool) uint32 {
 }
 
 // convertOnAlreadyExistsSpec mirrors the production decision logic in
-// createPlaceholdersWithFlags: "convert to placeholder iff ALREADY_EXISTS"
-// (applies to BOTH files and directories).
-func convertOnAlreadyExistsSpec(hr uint32, _ bool) bool {
-	// Rule: CfConvertToPlaceholder is called for ANY entry (file or directory)
-	// when hr == ALREADY_EXISTS.  The local NTFS entry exists but is not yet a
-	// CF placeholder:
-	//   · Directories: OS never calls FETCH_PLACEHOLDERS without conversion.
-	//   · Files: file gets no CF badge (not ☁️ nor ✓✓) without conversion.
-	return hr == specHRAlreadyExists
+// createPlaceholdersWithFlags (updated for fix #159):
+// "convert to placeholder iff ALREADY_EXISTS AND is a directory".
+//
+// History:
+//   - After c27c0ca: directories converted on ALREADY_EXISTS, files skipped.
+//   - After 69628d7: all entries converted on ALREADY_EXISTS.
+//   - After #159:    only directories converted — file conversion causes CF index
+//                    corruption → 0x80070781 (#159).
+func convertOnAlreadyExistsSpec(hr uint32, isDirectory bool) bool {
+	return hr == specHRAlreadyExists && isDirectory // #159: files excluded
 }
 
-// TestRegression133_ConvertToPlaceholder_FilesAndDirectories verifies that
-// CfConvertToPlaceholder is called for BOTH files and directories on ALREADY_EXISTS.
+// TestRegression133_ConvertToPlaceholder_FilesAndDirectories verifies the convert
+// decision across entry types and HRESULTs (updated for fix #159):
+//   - Directories on ALREADY_EXISTS → convert (ENABLE_ON_DEMAND_POPULATION needed)
+//   - Files on ALREADY_EXISTS → NO convert (#159: would corrupt parent CF index)
+//   - All entries on S_OK → no convert (placeholder just created)
+//   - All entries on USER_MAPPED_FILE → no convert (placeholder exists, FETCH_DATA active)
 //
-// Before fix (c27c0ca): only directories were converted.  Files that already
-//   existed locally were silently skipped → no CF attributes → no badge.
-// After fix (this commit): files are also converted → badge ✓✓ (in-sync).
+// History:
+//   - After c27c0ca: dirs converted, files skipped.
+//   - After 69628d7: ALL entries converted.
+//   - After #159:    only dirs converted (file CF index corruption fix).
 func TestRegression133_ConvertToPlaceholder_FilesAndDirectories(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -631,8 +638,8 @@ func TestRegression133_ConvertToPlaceholder_FilesAndDirectories(t *testing.T) {
 			specHRAlreadyExists, true, true,
 		},
 		{
-			"file ALREADY_EXISTS → convert (fix: was skipped before)",
-			specHRAlreadyExists, false, true,
+			"file ALREADY_EXISTS → NO convert (#159: was converted after 69628d7, now reverted)",
+			specHRAlreadyExists, false, false,
 		},
 		{
 			"directory S_OK → no convert (created successfully)",
@@ -714,16 +721,20 @@ type convertTracker struct {
 }
 
 // convertPathSpec mirrors the full per-entry convert decision from provider.go
-// (updated for commit 69628d7 — IsDirectory guard removed):
+// (updated for fix #159 — file conversion removed from hrAlreadyExists branch):
 //
-//	if hr == hrAlreadyExists {                    // applies to ALL entry types
+//	if hr == hrAlreadyExists && item.IsDirectory {
 //	    convertFn(filepath.Join(baseDir, item.RelativePath))
 //	}
 //
-// Before 69628d7: only directory entries were converted.
-// After  69628d7: all entries (files + directories) are converted on ALREADY_EXISTS.
+// History:
+//   - Before c27c0ca: ALWAYS_EXISTS ignored for all entries (no conversion).
+//   - After  c27c0ca: directories converted on ALWAYS_EXISTS.
+//   - After  69628d7: all entries (files + directories) converted.
+//   - After  #159:    only directories converted — files skipped to avoid corrupting
+//                     the parent directory's CF index (0x80070781 regression).
 func convertPathSpec(baseDir string, item PlaceholderInfo, hr uint32, convertFn func(string)) {
-	if hr == specHRAlreadyExists {
+	if hr == specHRAlreadyExists && item.IsDirectory { // #159: files excluded
 		convertFn(filepath.Join(baseDir, item.RelativePath))
 	}
 }
@@ -827,28 +838,28 @@ func TestSpec_ConvertFlags_FileAndDir_AreDistinct(t *testing.T) {
 }
 
 // TestRegression133_ConvertToPlaceholder_ExistingFile_Tracked verifies that
-// CfConvertToPlaceholder IS called for a file entry returning ALREADY_EXISTS.
+// CfConvertToPlaceholder is NOT called for files returning ALREADY_EXISTS after #159.
 //
-// Behaviour changed in 69628d7: before that fix only directories were converted;
-// files returning ALREADY_EXISTS were silently skipped → file had no CF attributes
-// → no badge (not ☁️ nor ✓✓) in Explorer.
-// After fix: file is also converted → CF_CONVERT_FLAG_MARK_IN_SYNC → badge ✓✓.
+// History:
+//   - Before c27c0ca: ALREADY_EXISTS silently skipped for all entries.
+//   - After  69628d7: files also converted on ALREADY_EXISTS → badge ✓✓.
+//   - After  #159:    files excluded — CfConvertToPlaceholder on an existing CF
+//                     file placeholder corrupts the parent directory's CF index
+//                     → 0x80070781 on subsequent CF file operations (#159).
 func TestRegression133_ConvertToPlaceholder_ExistingFile_Tracked(t *testing.T) {
 	baseDir := "/tmp/GhostDrive/MFS"
 	item := PlaceholderInfo{RelativePath: "report.pdf", IsDirectory: false}
-	wantPath := filepath.Join(baseDir, "report.pdf")
 
 	tr := &convertTracker{}
 	convertPathSpec(baseDir, item, specHRAlreadyExists, func(p string) {
 		tr.calls = append(tr.calls, p)
 	})
 
-	if len(tr.calls) == 0 {
-		t.Fatalf("existing file ALREADY_EXISTS: expected CfConvertToPlaceholder to be called, got 0 calls "+
-			"(regression 69628d7: files must be converted to get CF badge ✓✓)")
-	}
-	if tr.calls[0] != wantPath {
-		t.Errorf("convert path for file: got %q, want %q", tr.calls[0], wantPath)
+	// #159: files must NOT be converted — calling convert on existing CF placeholder
+	// corrupts parent directory CF index.
+	if len(tr.calls) != 0 {
+		t.Errorf("existing file ALREADY_EXISTS: CfConvertToPlaceholder must NOT be called after #159 "+
+			"— got calls=%v", tr.calls)
 	}
 }
 
@@ -872,14 +883,17 @@ func TestRegression133_ConvertToPlaceholder_NewDir_NotTracked(t *testing.T) {
 }
 
 // TestRegression133_ConvertToPlaceholder_MultipleItems_TrackCalls verifies the
-// per-item behaviour across a realistic mixed listing (updated for 69628d7):
+// per-item behaviour across a realistic mixed listing after fix #159:
 //   - dir1 (ALREADY_EXISTS) → convert called with baseDir/dir1
-//   - file.txt (ALREADY_EXISTS) → convert called with baseDir/file.txt (changed by 69628d7)
+//   - file.txt (ALREADY_EXISTS) → convert NOT called (#159: files excluded)
 //   - dir2 (S_OK, newly created) → no convert
 //   - dir3 (ALREADY_EXISTS) → convert called with baseDir/dir3
 //
-// Expected: exactly 3 convert calls (dir1, file.txt, dir3), in order.
-// Before 69628d7: 2 calls only (dir1, dir3) — file was skipped.
+// Expected: exactly 2 convert calls (dir1, dir3), in order.
+// History:
+//   - Before 69628d7: 2 calls (dir1, dir3) — file skipped.
+//   - After  69628d7: 3 calls (dir1, file.txt, dir3) — file also converted.
+//   - After  #159:    2 calls (dir1, dir3) — file excluded (CF index corruption fix).
 func TestRegression133_ConvertToPlaceholder_MultipleItems_TrackCalls(t *testing.T) {
 	baseDir := "/tmp/GhostDrive/MFS/parent"
 	type entry struct {
@@ -900,15 +914,15 @@ func TestRegression133_ConvertToPlaceholder_MultipleItems_TrackCalls(t *testing.
 		})
 	}
 
+	// #159: only dirs converted — file.txt excluded.
 	wantCalls := []string{
 		filepath.Join(baseDir, "dir1"),
-		filepath.Join(baseDir, "file.txt"), // 69628d7: file now also converted
 		filepath.Join(baseDir, "dir3"),
 	}
 
 	if len(tr.calls) != len(wantCalls) {
 		t.Fatalf("convert call count: got %d, want %d; calls=%v "+
-			"(regression 69628d7: file.txt must also be converted — was skipped before)",
+			"(#159: only dirs converted in hrAlreadyExists, got unexpected file.txt)",
 			len(tr.calls), len(wantCalls), tr.calls)
 	}
 	for i, want := range wantCalls {
@@ -918,41 +932,35 @@ func TestRegression133_ConvertToPlaceholder_MultipleItems_TrackCalls(t *testing.
 	}
 }
 
-// ─── Regression tests — 69628d7 CfConvertToPlaceholder for files ─────────────
+// ─── Regression tests — 69628d7 / #159 CfConvertToPlaceholder for files ───────
 //
-// Fix (commit 69628d7): the `if item.IsDirectory` guard in the hrAlreadyExists
-// case of createPlaceholdersWithFlags was removed.  Before this fix:
-//   · Files returning ALREADY_EXISTS were silently skipped.
-//   · The local file had no CF attributes → no badge in Explorer (not ☁️ nor ✓✓).
-// After the fix:
-//   · ALL entries (files + directories) on ALREADY_EXISTS → CfConvertToPlaceholder.
-//   · ghd_convert_to_placeholder uses FILE_FLAG_BACKUP_SEMANTICS (works for both).
-//   · CF_CONVERT_FLAG_MARK_IN_SYNC → file gets badge ✓✓ (local + in-sync).
+// Fix (commit 69628d7): `if item.IsDirectory` guard removed from hrAlreadyExists.
+//   · Before: files silently skipped → no CF badge.
+//   · After:  all entries converted on ALREADY_EXISTS → badge ✓✓.
+//
+// Reversal (fix #159): file conversion re-excluded from hrAlreadyExists.
+//   · Root cause: CfConvertToPlaceholder on an existing CF file placeholder rewrites
+//     its EAs and can corrupt the parent directory's CF index → 0x80070781 (#159).
+//   · Directories remain converted (needed for ENABLE_ON_DEMAND_POPULATION).
+//   · Files in the sync root are handled by Watch() + ActionUpload.
 
-// TestRegression69628d7_ExistingFile_ConvertCalled is the primary regression guard
-// for commit 69628d7.  It verifies that a file entry returning ALREADY_EXISTS causes
-// CfConvertToPlaceholder to be called — the exact behaviour that was missing before
-// the fix.
-//
-// Failing condition (before 69628d7): isDirectory guard skipped the convert call.
-// Passing condition (after 69628d7):  convert called for any ALREADY_EXISTS entry.
+// TestRegression69628d7_ExistingFile_ConvertCalled documents the #159 reversal:
+// after #159, a file entry returning ALREADY_EXISTS must NOT trigger
+// CfConvertToPlaceholder (the 69628d7 fix is intentionally reversed for files).
 func TestRegression69628d7_ExistingFile_ConvertCalled(t *testing.T) {
 	baseDir := "/tmp/GhostDrive/MFS"
 	item := PlaceholderInfo{RelativePath: "notes.txt", IsDirectory: false}
-	wantPath := filepath.Join(baseDir, "notes.txt")
 
 	tr := &convertTracker{}
 	convertPathSpec(baseDir, item, specHRAlreadyExists, func(p string) {
 		tr.calls = append(tr.calls, p)
 	})
 
-	// Primary regression guard: was 0 before the fix.
-	if len(tr.calls) == 0 {
-		t.Fatalf("69628d7 regression: existing file ALREADY_EXISTS — CfConvertToPlaceholder not called "+
-			"(IsDirectory guard incorrectly still present — file would have no CF badge)")
-	}
-	if tr.calls[0] != wantPath {
-		t.Errorf("69628d7: convert path: got %q, want %q", tr.calls[0], wantPath)
+	// #159 anti-regression: convert must NOT be called for files.
+	// (69628d7 introduced file conversion; #159 reverses it to fix CF index corruption.)
+	if len(tr.calls) != 0 {
+		t.Errorf("#159 regression: existing file ALREADY_EXISTS — CfConvertToPlaceholder must NOT be called "+
+			"— got calls=%v (calling convert on existing CF file placeholder corrupts parent CF index)", tr.calls)
 	}
 }
 
@@ -1161,6 +1169,183 @@ func TestSpec_StorageProvider_RegisteredBeforeCfRegister(t *testing.T) {
 	}
 }
 
+// ─── #156 — 0x8007017c for already-placeholder directories ───────────────────
+
+// shouldConvertInAlreadyExistsBranchSpec mirrors the decision in
+// createPlaceholdersWithFlags (provider.go) on whether to call
+// CfConvertToPlaceholder when CfCreatePlaceholders returns hrAlreadyExists.
+//
+// After fix #159: only DIRECTORIES are converted (for ENABLE_ON_DEMAND_POPULATION).
+// FILES are never converted in this branch — calling CfConvertToPlaceholder on an
+// existing CF file placeholder corrupts the parent directory's CF index (#159).
+func shouldConvertInAlreadyExistsBranchSpec(isDirectory bool) bool {
+	return isDirectory // #159: files skipped, dirs converted
+}
+
+// dirConvertResultSpec mirrors the production logic in createPlaceholdersWithFlags
+// for handling the HRESULT returned by ghd_convert_dir_to_placeholder (directory
+// case only after #159) inside the hrAlreadyExists branch.
+//
+// After fix #159 this spec is only called for DIRECTORIES — files no longer invoke
+// CfConvertToPlaceholder in the hrAlreadyExists branch.
+//
+//	if xhr != 0 {
+//	    xhrCode := uint32(xhr)
+//	    if xhrCode == hrAlreadyPlaceholder {
+//	        // benign no-op — already a CF placeholder (#156)
+//	    } else {
+//	        log.Printf("cfapi: CfConvertToPlaceholder ...")
+//	    }
+//	}
+//
+// Returns (isError bool, shouldLog bool) where:
+//   - isError=false  means the call is treated as a success (total++ continues)
+//   - shouldLog=true means the error is logged
+func dirConvertResultSpec(xhr uint32) (isError bool, shouldLog bool) {
+	if xhr == 0 {
+		return false, false // success — no error, no log
+	}
+	if xhr == specHRAlreadyPlaceholder {
+		// #156 — directory already a CF placeholder; ENABLE_ON_DEMAND_POPULATION
+		// is not idempotent.  Expected on 2nd+ FETCH_PLACEHOLDERS pass.
+		return false, false // treat as success, suppress log spam
+	}
+	return true, true // real error — log it
+}
+
+// TestRegression156_DirConvert_AlreadyPlaceholder verifies that 0x8007017c from
+// ghd_convert_dir_to_placeholder is treated as a non-fatal success for directories.
+//
+// Without the fix: this HRESULT was logged as an error on every FETCH_PLACEHOLDERS
+// pass after the first, flooding logs with "CfConvertToPlaceholder ... isDir=true:
+// HRESULT 0x8007017c" — misleading because the directory IS properly set up.
+// With the fix (#156): silently treated as a no-op.
+// Note: file cases removed — after #159 CfConvertToPlaceholder is never called for
+// files in the hrAlreadyExists branch.
+func TestRegression156_DirConvert_AlreadyPlaceholder(t *testing.T) {
+	cases := []struct {
+		name      string
+		xhr       uint32
+		wantError bool
+		wantLog   bool
+	}{
+		{
+			"dir: 0x8007017c → no error, no log (#156)",
+			specHRAlreadyPlaceholder, false, false,
+		},
+		{
+			"dir: S_OK → no error, no log",
+			0, false, false,
+		},
+		{
+			"dir: other error (0x80004005 = E_FAIL) → error + log",
+			uint32(0x80004005), true, true,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			gotError, gotLog := dirConvertResultSpec(tt.xhr)
+			if gotError != tt.wantError {
+				t.Errorf("dirConvertResult(xhr=0x%08x) isError=%v, want %v",
+					tt.xhr, gotError, tt.wantError)
+			}
+			if gotLog != tt.wantLog {
+				t.Errorf("dirConvertResult(xhr=0x%08x) shouldLog=%v, want %v",
+					tt.xhr, gotLog, tt.wantLog)
+			}
+		})
+	}
+}
+
+// TestRegression156_HRAlreadyPlaceholder_ConstantValue guards the HRESULT value.
+// 0x8007017c = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_INVALID_REQUEST = 0x17c = 380).
+func TestRegression156_HRAlreadyPlaceholder_ConstantValue(t *testing.T) {
+	// Windows formula: HRESULT_FROM_WIN32(x) = (x & 0xFFFF) | 0x80070000
+	const errorCloudFileInvalidRequest = uint32(380) // 0x17c
+	want := (errorCloudFileInvalidRequest & 0xFFFF) | 0x80070000
+	if specHRAlreadyPlaceholder != want {
+		t.Errorf("specHRAlreadyPlaceholder = 0x%08x, want HRESULT_FROM_WIN32(0x%x) = 0x%08x",
+			specHRAlreadyPlaceholder, errorCloudFileInvalidRequest, want)
+	}
+}
+
+// ─── Spec: #159 — files excluded from CfConvertToPlaceholder in hrAlreadyExists ──
+//
+// Fix (#159): CfConvertToPlaceholder must NOT be called for FILES when
+// CfCreatePlaceholders returns hrAlreadyExists.  The existing file is most likely
+// already a CF placeholder.  Calling CfConvertToPlaceholder on it rewrites the file's
+// Extended Attributes and may corrupt the parent directory's CF index → 0x80070781.
+// Directories still need conversion for ENABLE_ON_DEMAND_POPULATION (#156 guard applies).
+
+// TestRegression159_ShouldConvert_DirsOnly verifies the spec:
+// only directories trigger CfConvertToPlaceholder in the hrAlreadyExists branch.
+func TestRegression159_ShouldConvert_DirsOnly(t *testing.T) {
+	// Directory: must convert (needed for ENABLE_ON_DEMAND_POPULATION)
+	if !shouldConvertInAlreadyExistsBranchSpec(true /* isDirectory */) {
+		t.Error("#159: shouldConvert(isDir=true) must return true — dirs need ENABLE_ON_DEMAND_POPULATION")
+	}
+	// File: must NOT convert (#159 anti-corruption guard)
+	if shouldConvertInAlreadyExistsBranchSpec(false /* isDirectory */) {
+		t.Error("#159: shouldConvert(isDir=false) must return false — convert corrupts parent CF index")
+	}
+}
+
+// TestRegression159_ExistingFile_ConvertSkipped verifies that a file entry
+// returning hrAlreadyExists does NOT call CfConvertToPlaceholder.
+func TestRegression159_ExistingFile_ConvertSkipped(t *testing.T) {
+	baseDir := "/tmp/GhostDrive/MFS"
+	for _, relPath := range []string{"notes.txt", "report.pdf", "image.png"} {
+		item := PlaceholderInfo{RelativePath: relPath, IsDirectory: false}
+		tr := &convertTracker{}
+		convertPathSpec(baseDir, item, specHRAlreadyExists, func(p string) {
+			tr.calls = append(tr.calls, p)
+		})
+		if len(tr.calls) != 0 {
+			t.Errorf("#159: file %q hrAlreadyExists — CfConvertToPlaceholder called %d times (must be 0); calls=%v",
+				relPath, len(tr.calls), tr.calls)
+		}
+	}
+}
+
+// TestRegression159_ExistingDir_ConvertStillCalled verifies that directories
+// are still converted in the hrAlreadyExists branch after fix #159.
+func TestRegression159_ExistingDir_ConvertStillCalled(t *testing.T) {
+	baseDir := "/tmp/GhostDrive/MFS"
+	item := PlaceholderInfo{RelativePath: "documents", IsDirectory: true}
+	wantPath := filepath.Join(baseDir, "documents")
+
+	tr := &convertTracker{}
+	convertPathSpec(baseDir, item, specHRAlreadyExists, func(p string) {
+		tr.calls = append(tr.calls, p)
+	})
+	if len(tr.calls) == 0 {
+		t.Fatalf("#159: directory hrAlreadyExists — CfConvertToPlaceholder must be called for dirs "+
+			"(needed for ENABLE_ON_DEMAND_POPULATION so FETCH_PLACEHOLDERS fires on open)")
+	}
+	if tr.calls[0] != wantPath {
+		t.Errorf("#159: dir convert path: got %q, want %q", tr.calls[0], wantPath)
+	}
+}
+
+// TestRegression159_NewEntry_SOrOk_NoConvert verifies that S_OK entries (newly
+// created placeholders) never trigger CfConvertToPlaceholder — unchanged by #159.
+func TestRegression159_NewEntry_SOrOk_NoConvert(t *testing.T) {
+	baseDir := "/tmp/GhostDrive/MFS"
+	for _, item := range []PlaceholderInfo{
+		{RelativePath: "newfile.txt", IsDirectory: false},
+		{RelativePath: "newdir", IsDirectory: true},
+	} {
+		tr := &convertTracker{}
+		convertPathSpec(baseDir, item, 0 /* S_OK */, func(p string) {
+			tr.calls = append(tr.calls, p)
+		})
+		if len(tr.calls) != 0 {
+			t.Errorf("#159: S_OK entry %q must NOT trigger CfConvertToPlaceholder; got calls=%v",
+				item.RelativePath, tr.calls)
+		}
+	}
+}
+
 // TestRegression69628d7_NewEntry_NoConvert verifies that entries created
 // successfully (hr=0, S_OK) do NOT trigger CfConvertToPlaceholder — regardless
 // of whether they are files or directories.
@@ -1184,5 +1369,156 @@ func TestRegression69628d7_NewEntry_NoConvert(t *testing.T) {
 					tt.name, tr.calls)
 			}
 		})
+	}
+}
+
+// ─── Spec: #157 / #158 FETCH_PLACEHOLDERS ack flag + cooldown ────────────────
+//
+// #157 original: FLAG_NONE caused FETCH_PLACEHOLDERS infinite loop (1550+ calls
+// in minutes) because the directory stays in "partial" CF state, CF re-fires on
+// every access → concurrent CfCreatePlaceholders → CF state corruption → 0x80070781.
+//
+// #157 fix (now reverted): used DISABLE_ON_DEMAND_POPULATION to stop the loop.
+// That modified the directory's CF reparse point and introduced regression #158:
+// bidirectional sync completely dead (LOCAL→GhD: and GhD:→LOCAL both broken).
+// Root cause: CfExecute with DISABLE_ON_DEMAND_POPULATION modifies the directory
+// reparse point in a way that interferes with ReadDirectoryChangesW (fsnotify)
+// and/or blocks CF file operations in the sync root.
+//
+// Revised fix (#158):
+//   • ghd_cf_ack_placeholders: FLAG_NONE (no CF directory state change)
+//   • ghdOnFetchPlaceholders: 30-second cooldown per directory path
+//     — first FETCH_PLACEHOLDERS: run OnFetchPlaceholders + store timestamp
+//     — subsequent calls within 30s: ack immediately, skip backend.List()
+// This stops the callback flood without touching the CF reparse point.
+
+const (
+	// specTransferFlagNone mirrors CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE (cfapi.h, 0x0).
+	// Used in ghd_cf_ack_placeholders after #158 revert — FLAG_NONE preserves CF
+	// directory state so fsnotify and sync operations remain functional.
+	specTransferFlagNone = uint32(0x00000000)
+
+	// specTransferFlagDisableOnDemand mirrors
+	// CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION (cfapi.h, 0x2).
+	// Documented here for reference; MUST NOT be used as the ack flag (#158 regression).
+	specTransferFlagDisableOnDemand = uint32(0x00000002)
+)
+
+// ackFlagsSpec mirrors the flag used in ghd_cf_ack_placeholders (cgo_cfapi_windows.c).
+// After fix #158 this must return specTransferFlagNone to preserve CF directory state.
+// Anti-loop protection is provided by the cooldown in ghdOnFetchPlaceholders.
+func ackFlagsSpec() uint32 {
+	return specTransferFlagNone
+}
+
+// TestRegression158_AckFlag_None verifies the ack flag is CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE.
+//
+// History:
+//   - Before #157: FLAG_NONE → infinite loop (1550+ calls) → CF corruption → 0x80070781.
+//   - Fix #157:    DISABLE_ON_DEMAND_POPULATION → stopped loop but broke sync (#158).
+//   - Fix #158:    FLAG_NONE + cooldown dedup in Go → no CF state change, no loop.
+func TestRegression158_AckFlag_None(t *testing.T) {
+	got := ackFlagsSpec()
+	if got != specTransferFlagNone {
+		t.Errorf("ghd_cf_ack_placeholders flag: got 0x%08x, want CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE (0x%08x) "+
+			"— DISABLE_ON_DEMAND_POPULATION (#157) caused regression #158 (sync dead)", got, specTransferFlagNone)
+	}
+	// Explicit anti-regression: must NOT be DISABLE_ON_DEMAND_POPULATION (#158).
+	if got == specTransferFlagDisableOnDemand {
+		t.Errorf("ghd_cf_ack_placeholders: must NOT use CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION (0x%08x) "+
+			"— modifies CF reparse point, breaks fsnotify and bidirectional sync (#158)", specTransferFlagDisableOnDemand)
+	}
+}
+
+// TestRegression157_TransferFlags_ConstantValues guards the exact Windows SDK values.
+// A constants mismatch (e.g. cfapi.h updated) would be caught before a broken binary
+// reaches a Windows machine.
+func TestRegression157_TransferFlags_ConstantValues(t *testing.T) {
+	// CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE = 0x00000000
+	if specTransferFlagNone != 0 {
+		t.Errorf("CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE: expected 0x00000000, got 0x%08x "+
+			"(Windows SDK value — do not change)", specTransferFlagNone)
+	}
+	// CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION = 0x00000002
+	if specTransferFlagDisableOnDemand != 2 {
+		t.Errorf("CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION: "+
+			"expected 0x00000002, got 0x%08x (Windows SDK value — do not change)", specTransferFlagDisableOnDemand)
+	}
+	// The two flags must be distinct.
+	if specTransferFlagNone == specTransferFlagDisableOnDemand {
+		t.Errorf("transfer flag constants: NONE (0x%08x) == DISABLE_ON_DEMAND (0x%08x) — must be distinct",
+			specTransferFlagNone, specTransferFlagDisableOnDemand)
+	}
+}
+
+// cooldownShouldSkip is a pure-function spec mirroring the cooldown guard in
+// ghdOnFetchPlaceholders (provider.go, #158).  Tested independently so the
+// boundary conditions are validated without depending on SyncProvider internals
+// or Windows CF API availability.
+func cooldownShouldSkip(lastPopulated time.Time, now time.Time, cooldown time.Duration) bool {
+	if lastPopulated.IsZero() {
+		return false // never populated — first call must run OnFetchPlaceholders
+	}
+	return now.Sub(lastPopulated) < cooldown
+}
+
+// TestRegression158_Cooldown_NeverPopulated: first FETCH_PLACEHOLDERS for a path
+// must NOT be skipped (zero lastPopulated = never seen before).
+func TestRegression158_Cooldown_NeverPopulated(t *testing.T) {
+	var zero time.Time
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	if cooldownShouldSkip(zero, now, 30*time.Second) {
+		t.Error("cooldown: zero lastPopulated must not skip (first-time population required)")
+	}
+}
+
+// TestRegression158_Cooldown_WithinWindow: callback within 30s window must be skipped
+// to avoid repeated backend.List() calls for the same directory.
+func TestRegression158_Cooldown_WithinWindow(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	last := base
+	now := base.Add(5 * time.Second) // 5s after last — well within 30s window
+	if !cooldownShouldSkip(last, now, 30*time.Second) {
+		t.Error("cooldown: call 5s after last population must be skipped (within 30s window)")
+	}
+}
+
+// TestRegression158_Cooldown_AtBoundary: call at exactly 30s is NOT skipped
+// (elapsed == cooldown is not strictly less than).
+func TestRegression158_Cooldown_AtBoundary(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	last := base
+	now := base.Add(30 * time.Second) // exactly 30s — elapsed == cooldown, not < cooldown
+	if cooldownShouldSkip(last, now, 30*time.Second) {
+		t.Error("cooldown: call at exactly 30s boundary must NOT be skipped (cooldown expired)")
+	}
+}
+
+// TestRegression158_Cooldown_AfterExpiry: callback 61s after last population must
+// run OnFetchPlaceholders normally (cooldown window elapsed).
+func TestRegression158_Cooldown_AfterExpiry(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	last := base
+	now := base.Add(61 * time.Second) // 61s — cooldown long expired
+	if cooldownShouldSkip(last, now, 30*time.Second) {
+		t.Error("cooldown: call 61s after last population must NOT be skipped (cooldown expired)")
+	}
+}
+
+// TestRegression158_Cooldown_DifferentPaths: cooldown is per-path; two different
+// directories must be tracked independently.
+func TestRegression158_Cooldown_DifferentPaths(t *testing.T) {
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	lastForPathA := base
+	now := base.Add(5 * time.Second) // 5s — within cooldown for pathA
+
+	// pathA: populated 5s ago → skip
+	if !cooldownShouldSkip(lastForPathA, now, 30*time.Second) {
+		t.Error("cooldown: pathA populated 5s ago must be skipped")
+	}
+	// pathB: never populated → do NOT skip
+	var neverPopulated time.Time
+	if cooldownShouldSkip(neverPopulated, now, 30*time.Second) {
+		t.Error("cooldown: pathB never populated must NOT be skipped")
 	}
 }

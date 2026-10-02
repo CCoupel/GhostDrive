@@ -24,6 +24,28 @@ import (
 
 const cacheTTL = time.Hour
 
+// Download hardening constants (#160/#162 — silent data loss from truncated
+// cache entries). See tasks 13-18 in _work/reports/plan-20260812-102022.md.
+const (
+	// downloadTimeout bounds a single download attempt (task 18 — CA9).
+	// Deliberately generous: WebDAV's http.Client already enforces a global
+	// 30s Timeout on the request (plugins/webdav/auth.go:38-49) covering the
+	// response body, so downloadTimeout must stay comfortably above that to
+	// avoid cutting off transfers earlier than WebDAV itself would. MooseFS
+	// has no such existing cap, so this is also the only bound protecting it
+	// until the mfsclient inactivity timeout (Phase 2, task 7) ships.
+	downloadTimeout = 3 * time.Minute
+
+	// downloadMaxRetries bounds the number of attempts ensureDownloaded makes
+	// internally before giving up (task 17 — CA14). Retrying here — instead
+	// of relying on the FUSE client re-issuing Open() — breaks the Open
+	// retry cascade described in D6 of the plan.
+	downloadMaxRetries = 3
+	// downloadBackoffBase/Max bound the delay between internal retries.
+	downloadBackoffBase = 500 * time.Millisecond
+	downloadBackoffMax  = 5 * time.Second
+)
+
 // FUSE open-flag constants (POSIX O_WRONLY / O_RDWR).
 const (
 	fuseOWronly = 1
@@ -85,6 +107,11 @@ type GhostFileSystem struct {
 	desktopIni    []byte // content of the virtual /desktop.ini
 	desktopIniTmp string // temp path for desktop.ini reads
 	iconTmp       string // temp path for ghostdrive.ico reads
+
+	// downloads deduplicates concurrent ensureDownloaded calls for the same
+	// cache path (#160/#162 task 16 — CA13) so that N concurrent Open() calls
+	// on the same file trigger exactly one download instead of N.
+	downloads *downloadCoordinator
 }
 
 func newGhostFileSystem(backends []MountedBackend, emitter syncdispatch.EventEmitter) *GhostFileSystem {
@@ -121,6 +148,7 @@ func newGhostFileSystem(backends []MountedBackend, emitter syncdispatch.EventEmi
 		iconTmp:       iconTmp,
 		meta:          newMetaCache(cacheTTLMeta),
 		emitter:       emitter,
+		downloads:     newDownloadCoordinator(),
 	}
 }
 
@@ -163,33 +191,170 @@ func cachePath(backendID, remotePath string) string {
 		fmt.Sprintf("%x", h[:8]), filepath.Base(remotePath))
 }
 
-// isCacheFresh reports whether a cached file is younger than cacheTTL.
-// A 0-byte file is always considered stale: it may result from an interrupted
-// download or from a Create pre-upload before actual content was written.
-// Re-downloading a genuinely 0-byte remote file is trivial (negligible cost).
-func isCacheFresh(path string) bool {
+// isCacheFresh reports whether a cached file at path can be served without a
+// re-download. It must exist, have a non-zero size (a 0-byte file is always
+// considered stale — it may result from an interrupted download or from a
+// Create pre-upload artifact; re-downloading a genuinely 0-byte remote file
+// is trivial), be younger than cacheTTL, AND match remoteSize exactly.
+//
+// The remoteSize comparison (#160/#162 task 15 — CA12) is the fix for a
+// silent data-loss defect (D7 in the plan): a cache file whose size differs
+// from the remote is a truncated download from a previously interrupted
+// attempt and must never be served as if it were complete. This also
+// self-heals any truncated entry already sitting in a user's temp cache from
+// before this fix, on its next access.
+func isCacheFresh(path string, remoteSize int64) bool {
 	info, err := os.Stat(path)
-	return err == nil && info.Size() > 0 && time.Since(info.ModTime()) < cacheTTL
+	if err != nil || info.Size() == 0 {
+		return false
+	}
+	return info.Size() == remoteSize && time.Since(info.ModTime()) < cacheTTL
 }
 
-// ensureDownloaded downloads remotePath via backend to a temp file, reusing a
-// fresh cache entry when available.
-func ensureDownloaded(cfg plugins.BackendConfig, backend plugins.StorageBackend, remotePath string) (string, error) {
-	local := cachePath(cfg.ID, remotePath)
-	if isCacheFresh(local) {
-		return local, nil
+// downloadCoordinator deduplicates concurrent downloads of the same cache
+// path (#160/#162 task 16 — CA13): the first caller for a given key performs
+// the download, every other concurrent caller blocks and shares its result
+// instead of starting a redundant transfer.
+type downloadCoordinator struct {
+	mu       gosync.Mutex
+	inFlight map[string]*downloadCall
+}
+
+// downloadCall represents one in-flight (or just-finished) download shared
+// by every caller waiting on the same cache key.
+type downloadCall struct {
+	done chan struct{}
+	err  error
+}
+
+func newDownloadCoordinator() *downloadCoordinator {
+	return &downloadCoordinator{inFlight: make(map[string]*downloadCall)}
+}
+
+// do runs fn at most once concurrently per key. Concurrent callers for the
+// same key block on the in-flight call and receive its result; fn is never
+// invoked more than once at a time for a given key.
+func (dc *downloadCoordinator) do(key string, fn func() error) error {
+	dc.mu.Lock()
+	if call, ok := dc.inFlight[key]; ok {
+		dc.mu.Unlock()
+		<-call.done
+		return call.err
 	}
-	if err := os.MkdirAll(filepath.Dir(local), 0755); err != nil {
-		return "", fmt.Errorf("placeholder: cache dir: %w", err)
+	call := &downloadCall{done: make(chan struct{})}
+	dc.inFlight[key] = call
+	dc.mu.Unlock()
+
+	call.err = fn()
+	close(call.done)
+
+	dc.mu.Lock()
+	delete(dc.inFlight, key)
+	dc.mu.Unlock()
+
+	return call.err
+}
+
+// remoteSize returns the remote size for r, preferring the metadata cache
+// already warmed by Getattr over an extra network round-trip on the hot Open
+// path (mitigation noted in the plan for task 15's added Stat cost).
+func (fs *GhostFileSystem) remoteSize(r *routeResult) (int64, error) {
+	cacheKey := r.config.ID + ":" + r.relPath
+	if info, hit := fs.meta.getStat(cacheKey); hit {
+		return info.Size, nil
 	}
-	if err := backend.Download(context.Background(), remotePath, local, nil); err != nil {
-		return "", fmt.Errorf("placeholder: download %s: %w", remotePath, err)
+	info, err := r.backend.Stat(context.Background(), r.relPath)
+	if err != nil {
+		return 0, err
 	}
-	// Log post-download cache size for diagnostic (helps detect 0-byte download issues).
-	if fi, statErr := os.Stat(local); statErr == nil {
-		logger.Debug("placeholder: ensureDownloaded %s → local size=%d", remotePath, fi.Size())
+	fs.meta.putStat(cacheKey, info)
+	return info.Size, nil
+}
+
+// ensureDownloaded returns a local cache path for r's remote file, downloading
+// (or re-downloading) it when no fresh, size-verified cache entry exists.
+//
+// Cache validation (task 15): the cached file is only trusted when its size
+// matches the remote size. When the remote is transiently unreachable (Stat
+// fails), an existing cache entry within cacheTTL is still served — this
+// preserves the pre-existing offline-tolerant behavior for a backend blip
+// rather than failing every Open outright.
+func (fs *GhostFileSystem) ensureDownloaded(r *routeResult) (string, error) {
+	local := cachePath(r.config.ID, r.relPath)
+	cacheKey := r.config.ID + ":" + r.relPath
+
+	if info, statErr := os.Stat(local); statErr == nil && info.Size() > 0 && time.Since(info.ModTime()) < cacheTTL {
+		size, sizeErr := fs.remoteSize(r)
+		switch {
+		case sizeErr != nil:
+			// Remote unreachable — degrade gracefully, trust the cache within TTL.
+			logger.Debug("placeholder: ensureDownloaded %s: remote stat unavailable (%v), using cached copy", r.relPath, sizeErr)
+			return local, nil
+		case isCacheFresh(local, size):
+			return local, nil
+		default:
+			logger.Warn("placeholder: ensureDownloaded %s: cache size=%d != remote size=%d, invalidating truncated entry",
+				r.relPath, info.Size(), size)
+		}
+	}
+
+	if err := fs.downloads.do(cacheKey, func() error {
+		return fs.downloadToCache(local, r)
+	}); err != nil {
+		return "", err
 	}
 	return local, nil
+}
+
+// downloadToCache performs the actual download for ensureDownloaded, bounded
+// by downloadMaxRetries with backoff between attempts (task 17 — CA14).
+//
+// Each attempt downloads to a private temp file and only renames it onto the
+// final cache path on success (task 14 — CA11, CA12): local never exists in
+// a partial state, so a crashed or failed download can never be mistaken for
+// a complete one. Every failed attempt removes its temp file immediately
+// (task 13 — CA11), and every attempt is bounded by downloadTimeout instead
+// of an unbounded context.Background() (task 18 — CA9).
+func (fs *GhostFileSystem) downloadToCache(local string, r *routeResult) error {
+	if err := os.MkdirAll(filepath.Dir(local), 0755); err != nil {
+		return fmt.Errorf("placeholder: cache dir: %w", err)
+	}
+
+	tmp := local + ".ghostdrive.tmp"
+	delay := downloadBackoffBase
+	var lastErr error
+
+	for attempt := 1; attempt <= downloadMaxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), downloadTimeout)
+		err := r.backend.Download(ctx, r.relPath, tmp, nil)
+		cancel()
+
+		if err == nil {
+			if renameErr := os.Rename(tmp, local); renameErr != nil {
+				_ = os.Remove(tmp)
+				return fmt.Errorf("placeholder: download %s: finalize: %w", r.relPath, renameErr)
+			}
+			if fi, statErr := os.Stat(local); statErr == nil {
+				logger.Debug("placeholder: ensureDownloaded %s → local size=%d (attempt %d/%d)",
+					r.relPath, fi.Size(), attempt, downloadMaxRetries)
+			}
+			return nil
+		}
+
+		// Never leave a partial file behind, whatever failed (task 13).
+		_ = os.Remove(tmp)
+		lastErr = err
+		logger.Warn("placeholder: download %s failed (attempt %d/%d): %v", r.relPath, attempt, downloadMaxRetries, err)
+
+		if attempt < downloadMaxRetries {
+			time.Sleep(delay)
+			delay *= 2
+			if delay > downloadBackoffMax {
+				delay = downloadBackoffMax
+			}
+		}
+	}
+	return fmt.Errorf("placeholder: download %s: %w (after %d attempts)", r.relPath, lastErr, downloadMaxRetries)
 }
 
 // ── Getattr ──────────────────────────────────────────────────────────────────
@@ -423,7 +588,7 @@ func (fs *GhostFileSystem) Open(path string, flags int) (int, uint64) {
 	} else {
 		// Lazy download for read-only access.
 		var err error
-		localPath, err = ensureDownloaded(r.config, r.backend, r.relPath)
+		localPath, err = fs.ensureDownloaded(r)
 		if err != nil {
 			logger.Error("placeholder: Open %s: %v", path, err)
 			return -fuse.EIO, ^uint64(0)

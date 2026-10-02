@@ -39,6 +39,12 @@ type Client struct {
 	addr      string  // "host:port"
 	sessionID uint32  // assigned by master after Register
 	pool      *csPool // idle CS connection pool — prevents TIME_WAIT exhaustion (Windows #111)
+	// locCache caches chunk placement (chunklocationcache.go, #163 B1) so
+	// repeated reads within the same chunk skip the master roundtrip
+	// entirely. Guarded by its own mutex — never Client.mu — precisely so a
+	// cache hit does not serialize behind (or contend with) the single
+	// master connection.
+	locCache *chunkLocationCache
 }
 
 // Dial opens a TCP connection to host:port and returns a ready Client.
@@ -49,7 +55,12 @@ func Dial(host string, port int) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mfsclient: dial %s: %w", addr, err)
 	}
-	return &Client{conn: conn, addr: addr, pool: newCSPool()}, nil
+	return &Client{
+		conn:     conn,
+		addr:     addr,
+		pool:     newCSPool(),
+		locCache: newChunkLocationCache(chunkLocationCacheMaxEntries, chunkLocationCacheTTL),
+	}, nil
 }
 
 // Close closes the underlying TCP connection and all pooled CS connections.
@@ -919,14 +930,100 @@ func (c *Client) WriteChunkData(nodeID uint32, offset uint64, data []byte) error
 	return c.Write(nodeID, offset, data)
 }
 
+// locateChunk resolves the location of chunk index within file nodeID,
+// consulting the chunk-location cache (#163 B1) before ever touching the
+// master connection.
+//
+//   - forceRefresh=false (the common case: first attempt of a read) — a
+//     cache hit returns immediately, no master roundtrip, no c.mu contention
+//     with any other in-flight master operation.
+//   - forceRefresh=true (a retry, #160 D3bis, mirroring
+//     chunksdatacache_invalidate in the official client, readdata.c:1989) —
+//     the cached entry (if any) is invalidated first and a fresh master
+//     roundtrip is always performed, so a retry can never re-attack the same
+//     cached, possibly-faulty placement it just failed against.
+//
+// A successful master roundtrip always (re)populates the cache, including on
+// forceRefresh, so the next read in the same chunk benefits from this call.
+// Returns (nil, nil) at EOF.
+func (c *Client) locateChunk(nodeID, index uint32, forceRefresh bool) (*ChunkInfo, error) {
+	key := chunkLocationKey{nodeID: nodeID, chunkIndex: index}
+
+	if forceRefresh {
+		c.locCache.invalidate(key)
+	} else if info, ok := c.locCache.find(key); ok {
+		return info, nil
+	}
+
+	info, err := c.locateChunkFromMaster(nodeID, index)
+	if err != nil {
+		return nil, err
+	}
+	if info != nil {
+		c.locCache.insert(key, info)
+	}
+	return info, nil
+}
+
+// locateChunkFromMaster performs the actual CLTOMA_FUSE_READ_CHUNK
+// roundtrip, unconditionally — no cache lookup, no cache write. c.mu is held
+// only for the duration of the roundtrip. Called exclusively by locateChunk;
+// every other caller should go through locateChunk so the cache stays
+// authoritative.
+func (c *Client) locateChunkFromMaster(nodeID, index uint32) (*ChunkInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	req := PutUint32(nil, 0) // msgid
+	req = PutUint32(req, nodeID)
+	req = PutUint32(req, index)
+
+	ans, err := c.roundtrip(CltomFuseReadChunk, MatoclFuseReadChunk, req)
+	if err != nil {
+		return nil, fmt.Errorf("mfsclient: locateChunk(node=%d, index=%d): READ_CHUNK: %w", nodeID, index, err)
+	}
+
+	// A 5-byte response is an error or EOF: [msgid:32][status:8].
+	if len(ans) == 5 {
+		status := ans[4]
+		switch status {
+		case StatusOK:
+			return nil, nil // empty chunk (EOF) — info==nil, err==nil
+		case StatusENOENT:
+			return nil, fmt.Errorf("mfsclient: locateChunk(node=%d, index=%d): %w", nodeID, index, plugins.ErrFileNotFound)
+		default:
+			return nil, fmt.Errorf("mfsclient: locateChunk(node=%d, index=%d): status 0x%02x", nodeID, index, status)
+		}
+	}
+
+	info, err := parseChunkInfo(ans)
+	if err != nil {
+		return nil, fmt.Errorf("mfsclient: locateChunk(node=%d, index=%d): parse chunk info: %w", nodeID, index, err)
+	}
+	if len(info.Servers) == 0 {
+		// A MooseFS master may return a proto response with nCS=0 (rather
+		// than a 5-byte StatusOK) when the requested chunk slot is at or past
+		// the file boundary — this happens when the file size is a multiple
+		// of ChunkSize (e.g. exactly 64 MiB), or when a concurrent write
+		// shrank the file between attempts. In that case info.Length names
+		// the real end of the file, and the correct interpretation is EOF.
+		if info.Length > 0 && uint64(index)*ChunkSize >= info.Length {
+			return nil, nil // treat as EOF — caller (Download) will stop iterating
+		}
+		return nil, fmt.Errorf("mfsclient: locateChunk(node=%d, index=%d): no chunk servers available", nodeID, index)
+	}
+	return info, nil
+}
+
 // Read reads up to size bytes from file node nodeID starting at offset using
 // the real MooseFS chunk-server protocol.
 //
 // Steps:
-//  1. CLTOMA_FUSE_READ_CHUNK (432) → master returns ChunkInfo (CS location).
-//     c.mu is held only during this master roundtrip.
-//  2. DialCS + ReadChunk: data is fetched from the chunk server (no lock held —
-//     CS I/O does not touch c.conn).
+//  1. locateChunk (CLTOMA_FUSE_READ_CHUNK, 432) → master returns ChunkInfo
+//     (CS location). c.mu is held only during this master roundtrip.
+//  2. DialCS + ReadChunk: data is fetched from the chunk server (no lock held
+//     — CS I/O does not touch c.conn). A retry re-runs step 1 first (#160
+//     D3bis) instead of reusing the possibly-stale location from step 1.
 //
 // Returns an empty (nil) slice when the requested offset is past the end of
 // the file (EOF).
@@ -934,52 +1031,9 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 	index := uint32(offset / ChunkSize)
 	chunkOffset := uint32(offset % ChunkSize)
 
-	// Phase 1: roundtrip master sous mutex — localiser le chunk.
-	info, err := func() (*ChunkInfo, error) {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-
-		req := PutUint32(nil, 0) // msgid
-		req = PutUint32(req, nodeID)
-		req = PutUint32(req, index)
-
-		ans, err := c.roundtrip(CltomFuseReadChunk, MatoclFuseReadChunk, req)
-		if err != nil {
-			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): READ_CHUNK: %w", nodeID, offset, err)
-		}
-
-		// A 5-byte response is an error or EOF: [msgid:32][status:8].
-		if len(ans) == 5 {
-			status := ans[4]
-			switch status {
-			case StatusOK:
-				return nil, nil // empty chunk (EOF) — info==nil, err==nil
-			case StatusENOENT:
-				return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): %w", nodeID, offset, plugins.ErrFileNotFound)
-			default:
-				return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): status 0x%02x", nodeID, offset, status)
-			}
-		}
-
-		info, err := parseChunkInfo(ans)
-		if err != nil {
-			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): parse chunk info: %w", nodeID, offset, err)
-		}
-		if len(info.Servers) == 0 {
-			// A MooseFS master may return a proto response with nCS=0 (rather
-			// than a 5-byte StatusOK) when the requested chunk slot is at
-			// exactly the file boundary — this happens when the file size is a
-			// precise multiple of ChunkSize (e.g. exactly 64 MiB).  In this
-			// case info.Length == offset, and the correct interpretation is EOF.
-			if info.Length > 0 && offset >= info.Length {
-				return nil, nil // treat as EOF — caller (Download) will stop iterating
-			}
-			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): no chunk servers available", nodeID, offset)
-		}
-		return info, nil
-	}()
+	info, err := c.locateChunk(nodeID, index, false)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): %w", nodeID, offset, err)
 	}
 	if info == nil {
 		return nil, nil // EOF
@@ -988,7 +1042,7 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 	// EC routing: delegate EC4+1 chunks to readEC4At (shard-granular read).
 	// EC8+2 and other EC configurations are not yet supported.
 	if info.ECParts == 4 {
-		return c.readEC4At(info, index, chunkOffset, size)
+		return c.readEC4At(nodeID, info, index, chunkOffset, size)
 	}
 	if info.ECParts != 0 {
 		return nil, fmt.Errorf("mfsclient: Read(%d): EC%d+%d not supported (only EC4+1 implemented)",
@@ -997,37 +1051,45 @@ func (c *Client) Read(nodeID uint32, offset uint64, size uint32) ([]byte, error)
 
 	// Phase 2: I/O chunk server hors mutex — c.conn n'est pas utilisé ici.
 	//
-	// Retry-once policy for stale pool connections:
+	// doCSRead (csclient.go) implements the shared retry policy for stale or
+	// faulty chunk-server connections (#160):
 	//   A pooled connection may have been closed server-side (CS idle timeout,
-	//   network interruption) between two consecutive reads.  On the first
-	//   attempt, if ReadChunk returns a stale-connection error (EOF, reset…),
-	//   the bad connection is discarded and a fresh one is dialled immediately.
-	//   This prevents callers from receiving EIO and retrying the Open() in a
-	//   tight loop (Windows Explorer behaviour) — which manifested as a storm
-	//   of "parseChunkInfo" debug log lines with no download progress (#112).
-	srv := info.Servers[0]
-	for attempt := 0; attempt < 2; attempt++ {
-		cs, dialErr := c.pool.Get(srv.IP, srv.Port)
-		if dialErr != nil {
-			return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): dial CS: %w", nodeID, offset, dialErr)
-		}
-		result, readErr := ReadChunk(cs, info.ChunkID, info.Version, chunkOffset, size)
-		if readErr != nil {
-			cs.Close() // don't pool a broken connection
-			if attempt == 0 && isStaleConnErr(readErr) {
-				// Stale pooled connection — discard and retry with a fresh dial.
-				logger.Debug("[mfsclient] Read(%d, off=%d): stale CS connection on attempt 1, retrying: %v",
-					nodeID, offset, readErr)
-				continue
+	//   network interruption) between two consecutive reads, or the CS itself
+	//   may be misbehaving. On the first attempt, if ReadChunk returns a
+	//   stale-connection error (EOF, reset…), the bad connection is discarded,
+	//   the location is re-resolved from the master (D3bis, locate below),
+	//   and a fresh connection is dialled — with backoff (internal/backoff)
+	//   bounded by a total retry budget. This prevents callers from receiving
+	//   EIO and retrying the Open() in a tight loop (Windows Explorer
+	//   behaviour) — which manifested as a storm of "parseChunkInfo" debug
+	//   log lines with no download progress (#112).
+	opDesc := fmt.Sprintf("Read(%d, off=%d)", nodeID, offset)
+	locate := func(attempt int) (csLocateResult, error) {
+		curInfo := info
+		if attempt > 0 {
+			fresh, lErr := c.locateChunk(nodeID, index, true)
+			if lErr != nil {
+				return csLocateResult{}, lErr
 			}
-			return nil, readErr
+			if fresh == nil {
+				return csLocateResult{eof: true}, nil
+			}
+			curInfo = fresh
 		}
-		c.pool.Put(cs, srv.IP, srv.Port)
-		return result, nil
+		if len(curInfo.Servers) == 0 {
+			return csLocateResult{}, fmt.Errorf("no chunk servers available")
+		}
+		srv := curInfo.Servers[0]
+		ci := curInfo
+		return csLocateResult{
+			ip:   srv.IP,
+			port: srv.Port,
+			read: func(cs net.Conn) ([]byte, error) {
+				return ReadChunk(cs, ci.ChunkID, ci.Version, chunkOffset, size)
+			},
+		}, nil
 	}
-	// Unreachable: attempt 1 always returns (either success or non-stale error
-	// that falls through to return nil, readErr above).
-	return nil, fmt.Errorf("mfsclient: Read(%d, off=%d): CS I/O failed after 2 attempts", nodeID, offset)
+	return doCSRead(c.pool, opDesc, locate)
 }
 
 // ─── Internal: chunk info parsing ────────────────────────────────────────────

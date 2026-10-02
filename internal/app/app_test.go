@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/CCoupel/GhostDrive/internal/backends"
 	"github.com/CCoupel/GhostDrive/internal/config"
+	"github.com/CCoupel/GhostDrive/internal/logger"
 	"github.com/CCoupel/GhostDrive/internal/placeholder"
 	internalsync "github.com/CCoupel/GhostDrive/internal/sync"
 	"github.com/CCoupel/GhostDrive/internal/types"
@@ -983,4 +985,173 @@ func TestStartup_MigratesMountPoint(t *testing.T) {
 	defer a.mu.RUnlock()
 	assert.NotEmpty(t, a.cfg.MountPoint,
 		"Startup must migrate empty AppConfig.MountPoint to a non-empty value (v2.0)")
+}
+
+// ─── #147 — Activation after no-backend startup ───────────────────────────
+
+// TestSetBackendEnabled_FirstActivation_NoBrackendAtStartup is the non-regression
+// test for issue #147.
+//
+// Scenario: app starts with NO enabled backends → MountUnified is never called →
+// drives["unified"] is nil.  User enables the first backend manually.
+// Before the fix, SetBackendEnabled called UpdateBackends which failed with
+// "unified drive not mounted", blocking activation permanently.
+// After the fix, SetBackendEnabled detects the unmounted state and calls
+// MountUnified instead.
+//
+// On Linux/CI, the underlying NullDrive always returns ErrNotSupported for
+// both MountUnified and UpdateBackends — so either call results in a drive
+// error that is propagated to the caller.  The important invariant is:
+//   - The error is NOT "unified drive not mounted" (which is the bug symptom).
+//   - The backend is properly rolled back (Enabled=false, not stuck in limbo).
+//
+// The test is necessarily platform-agnostic: it verifies the control-flow fix
+// (correct branch taken, no "unified drive not mounted" error) without
+// asserting that the mount actually succeeds (WinFsp not available on Linux CI).
+func TestSetBackendEnabled_FirstActivation_NoBrackendAtStartup(t *testing.T) {
+	a := newTestApp(t)
+	tmp := t.TempDir()
+
+	rootPath := filepath.Join(tmp, "source")
+	require.NoError(t, os.MkdirAll(rootPath, 0755))
+
+	// Precondition: no backends enabled at startup → unified drive NOT mounted.
+	_, isMounted := a.driveManager.GetUnifiedStatus()
+	require.False(t, isMounted,
+		"precondition: unified drive must not be mounted before first activation")
+
+	// Add a backend (AddBackend always creates it as disabled).
+	bc := plugins.BackendConfig{
+		Name:       "FirstBackend",
+		Type:       "local",
+		RemotePath: "/remote",
+		Params:     map[string]string{"rootPath": rootPath},
+	}
+	added, err := a.AddBackend(bc)
+	require.NoError(t, err)
+	require.False(t, added.Enabled, "precondition: backend must start disabled")
+
+	// Enable the backend — this is the #147 scenario.
+	// On Linux, the NullDrive MountUnified returns ErrNotSupported which is
+	// propagated — that's expected CI behaviour. What we must NOT see is the
+	// old "unified drive not mounted" error that used to block all activations.
+	enableErr := a.SetBackendEnabled(added.ID, true)
+
+	if enableErr != nil {
+		// Drive mount failed (NullDrive on CI) — error must NOT be the old
+		// "unified drive not mounted" sentinel from UpdateBackends (#147).
+		assert.NotContains(t, enableErr.Error(), "unified drive not mounted",
+			"#147: error must come from MountUnified, not from UpdateBackends guard")
+
+		// Rollback must have happened: Enabled must be false.
+		a.mu.RLock()
+		for _, b := range a.cfg.Backends {
+			if b.ID == added.ID {
+				assert.False(t, b.Enabled,
+					"backend must be rolled back to Enabled=false after drive mount failure")
+			}
+		}
+		a.mu.RUnlock()
+	} else {
+		// On Windows / real WinFsp: mount succeeded — drive must be registered.
+		_, ok := a.driveManager.GetUnifiedStatus()
+		assert.True(t, ok, "unified drive must be registered after successful first activation")
+	}
+}
+
+// ─── #146 — Activation failures emit ERROR logs ────────────────────────────
+
+// captureLogOutput routes all logger output to a fresh bytes.Buffer for the
+// duration of the test and restores the previous extra writer at cleanup.
+func captureLogOutput(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	logger.SetExtraWriter(&buf)
+	t.Cleanup(func() { logger.SetExtraWriter(nil) })
+	return &buf
+}
+
+// TestSetBackendEnabled_ActivationFails_LogsError verifies that when
+// SetBackendEnabled fails because the backend type is unknown, an ERROR log
+// is emitted containing the backend name (#146).
+func TestSetBackendEnabled_ActivationFails_LogsError(t *testing.T) {
+	buf := captureLogOutput(t)
+
+	a := newTestApp(t)
+
+	const badID = "bad-type-146-enable"
+	a.mu.Lock()
+	a.cfg.Backends = []plugins.BackendConfig{
+		{
+			ID:         badID,
+			Name:       "ActivationErrorBackend",
+			Type:       "unknown-type-146",
+			LocalPath:  t.TempDir(),
+			SyncDir:    t.TempDir(),
+			RemotePath: "/remote",
+			Enabled:    false,
+			Params:     map[string]string{},
+		},
+	}
+	a.mu.Unlock()
+
+	err := a.SetBackendEnabled(badID, true)
+	require.Error(t, err, "SetBackendEnabled must return an error when activation fails (#146)")
+
+	// #146 — ERROR log must have been emitted (not just returned as an error).
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, "[ERROR]",
+		"activation failure must be logged at ERROR level, not silently swallowed (#146)")
+	assert.Contains(t, logOutput, "ActivationErrorBackend",
+		"ERROR log must include the backend name so operators can identify the failing backend (#146)")
+}
+
+// TestUpdateBackend_ActivationFails_LogsError verifies that when UpdateBackend
+// fails to reconnect an enabled backend (Connect returns an error), an ERROR
+// log is emitted (#146).
+//
+// Strategy: use Type="local" so validateBackendConfig passes, but point rootPath
+// to a non-existent directory so local.Connect fails at os.Stat, triggering the
+// logger.Error call added by #146 before the validation step that rejects
+// unregistered types.
+func TestUpdateBackend_ActivationFails_LogsError(t *testing.T) {
+	buf := captureLogOutput(t)
+
+	a := newTestApp(t)
+	tmp := t.TempDir()
+
+	// Existing rootPath so AddBackend passes validation and Connect succeeds.
+	existingRoot := filepath.Join(tmp, "source-existing")
+	require.NoError(t, os.MkdirAll(existingRoot, 0755))
+
+	syncDir := filepath.Join(tmp, "sync")
+	require.NoError(t, os.MkdirAll(syncDir, 0755))
+
+	// Add a valid backend (disabled by AddBackend contract).
+	bc := plugins.BackendConfig{
+		Name:       "UpdateActivationError",
+		Type:       "local",
+		RemotePath: "/remote",
+		Params:     map[string]string{"rootPath": existingRoot},
+	}
+	added, err := a.AddBackend(bc)
+	require.NoError(t, err)
+
+	// Update: request Enabled=true but replace rootPath with a path that does
+	// NOT exist on disk — local.Connect will fail at os.Stat, triggering
+	// manager.Add → error → logger.Error (#146).
+	// validateBackendConfig only checks that rootPath is non-empty (not that it
+	// exists), so validation passes and we reach the reconnect path.
+	added.Enabled = true
+	added.Params = map[string]string{"rootPath": filepath.Join(tmp, "does-not-exist-146")}
+	_, updateErr := a.UpdateBackend(added)
+	require.Error(t, updateErr,
+		"UpdateBackend must return an error when local.Connect fails (#146)")
+
+	// #146 — ERROR log must contain the backend name.
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, "[ERROR]",
+		"reconnect failure in UpdateBackend must emit an ERROR log (#146)")
+	assert.Contains(t, logOutput, "UpdateActivationError",
+		"ERROR log must include the backend name (#146)")
 }

@@ -13,8 +13,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- fix(moosefs): copie de masse très lente — l'hypothèse initiale (absence de pipelining inter-fichiers) s'est avérée fausse. Cause réelle : absence de cache de localisation de chunk (un aller-retour master par bloc 64 KiB) + granularité de lecture trop fine. Correctifs : cache de localisation LRU+TTL 30s, augmentation de la granularité de 64 KiB à 4 MiB (divise exactement les shards de 16 MiB). Régression critique trouvée et corrigée avant merge (fichiers non alignés sur géométrie de shard devenaient illisibles). Gains mesurés : fichier unique 231 MiB ×2,63 (39.75s → 15.12s), copie de masse 39 fichiers 4,23 Go ~×1,5 (≈529s → 345.5s) ; intégrité complète, 0 erreur (#163)
+- fix(moosefs): trame keepalive ANTOAN_NOP mal gérée dans lecture EC4 — le protocole CS attendait une trame non vide après NOP, causant des échecs intermittents et lenteurs d'ouverture (jusqu'à ~1 min). Durcissement du transport : timeout d'inactivité réarmé à chaque trame (5s, conforme client officiel), invalidation de localisation de chunk sur retry (re-query master au lieu de réattaque du même CS), backoff exponentiel aligné sur barème officiel MooseFS (#160)
+- fix(placeholder): fichier de cache tronqué servi comme complet — un téléchargement interrompu laissait un fichier tronqué dans le cache jusqu'à TTL (1h), causant une perte de données silencieuse jusqu'à la détection de taille. Correction structurelle : écriture atomique (temp + rename), validation par taille distante, déduplication des téléchargements concurrents, relances bornées (3 tentatives, backoff 500ms→1s→2s) (#162)
 - fix(moosefs): corriger la gestion des connexions stales (cmd=0) dans readEC4At — le retry-once interne s'active désormais correctement sur socket half-closed (#114)
 - fix(moosefs): afficher la taille réelle et la date de modification dans GhD: — List() appelle désormais GetAttr par entrée (#116)
+
+---
+
+## [2.2.0] — 2026-05-23
+
+### BREAKING CHANGES
+
+- **StorageBackend interface étendue** : deux nouvelles méthodes obligatoires `Rename(ctx, src, dst string) error` et `Copy(ctx, src, dst string) error` — tous les plugins externes doivent être mis à jour (#136 #139 #140)
+- **Proto gRPC** : nouveaux RPCs `Rename` et `Copy` dans `plugins/proto/plugin.proto` — incompatible avec plugins v2.1 (#136 #139 #140)
+- **FileState enrichi** : nouveaux états `L` (Local), `C` (Conflict), `X` (Excluded) — impact sur les badges UI et la matrice actions (#141)
+- **ErrNotSupported sentinel** : exporté depuis `plugins/plugin.go` — fallback obligatoire pour les opérations non supportées nativement (#136 #139 #140)
+
+### Added
+
+- **#136** — Cache d'état fichier (`FileState`) avec `sync.Map` dans Engine ; badges CF API mis à jour en temps réel via `CfSetInSyncState`
+- **#139** — Rename/Move natif via `ActionRename` : paire Create+Delete détectée dans le watcher (timeout 150ms) → dispatch natif avec fallback upload+delete si `ErrNotSupported`
+- **#140** — Copy serveur-side via `ActionCopy` : badge CF badge ✓✓ après copie réussie ; détection côté watcher et synchronisation atomique
+- **#141** — Guard `L-state` : empêche `ActionDelete` sur fichiers en état Local non-synced — protection contre accidental data loss
+- **#142** — `Engine.UploadFile(ctx, localPath)` : upload ciblé synchrone — remplace `ForceSync` dans `PinFile` pour hydratation d'un seul fichier
+- **#143** — Intent queue : `QueuePinIntent` / `ConsumeIntent` thread-safe dans `cfapi.Manager` — gestion fiable des pins pendant la sync
+- **#144** — Toast de conflit : composant `Toast.tsx` + hook `useSyncStatus.ts`, debounce 500ms/path, max 3 toasts, collapse summary — notifications non-intrusive des conflits détectés
+
+### Fixed
+
+- Race condition dans `watcher.go` : cleanup `pendingRenames` délégué à goroutine principale via canal `expiredRenames` — corrige deadlock lors de timeout detections
+- Badge CF manquant après `ActionCopy` : `SetSyncState` appelé uniquement sur Download, pas Copy — maintenant invoqué pour tous les changements d'état
+- `PinFile` déclenchait réconciliation complète (ForceSync) au lieu d'upload ciblé — optimisé pour upload synchrone du fichier uniquement (#142)
+
+### Changed
+
+- Matrice états/actions : nouvelle colonne pour états `L`, `C`, `X` ; actions Rename/Copy natives ajoutées
+- UI Toast : notifications d'erreur et conflits contextualisées
+
+### Tests
+
+- +67 tests : `internal/sync`, `internal/cfapi`, `plugins/webdav`, `plugins/local`, `plugins/moosefs`, `tests/integration`, `frontend/src/hooks`
 
 ---
 

@@ -79,3 +79,45 @@ type CacheStats struct {
 	FileCount int     `json:"fileCount"`
 	MaxSizeMB int     `json:"maxSizeMB"`
 }
+
+// ─── FileState ────────────────────────────────────────────────────────────────
+
+// FileState represents the per-file synchronization state maintained by the
+// sync Engine in its fileStates sync.Map.  The zero-value (empty string) means
+// the file is not tracked — use FileStateUnknown explicitly for clarity.
+//
+// State transitions:
+//
+//	(new local file) → L  → P → U → S
+//	(remote error)              U → E
+//	(conflict detected)         S → C → S (auto-resolved)
+//	(excluded)                  * → X
+type FileState string
+
+const (
+	// FileStateLocal means the file exists locally only — never synchronised to remote.
+	// Guard: engine.handleLocalEvent skips ActionDelete for L-state files (#141).
+	FileStateLocal FileState = "L"
+
+	// FileStatePending means the file is queued for upload or download.
+	FileStatePending FileState = "P"
+
+	// FileStateUploading means an upload is in progress toward the remote.
+	FileStateUploading FileState = "U"
+
+	// FileStateSynced means local and remote are identical.
+	FileStateSynced FileState = "S"
+
+	// FileStateConflict means a conflict was detected and auto-resolved (last-write-wins).
+	// Emits sync:conflict event (#144).
+	FileStateConflict FileState = "C"
+
+	// FileStateError means a sync operation failed for this file.
+	FileStateError FileState = "E"
+
+	// FileStateExcluded means the file is explicitly excluded from synchronisation.
+	FileStateExcluded FileState = "X"
+
+	// FileStateUnknown is the zero-value: file not tracked or backend not found.
+	FileStateUnknown FileState = ""
+)

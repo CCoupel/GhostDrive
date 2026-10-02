@@ -243,6 +243,8 @@ func (a *App) Startup(ctx context.Context) {
 			continue
 		}
 		if err := a.manager.Add(bc); err != nil {
+			// #146 — log ERROR so the failure appears in logs and the UI log tab.
+			logger.Error("app: activation backend %q échouée au démarrage : %v", bc.Name, err)
 			a.emitError(fmt.Sprintf("app: reconnect backend %s: %v", bc.Name, err))
 			// Track the connect failure so GetSyncState() reports SyncError and
 			// the tray turns red even when no engine is running (#117).
@@ -604,6 +606,8 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 		// Enable path: connect first — only persist on success to avoid disk/memory
 		// divergence if manager.Add fails.
 		if err := a.manager.Add(bc); err != nil {
+			// #146 — log ERROR with the full underlying error message.
+			logger.Error("app: activation backend %q échouée : %v", bc.Name, err)
 			// Rollback in-memory flag (disk was never written).
 			a.mu.Lock()
 			if idx2 := indexByID(a.cfg.Backends, id); idx2 >= 0 {
@@ -619,12 +623,22 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 		delete(a.backendConnectErrors, id)
 		a.mu.Unlock()
 
-		// v2.0 — Update the unified drive with the new backend list.
-		// Build updated list including the just-connected backend.
+		// v2.0 — Update or mount the unified drive with the new backend list.
+		// If no backend was enabled at startup, MountUnified was never called, so
+		// UpdateBackends would fail with "unified drive not mounted" (#147).
+		// Detect this situation and call MountUnified instead.
 		newList := a.enabledMountedBackendsExcluding("")
-		if updateErr := a.driveManager.UpdateBackends(newList); updateErr != nil {
-			// UpdateBackends failed — rollback: disconnect backend, revert enabled flag.
-			log.Printf("app: SetBackendEnabled UpdateBackends (enable) %s: %v", bc.Name, updateErr)
+		var driveErr error
+		if _, isUnifiedMounted := a.driveManager.GetUnifiedStatus(); isUnifiedMounted {
+			// Normal case: drive already up — add the new backend to the live VFS.
+			driveErr = a.driveManager.UpdateBackends(newList)
+		} else {
+			// First activation after a no-backend startup: mount the unified drive now.
+			driveErr = a.driveManager.MountUnified(mountPoint, newList)
+		}
+		if driveErr != nil {
+			// Drive operation failed — rollback: disconnect backend, revert enabled flag.
+			log.Printf("app: SetBackendEnabled drive (enable) %s: %v", bc.Name, driveErr)
 			_ = a.manager.Remove(id)
 			a.mu.Lock()
 			if idx2 := indexByID(a.cfg.Backends, id); idx2 >= 0 {
@@ -634,9 +648,9 @@ func (a *App) SetBackendEnabled(id string, enabled bool) error {
 			a.emit("drive:error", map[string]any{
 				"backendID":   "unified",
 				"backendName": "GhostDrive",
-				"error":       updateErr.Error(),
+				"error":       driveErr.Error(),
 			})
-			return fmt.Errorf("update unified drive: %w", updateErr)
+			return fmt.Errorf("update unified drive: %w", driveErr)
 		}
 		// Emit mounted event with current unified status.
 		if s, ok := a.driveManager.GetUnifiedStatus(); ok {
@@ -823,6 +837,8 @@ func (a *App) UpdateBackend(newBC plugins.BackendConfig) (plugins.BackendConfig,
 	// ── Reconnect if enabled ──────────────────────────────────────────────
 	if newBC.Enabled {
 		if err := a.manager.Add(newBC); err != nil {
+			// #146 — log ERROR with full error details before propagating.
+			logger.Error("app: activation backend %q échouée (update) : %v", newBC.Name, err)
 			// Record the connect failure so the tray turns red (#117).
 			a.mu.Lock()
 			a.backendConnectErrors[newBC.ID] = err.Error()
@@ -1042,10 +1058,59 @@ func (a *App) ClearCache() error {
 	return nil
 }
 
+// GetFileState returns the per-file synchronization state for a backend.
+// Returns "L", "P", "U", "S", "C", "E", "X" or "" (unknown / backend not found).
+// Wails binding: window.go.App.GetFileState(backendID, localPath)
+func (a *App) GetFileState(backendID, localPath string) string {
+	a.mu.RLock()
+	eng, ok := a.engines[backendID]
+	a.mu.RUnlock()
+	if !ok {
+		return string(types.FileStateUnknown)
+	}
+	return string(eng.GetFileState(localPath))
+}
+
 // PinFile sets the CF pin state for a file.
 // pin=true → always local (CF_PIN_STATE_PINNED), pin=false → back to cloud-only.
+// #142 — if pin=false and file is not in Synced state, upload first before dehydrating.
+// #143 — if file is in U or P state (active transfer), enqueue intent for later execution.
 // Wails binding: window.go.App.PinFile()
 func (a *App) PinFile(backendID, localPath string, pin bool) error {
+	if a.cfManager == nil {
+		return nil
+	}
+
+	state := types.FileState(a.GetFileState(backendID, localPath))
+
+	// #143 — if transfer is active, queue intent for post-transfer execution.
+	if state == types.FileStateUploading || state == types.FileStatePending {
+		a.cfManager.QueuePinIntent(backendID, localPath, pin)
+		return nil // silently enqueued
+	}
+
+	// #142 — unpin guard: upload first if file is not synced.
+	if !pin && state != types.FileStateSynced && state != types.FileStateUnknown {
+		// File exists but is not synced — upload before dehydrating.
+		a.mu.RLock()
+		eng, hasEng := a.engines[backendID]
+		a.mu.RUnlock()
+		if hasEng {
+			if err := eng.UploadFile(a.ctx, localPath); err != nil {
+				return fmt.Errorf("pinfile: upload before unpin: %w", err)
+			}
+			// Re-check state after sync.
+			if types.FileState(a.GetFileState(backendID, localPath)) != types.FileStateSynced {
+				return fmt.Errorf("pinfile: file still not synced after upload — unpin aborted")
+			}
+		}
+	}
+	return a.cfManager.PinFile(backendID, localPath, pin)
+}
+
+// pinFileInternal is the non-Wails version used by the intent queue consumer (#143).
+// It bypasses the unpin guard (the intent was already validated when queued).
+func (a *App) pinFileInternal(backendID, localPath string, pin bool) error {
 	if a.cfManager == nil {
 		return nil
 	}
@@ -1178,6 +1243,27 @@ func (a *App) StartSync(backendID string) error {
 	// v2.1 — Wire cfManager into the engine for post-sync badge updates.
 	if a.cfManager != nil {
 		engine.SetCFManager(a.cfManager)
+	}
+	// v2.2 — Wire intent queue callbacks for #143.
+	if a.cfManager != nil {
+		engine.SetIntentCallbacks(
+			func(localPath string) (string, bool, bool) {
+				return a.cfManager.ConsumeIntent(localPath)
+			},
+			a.pinFileInternal,
+		)
+	}
+	// v2.2 — Wire CF completion callbacks so Delete/Rename on GhD: propagate to backend (#v2.2-bugD).
+	if a.cfManager != nil {
+		eng := engine // capture for closures
+		a.cfManager.SetCompletionCallbacks(backendID, cfapi.CompletionCallbacks{
+			OnDeleteCompletion: func(localPath string) {
+				eng.HandleCFDelete(localPath)
+			},
+			OnRenameCompletion: func(oldPath, newPath string) {
+				eng.HandleCFRename(oldPath, newPath)
+			},
+		})
 	}
 	a.engines[backendID] = engine
 	a.mu.Unlock() // release before Start to avoid holding lock during I/O

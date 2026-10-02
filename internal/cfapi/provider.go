@@ -3,7 +3,7 @@
 package cfapi
 
 // #cgo CFLAGS: -I. -I${SRCDIR}/include
-// #cgo LDFLAGS: -lcldapi -lruntimeobject -lshell32
+// #cgo LDFLAGS: -lcldapi -lruntimeobject -lshell32 -lole32
 // #include "cgo_cfapi_windows.h"
 // #include <stdlib.h>
 import "C"
@@ -25,6 +25,13 @@ var (
 	providerRegistry = make(map[int64]*SyncProvider)
 )
 
+// fetchPlaceholdersCooldown is the minimum interval between real OnFetchPlaceholders
+// invocations for the same directory path.  Windows (Explorer, indexer, antivirus)
+// fires FETCH_PLACEHOLDERS on every directory access; without deduplication this
+// causes a tight loop of expensive backend.List() calls (#157 / #158).
+// Calls within this window are acked immediately with FLAG_NONE (no CF state change).
+const fetchPlaceholdersCooldown = 30 * time.Second
+
 // SyncProvider manages the CF API lifecycle for one backend (one sync root).
 // One SyncProvider corresponds to one registered + connected sync root.
 type SyncProvider struct {
@@ -35,6 +42,19 @@ type SyncProvider struct {
 	mu            sync.Mutex
 	connectionKey int64 // CF_CONNECTION_KEY — 0 means not connected
 	callbacks     CFCallbacks
+
+	// populatedDirs tracks the last successful OnFetchPlaceholders completion time
+	// for each local directory path.  Used for cooldown deduplication (#158):
+	// repeated FETCH_PLACEHOLDERS callbacks within fetchPlaceholdersCooldown are
+	// acked immediately without calling backend.List() or CfCreatePlaceholders.
+	// Type: map[string]time.Time (sync.Map for concurrent CGO callback safety).
+	populatedDirs sync.Map
+
+	// fetchMu provides per-directory mutual exclusion for concurrent FETCH_PLACEHOLDERS
+	// callbacks. Windows may fire multiple simultaneous callbacks for the same directory
+	// before the first one completes and records the cooldown timestamp (#v2.2-bugA).
+	// Type: map[string]*sync.Mutex (sync.Map for CGO callback safety).
+	fetchMu sync.Map
 }
 
 // NewSyncProvider creates a SyncProvider for the given local path.
@@ -98,6 +118,16 @@ func (p *SyncProvider) Connect(cbs CFCallbacks) error {
 	return nil
 }
 
+// SetCompletionCallbacks injects delete and rename completion handlers after Connect.
+// Safe to call after Connect and before or after CF callbacks start firing.
+// Existing callbacks (OnFetchData, OnFetchPlaceholders, OnCancelFetch) are preserved.
+func (p *SyncProvider) SetCompletionCallbacks(onDelete func(localPath string), onRename func(oldPath, newPath string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.callbacks.OnDeleteCompletion = onDelete
+	p.callbacks.OnRenameCompletion = onRename
+}
+
 // Disconnect calls CfDisconnectSyncRoot.
 func (p *SyncProvider) Disconnect() error {
 	p.mu.Lock()
@@ -120,12 +150,20 @@ func (p *SyncProvider) Disconnect() error {
 	return nil
 }
 
-// Non-fatal HRESULT codes from CfCreatePlaceholders.
+// Non-fatal HRESULT codes from CfCreatePlaceholders and CfConvertToPlaceholder.
 // In all these cases the placeholder is already present (or in-use) — nothing to do.
 const (
 	// hrAlreadyExists = HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) — placeholder already on disk.
 	// Returned on the 2nd+ FETCH_PLACEHOLDERS round-trip when CF_CREATE_FLAG_NONE is used.
 	hrAlreadyExists = uint32(0x800700b7)
+
+	// hrAlreadyPlaceholder = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_INVALID_REQUEST).
+	// Returned by CfConvertToPlaceholder with CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION
+	// when the directory is already a CF placeholder.  Unlike MARK_IN_SYNC (for files),
+	// ENABLE_ON_DEMAND_POPULATION is NOT idempotent: it returns this error on the 2nd+
+	// FETCH_PLACEHOLDERS pass once the directory was successfully converted on the first.
+	// This is expected, benign, and must be treated as a no-op (#156).
+	hrAlreadyPlaceholder = uint32(0x8007017c)
 
 	// hrUserMappedFile = HRESULT_FROM_WIN32(ERROR_USER_MAPPED_FILE) — file has an open
 	// memory-mapped section (FETCH_DATA is in progress for this file).  The placeholder
@@ -240,35 +278,43 @@ func (p *SyncProvider) createPlaceholdersWithFlags(baseDir string, items []Place
 		if hr != 0 {
 			switch uint32(hr) {
 			case hrAlreadyExists:
-				// The local entry (file or directory) exists as an ordinary NTFS
-				// entry — never registered as a CF placeholder.  Without conversion:
-				//   · Directories: OS never calls FETCH_PLACEHOLDERS → remote content
-				//     stays invisible.
-				//   · Files: no CF attributes → no badge (not ☁️ nor ✓✓).
+				// #159 — FILES: do NOT call CfConvertToPlaceholder.
 				//
-				// Two helpers are used to set different CF_CONVERT_FLAGS:
-				//   · Files → ghd_convert_to_placeholder: CF_CONVERT_FLAG_MARK_IN_SYNC
-				//       → badge ✓✓ (locally present + in sync). MARK_IN_SYNC on files
-				//       is correct: the local copy IS the definitive version.
-				//   · Directories → ghd_convert_dir_to_placeholder:
-				//       CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION (no MARK_IN_SYNC)
-				//       → "partial" population state → OS calls FETCH_PLACEHOLDERS on
-				//       every open, merging remote content. Using MARK_IN_SYNC on
-				//       directories marks them as "fully populated" and the OS stops
-				//       calling FETCH_PLACEHOLDERS after a restart (regression).
-				fullPath := filepath.Join(baseDir, item.RelativePath)
-				wFull := C.ghd_utf8_to_wchar(C.CString(fullPath))
-				var xhr C.HRESULT
+				// When CfCreatePlaceholders returns hrAlreadyExists for a file, the
+				// file already exists in the directory.  In the vast majority of cases
+				// it is already a CF placeholder (created on a prior FETCH_PLACEHOLDERS
+				// pass or by ActionDownload immediately after os.Rename).
+				// Calling CfConvertToPlaceholder on an existing CF placeholder rewrites
+				// the file's Extended Attributes and may corrupt the parent directory's
+				// CF index → ERROR_INVALID_REPARSE_DATA (0x80070781) on subsequent CF
+				// operations in that directory (#159).
+				// Non-placeholder NTFS files that incidentally appear in the sync root
+				// are handled by the sync engine (Watch() → ActionUpload) without CF
+				// state modifications.
+				//
+				// DIRECTORIES: still convert to CF placeholder to activate
+				// CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION, so Explorer fires
+				// FETCH_PLACEHOLDERS on first open of each subdirectory.
+				// ENABLE_ON_DEMAND_POPULATION is NOT idempotent: calling it on a
+				// directory already converted returns 0x8007017c — treated as no-op (#156).
 				if item.IsDirectory {
-					xhr = C.ghd_convert_dir_to_placeholder(wFull)
-				} else {
-					xhr = C.ghd_convert_to_placeholder(wFull)
+					fullPath := filepath.Join(baseDir, item.RelativePath)
+					wFull := C.ghd_utf8_to_wchar(C.CString(fullPath))
+					xhr := C.ghd_convert_dir_to_placeholder(wFull)
+					C.ghd_free_wchar(wFull)
+					if xhr != 0 {
+						xhrCode := uint32(xhr)
+						if xhrCode == hrAlreadyPlaceholder {
+							// #156 — directory is already a CF placeholder with on-demand
+							// population.  ENABLE_ON_DEMAND_POPULATION is not idempotent;
+							// this error is expected on every FETCH_PLACEHOLDERS pass after
+							// the initial conversion.  Treat as success — no log spam.
+						} else {
+							log.Printf("cfapi: CfConvertToPlaceholder %s isDir=true: HRESULT 0x%08x",
+								fullPath, xhrCode)
+						}
+					}
 				}
-				if xhr != 0 {
-					log.Printf("cfapi: CfConvertToPlaceholder %s isDir=%v: HRESULT 0x%08x",
-						fullPath, item.IsDirectory, uint32(xhr))
-				}
-				C.ghd_free_wchar(wFull)
 				total++
 			case hrUserMappedFile:
 				// File has an open memory-mapped section (FETCH_DATA in progress).
@@ -285,6 +331,32 @@ func (p *SyncProvider) createPlaceholdersWithFlags(baseDir string, items []Place
 	}
 
 	return total, firstErr
+}
+
+// ConvertToPlaceholder converts an existing regular local file into a CF
+// placeholder with CF_CONVERT_FLAG_MARK_IN_SYNC (#151).
+//
+// Call this BEFORE SetSyncState when the file was created outside of the CF
+// provider mechanism (e.g. by Download() which writes via os.Rename from a
+// temp file).  Calling CfSetInSyncState on a non-placeholder file attempts
+// to write CF reparse-point data to the file, leaving it with an invalid
+// reparse point and causing 0x80070781 (ERROR_INVALID_REPARSE_DATA) for
+// subsequent user operations in the same directory.
+//
+// Idempotent: if localPath is already a CF placeholder the function succeeds
+// (CfConvertToPlaceholder with MARK_IN_SYNC is a no-op on an already-synced
+// placeholder).
+func (p *SyncProvider) ConvertToPlaceholder(localPath string) error {
+	wPath := C.ghd_utf8_to_wchar(C.CString(localPath))
+	if wPath == nil {
+		return fmt.Errorf("cfapi: convert to placeholder: nil wpath for %s", localPath)
+	}
+	defer C.ghd_free_wchar(wPath)
+	hr := C.ghd_convert_to_placeholder(wPath)
+	if hr != 0 {
+		return fmt.Errorf("cfapi: convert to placeholder %s: HRESULT 0x%08x", localPath, uint32(hr))
+	}
+	return nil
 }
 
 // SetSyncState sets the in-sync/pin state of localPath.
@@ -519,6 +591,40 @@ func ghdOnFetchPlaceholders(callbackInfoPtr uintptr, _ uintptr) {
 	localPath := resolveNormalizedPath(info, p.localPath)
 	log.Printf("cfapi: FETCH_PLACEHOLDERS: localPath=%q", localPath)
 
+	// #158 / #v2.2-bugA — Cooldown deduplication with per-directory mutex.
+	//
+	// Windows (Explorer, indexer, antivirus) fires FETCH_PLACEHOLDERS on every
+	// directory access.  With FLAG_NONE in ghd_cf_ack_placeholders the directory
+	// stays in "partial" CF state, so CF re-fires the callback repeatedly.
+	//
+	// Original fix #157 used DISABLE_ON_DEMAND_POPULATION to stop re-firing, but
+	// that modified the directory's CF reparse point and broke bidirectional sync
+	// (#158 regression: LOCAL→GhD: and GhD:→LOCAL both dead).
+	//
+	// Revised approach (#158): use FLAG_NONE in the C ack (no reparse point change)
+	// and deduplicate with a cooldown guard in Go.
+	//
+	// #v2.2-bugA race: Windows may fire multiple simultaneous callbacks for the same
+	// directory before the first one completes.  Multiple goroutines passed the cooldown
+	// check simultaneously (all seeing cache-miss before any stored the timestamp),
+	// causing concurrent backend.List() calls and repeated "0s ago" cooldown log entries.
+	// Fix: a per-directory mutex (fetchMu) ensures only one goroutine executes
+	// OnFetchPlaceholders at a time; concurrent goroutines block then hit the cooldown.
+	dirMuVal, _ := p.fetchMu.LoadOrStore(localPath, &sync.Mutex{})
+	dirMu := dirMuVal.(*sync.Mutex)
+	dirMu.Lock()
+	defer dirMu.Unlock()
+
+	now := time.Now()
+	if last, hit := p.populatedDirs.Load(localPath); hit {
+		if now.Sub(last.(time.Time)) < fetchPlaceholdersCooldown {
+			log.Printf("cfapi: FETCH_PLACEHOLDERS: cooldown active for %q (%.0fs ago) — acking immediately",
+				localPath, now.Sub(last.(time.Time)).Seconds())
+			_ = C.ghd_cf_ack_placeholders(C.uintptr_t(callbackInfoPtr), 0) // S_OK, FLAG_NONE
+			return
+		}
+	}
+
 	err := p.callbacks.OnFetchPlaceholders(context.Background(), localPath)
 
 	// BUG FIX: Windows keeps the Explorer thread blocked until the provider calls
@@ -531,6 +637,9 @@ func ghdOnFetchPlaceholders(callbackInfoPtr uintptr, _ uintptr) {
 	if err != nil {
 		log.Printf("cfapi: FETCH_PLACEHOLDERS: callback error: %v", err)
 		status = C.HRESULT(-2147467259) // E_FAIL
+	} else {
+		// Record successful population time for cooldown tracking.
+		p.populatedDirs.Store(localPath, now)
 	}
 	if hr := C.ghd_cf_ack_placeholders(C.uintptr_t(callbackInfoPtr), status); hr != 0 {
 		log.Printf("cfapi: FETCH_PLACEHOLDERS: ack CfExecute failed: HRESULT 0x%08x", uint32(hr))

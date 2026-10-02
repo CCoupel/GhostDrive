@@ -237,6 +237,30 @@ func (b *GRPCBackend) Move(ctx context.Context, oldPath, newPath string) error {
 	return nil
 }
 
+// Rename implements plugins.StorageBackend — atomic server-side rename (#139).
+func (b *GRPCBackend) Rename(ctx context.Context, oldPath, newPath string) error {
+	resp, err := b.client.Rename(ctx, &storagepb.MoveRequest{OldPath: oldPath, NewPath: newPath})
+	if err != nil {
+		return mapGRPCError("grpc: Rename", err)
+	}
+	if resp.GetError() != "" {
+		return fmt.Errorf("grpc: Rename: %s", resp.GetError())
+	}
+	return nil
+}
+
+// Copy implements plugins.StorageBackend — server-side copy (#140).
+func (b *GRPCBackend) Copy(ctx context.Context, srcPath, dstPath string) error {
+	resp, err := b.client.Copy(ctx, &storagepb.CopyRequest{SrcPath: srcPath, DstPath: dstPath})
+	if err != nil {
+		return mapGRPCError("grpc: Copy", err)
+	}
+	if resp.GetError() != "" {
+		return fmt.Errorf("grpc: Copy: %s", resp.GetError())
+	}
+	return nil
+}
+
 // ── Navigation ────────────────────────────────────────────────────────────────
 
 // List implements plugins.StorageBackend.
@@ -409,6 +433,8 @@ func mapGRPCError(prefix string, err error) error {
 		return fmt.Errorf("%s: %w", prefix, plugins.ErrFileNotFound)
 	case codes.FailedPrecondition:
 		return fmt.Errorf("%s: %w", prefix, plugins.ErrNotConnected)
+	case codes.Unimplemented:
+		return fmt.Errorf("%s: %w", prefix, plugins.ErrNotSupported)
 	default:
 		return fmt.Errorf("%s: %w", prefix, err)
 	}

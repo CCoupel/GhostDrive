@@ -125,6 +125,14 @@ message StatResponse {
 message CreateDirRequest  { string path = 1; }
 message CreateDirResponse { string error = 1; }
 
+// ─── Rename (v2.2 — #139) ────────────────────────────────────────────────────
+// Reuses MoveRequest / MoveResponse (same wire format, different semantic).
+// The RPC is a distinct entry point so backends can optimise it separately from Move.
+
+// ─── Copy (v2.2 — #140) ──────────────────────────────────────────────────────
+message CopyRequest  { string src_path = 1; string dst_path = 2; }
+message CopyResponse { string error = 1; }
+
 message WatchRequest { string path = 1; }
 // WatchEvent is streamed by the server until the client cancels the context.
 message WatchEvent {
@@ -213,6 +221,8 @@ service StorageService {
   rpc Download  (DownloadRequest)       returns (stream DownloadChunk);
   rpc Delete    (DeleteRequest)         returns (DeleteResponse);
   rpc Move      (MoveRequest)           returns (MoveResponse);
+  rpc Rename    (MoveRequest)           returns (MoveResponse);   // v2.2 — atomic rename (#139)
+  rpc Copy      (CopyRequest)           returns (CopyResponse);   // v2.2 — server-side copy (#140)
 
   // Navigation
   rpc List      (ListRequest)           returns (ListResponse);

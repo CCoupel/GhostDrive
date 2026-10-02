@@ -27,6 +27,8 @@ const (
 	StorageService_Download_FullMethodName    = "/ghostdrive.storage.v1.StorageService/Download"
 	StorageService_Delete_FullMethodName      = "/ghostdrive.storage.v1.StorageService/Delete"
 	StorageService_Move_FullMethodName        = "/ghostdrive.storage.v1.StorageService/Move"
+	StorageService_Rename_FullMethodName      = "/ghostdrive.storage.v1.StorageService/Rename"
+	StorageService_Copy_FullMethodName        = "/ghostdrive.storage.v1.StorageService/Copy"
 	StorageService_List_FullMethodName        = "/ghostdrive.storage.v1.StorageService/List"
 	StorageService_Stat_FullMethodName        = "/ghostdrive.storage.v1.StorageService/Stat"
 	StorageService_CreateDir_FullMethodName   = "/ghostdrive.storage.v1.StorageService/CreateDir"
@@ -56,6 +58,8 @@ type StorageServiceClient interface {
 	Download(ctx context.Context, in *DownloadRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DownloadChunk], error)
 	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
 	Move(ctx context.Context, in *MoveRequest, opts ...grpc.CallOption) (*MoveResponse, error)
+	Rename(ctx context.Context, in *MoveRequest, opts ...grpc.CallOption) (*MoveResponse, error)
+	Copy(ctx context.Context, in *CopyRequest, opts ...grpc.CallOption) (*CopyResponse, error)
 	// Navigation
 	List(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error)
 	Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*StatResponse, error)
@@ -171,6 +175,26 @@ func (c *storageServiceClient) Move(ctx context.Context, in *MoveRequest, opts .
 	return out, nil
 }
 
+func (c *storageServiceClient) Rename(ctx context.Context, in *MoveRequest, opts ...grpc.CallOption) (*MoveResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MoveResponse)
+	err := c.cc.Invoke(ctx, StorageService_Rename_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Copy(ctx context.Context, in *CopyRequest, opts ...grpc.CallOption) (*CopyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CopyResponse)
+	err := c.cc.Invoke(ctx, StorageService_Copy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *storageServiceClient) List(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListResponse)
@@ -279,6 +303,8 @@ type StorageServiceServer interface {
 	Download(*DownloadRequest, grpc.ServerStreamingServer[DownloadChunk]) error
 	Delete(context.Context, *DeleteRequest) (*DeleteResponse, error)
 	Move(context.Context, *MoveRequest) (*MoveResponse, error)
+	Rename(context.Context, *MoveRequest) (*MoveResponse, error)
+	Copy(context.Context, *CopyRequest) (*CopyResponse, error)
 	// Navigation
 	List(context.Context, *ListRequest) (*ListResponse, error)
 	Stat(context.Context, *StatRequest) (*StatResponse, error)
@@ -325,6 +351,12 @@ func (UnimplementedStorageServiceServer) Delete(context.Context, *DeleteRequest)
 }
 func (UnimplementedStorageServiceServer) Move(context.Context, *MoveRequest) (*MoveResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Move not implemented")
+}
+func (UnimplementedStorageServiceServer) Rename(context.Context, *MoveRequest) (*MoveResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Rename not implemented")
+}
+func (UnimplementedStorageServiceServer) Copy(context.Context, *CopyRequest) (*CopyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Copy not implemented")
 }
 func (UnimplementedStorageServiceServer) List(context.Context, *ListRequest) (*ListResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method List not implemented")
@@ -497,6 +529,42 @@ func _StorageService_Move_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_Rename_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MoveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Rename(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Rename_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Rename(ctx, req.(*MoveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Copy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CopyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Copy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Copy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Copy(ctx, req.(*CopyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _StorageService_List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListRequest)
 	if err := dec(in); err != nil {
@@ -664,6 +732,14 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Move",
 			Handler:    _StorageService_Move_Handler,
+		},
+		{
+			MethodName: "Rename",
+			Handler:    _StorageService_Rename_Handler,
+		},
+		{
+			MethodName: "Copy",
+			Handler:    _StorageService_Copy_Handler,
 		},
 		{
 			MethodName: "List",

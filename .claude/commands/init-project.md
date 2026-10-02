@@ -9,6 +9,23 @@ Initialisation interactive du projet pour configurer l'environnement Claude Code
 - **Automatique** : Si `.claude/project-config.json` n'existe pas au demarrage
 - **Manuel** : Commande `/init-project` pour reinitialiser ou modifier
 
+## Convention d'interaction
+
+Toute sollicitation de l'utilisateur ci-dessous est posee avec l'outil **`AskUserQuestion`** —
+jamais du texte brut listant des lettres dans le chat :
+
+- **2 a 4 options** (contrainte de l'outil), chacune avec un **label court** ET une **description**
+  qui explique la consequence/le contexte du choix — jamais juste un mot.
+- Une option marquee **"(Recommande)"** dans son libelle quand un defaut raisonnable existe.
+- Jamais d'option "Autre" ajoutee manuellement : l'outil la propose deja automatiquement en saisie
+  libre. Quand une liste naturelle depasse 4 reponses (ex. choix d'une techno), ne garder que les
+  3-4 plus frequentes en options explicites et laisser "Autre" couvrir le reste.
+- Checklist a choix multiples → `multiSelect: true` (toujours dans la limite de 4 options ; au-dela,
+  scinder en plusieurs questions du meme appel — jusqu'a 4 questions groupees par appel).
+- Les questions de decouverte du workshop (Option a, phases 1-6) restent des questions ouvertes en
+  texte libre par nature (elles visent a faire emerger une reponse originale) — forcer des options
+  fermees leur ferait perdre leur but.
+
 ## Workflow d'Initialisation
 
 ```
@@ -71,9 +88,10 @@ puis deploiera les commandes et agents dans `.claude/`.
 | Categorie | Emplacement | Comportement |
 |-----------|-------------|--------------|
 | **TEMPLATE** | `TEMPLATE_claude/` (racine projet) | Fetche depuis GitHub, gitignore, jamais edite manuellement |
-| **COMMANDES** | `.claude/commands/*.md` + `.claude/commands/context/` | Depuis `TEMPLATE_claude/commands/*.md` et `commands/context/`, déployé en `*.md` — gitignore |
-| **AGENTS TEMPLATE** | `.claude/agents/*.template.md` + `.claude/agents/context/` | Depuis `TEMPLATE_claude/agents/*.md`, déployé en `*.template.md` — gitignore |
-| **PROJET** | `.claude/CLAUDE.md`, `project-config.json`, `memory/`, `agents/dev-*.md` | Trackes dans git, jamais ecrases |
+| **COMMANDES** | `.claude/commands/*.md` | Depuis `TEMPLATE_claude/commands/*.md`, déployé en `*.md` — gitignore, pas de compagnon |
+| **AGENTS TEMPLATE** | `.claude/agents/*.template.md` | Depuis `TEMPLATE_claude/agents/*.md`, déployé en `*.template.md` — gitignore |
+| **CONTEXTES PARTAGES** | `.claude/{commands,agents}/context/*.template.md` + compagnon `.claude/{commands,agents}/context/*.md` optionnel | Depuis `TEMPLATE_claude/{commands,agents}/context/*.md` — meme convention template/compagnon que les agents |
+| **PROJET** | `.claude/CLAUDE.md`, `project-config.json`, `memory/`, `agents/dev-*.md`, compagnons `agents/*.md` et `context/*.md` | Trackes dans git, jamais ecrases |
 
 ---
 
@@ -108,29 +126,43 @@ else
 fi
 ```
 
-#### 2. Verifier si une mise a jour est disponible
+#### 2. Verifier si une mise a jour est disponible, et determiner la cible du fetch
 
 ```bash
 KNOWN_COMMIT=$([ -f TEMPLATE_claude/.template-source.json ] && \
   cat TEMPLATE_claude/.template-source.json | jq -r '.commit // ""' || echo "")
 
-LATEST_COMMIT=$(gh api repos/$TEMPLATE_REPO/commits/$TEMPLATE_BRANCH --jq '.sha')
+# Reference = le commit du dernier TAG (pas le HEAD de branche) : un commit
+# non tagge est une version intermediaire non stabilisee, elle ne doit ni
+# etre proposee en mise a jour ni etre deployee.
+LATEST_TAG=$(gh api repos/$TEMPLATE_REPO/tags --jq '.[0].name // empty')
+LATEST_COMMIT=$(gh api repos/$TEMPLATE_REPO/tags --jq '.[0].commit.sha // empty')
 
 if [ "$KNOWN_COMMIT" = "$LATEST_COMMIT" ]; then
-  echo "Template deja a jour ($LATEST_COMMIT)"
+  echo "Template deja a jour ($LATEST_TAG - $LATEST_COMMIT)"
   # Continuer quand meme (fichiers peuvent etre absents si gitignores)
 fi
+
+# FETCH_TAG/FETCH_COMMIT = cible reellement fetchee par l'etape 3 ci-dessous. Par defaut
+# la derniere version taggee (init, sync/option d). La section "Reinstallation des fichiers
+# template" (fichiers manquants sur un projet deja v3) peut les faire pointer a la place vers
+# le commit fige dans project-config.json.template_version, pour restaurer a l'identique sans
+# upgrade implicite.
+FETCH_TAG="$LATEST_TAG"
+FETCH_COMMIT="$LATEST_COMMIT"
 ```
 
 #### 3. Fetcher TEMPLATE_claude/ depuis GitHub
 
 ```bash
-gh api repos/$TEMPLATE_REPO/git/trees/$TEMPLATE_BRANCH?recursive=1 \
+# Fetch au commit cible resolu a l'etape precedente (pas la branche) : les
+# fichiers deployes viennent toujours d'une version stabilisee et taggee.
+gh api repos/$TEMPLATE_REPO/git/trees/$FETCH_COMMIT?recursive=1 \
   --jq '.tree[] | select(.type=="blob") | .path' \
   | grep -E '^TEMPLATE_claude/' \
   | while read FILE; do
       mkdir -p "$(dirname $FILE)"
-      gh api repos/$TEMPLATE_REPO/contents/$FILE \
+      gh api "repos/$TEMPLATE_REPO/contents/$FILE?ref=$FETCH_COMMIT" \
         --jq '.content' | base64 -d > "$FILE"
       echo "  ✓ $FILE"
     done
@@ -140,9 +172,10 @@ gh api repos/$TEMPLATE_REPO/git/trees/$TEMPLATE_BRANCH?recursive=1 \
 
 Les commandes sont déployées en `*.md` — directement invocables comme `/xxx`, jamais éditées manuellement.
 Les agents sont déployés en `*.template.md` — les adaptations projet vont dans des fichiers `*.md` compagnons (voir COMMON.md §13).
+Les contextes partagés (`context/COMMON.md`, `context/GITHUB.md`...) suivent la même convention que les agents : déployés en `*.template.md`, avec un compagnon `*.md` optionnel pour les adaptations projet (voir COMMON.md §13).
 
 ```bash
-mkdir -p .claude/commands .claude/agents
+mkdir -p .claude/commands .claude/agents .claude/agents/context .claude/commands/context
 
 # Commandes : déployé en *.md (invocables directement comme /xxx)
 for src in TEMPLATE_claude/commands/*.md; do
@@ -158,12 +191,21 @@ for src in TEMPLATE_claude/agents/*.md; do
   echo "  ✓ $dest"
 done
 
-# Contextes partagés (restent en *.md — lus directement, pas de convention template/projet)
-cp -r TEMPLATE_claude/agents/context .claude/agents/context
-cp -r TEMPLATE_claude/commands/context .claude/commands/context
+# Contextes partagés : même convention que les agents — déployé en *.template.md,
+# compagnon *.md optionnel pour les adaptations projet (jamais créé automatiquement)
+for src in TEMPLATE_claude/agents/context/*.md; do
+  dest=".claude/agents/context/$(basename $src .md).template.md"
+  cp "$src" "$dest"
+  echo "  ✓ $dest"
+done
+for src in TEMPLATE_claude/commands/context/*.md; do
+  dest=".claude/commands/context/$(basename $src .md).template.md"
+  cp "$src" "$dest"
+  echo "  ✓ $dest"
+done
 ```
 
-#### 5. Mettre a jour TEMPLATE_claude/.template-source.json
+#### 5. Mettre a jour TEMPLATE_claude/.template-source.json et project-config.json
 
 ```bash
 TODAY=$(date +%Y-%m-%d)
@@ -171,11 +213,25 @@ cat > TEMPLATE_claude/.template-source.json <<EOF
 {
   "repo": "$TEMPLATE_REPO",
   "branch": "$TEMPLATE_BRANCH",
-  "commit": "$LATEST_COMMIT",
+  "tag": "$FETCH_TAG",
+  "commit": "$FETCH_COMMIT",
   "synced_at": "$TODAY"
 }
 EOF
-echo "✓ TEMPLATE_claude/.template-source.json mis a jour ($LATEST_COMMIT)"
+echo "✓ TEMPLATE_claude/.template-source.json mis a jour ($FETCH_TAG - $FETCH_COMMIT)"
+
+# Copie durable (trackee git) — TEMPLATE_claude/.template-source.json ci-dessus est gitignore
+# avec le reste de TEMPLATE_claude/ et disparait sur un clone frais ; project-config.json est
+# le seul endroit ou cette info survit. Ne s'applique qu'a une mise a jour d'un projet deja
+# initialise — a la premiere initialisation, le champ est deja inclus a la creation du fichier
+# (section "Generation de la Configuration").
+if [ -f .claude/project-config.json ]; then
+  jq --arg tag "$FETCH_TAG" --arg commit "$FETCH_COMMIT" \
+    '.template_version = { "tag": $tag, "commit": $commit }' \
+    .claude/project-config.json > /tmp/project-config.json.tmp \
+    && mv /tmp/project-config.json.tmp .claude/project-config.json
+  echo "✓ project-config.json : template_version mis a jour ($FETCH_TAG - $FETCH_COMMIT)"
+fi
 ```
 
 ---
@@ -188,14 +244,154 @@ echo "✓ TEMPLATE_claude/.template-source.json mis a jour ($LATEST_COMMIT)"
 HAS_CONFIG=$([ -f .claude/project-config.json ] && echo "yes" || echo "no")
 HAS_TEMPLATE_DIR=$([ -d TEMPLATE_claude ] && echo "yes" || echo "no")
 HAS_OLD_SOURCE=$([ -f .claude/.template-source.json ] && echo "yes" || echo "no")
+HAS_TEMPLATE_VERSION=$([ "$HAS_CONFIG" = "yes" ] && \
+  jq -e '.template_version.commit' .claude/project-config.json >/dev/null 2>&1 && \
+  echo "yes" || echo "no")
 ```
 
-| `project-config.json` | `TEMPLATE_claude/` | `.claude/.template-source.json` | Diagnostic |
-|-----------------------|--------------------|--------------------------------|------------|
-| absent | absent | absent | Nouveau projet → flux normal |
-| present | present | - | Projet v3 → Reinitialisation |
-| present | absent | present | **Projet v2 → Migration v3** |
-| present | absent | absent | **Projet v1 → Migration v3** |
+| `project-config.json` | `TEMPLATE_claude/` | `template_version` (dans `project-config.json`) | `.claude/.template-source.json` | Diagnostic |
+|-----------------------|--------------------|--------------------------------------------------|--------------------------------|------------|
+| absent | absent | - | absent | Nouveau projet → flux normal |
+| present | present | - | - | Projet v3 → Reinitialisation |
+| present | absent | present | - | **Projet v3, fichiers template manquants (clone frais) → Reinstallation a l'identique** (voir section dediee) |
+| present | absent | absent | present | **Projet v2 → Migration v3** |
+| present | absent | absent | absent | **Projet v1 → Migration v3** |
+
+> Le cas "fichiers manquants" (ligne 3) n'est **pas** une migration : le projet est deja en
+> architecture v3, seuls les fichiers gitignores (`TEMPLATE_claude/`, commandes/agents deployes)
+> sont absents — situation normale apres un `git clone`/`git pull` sur un projet deja initialise.
+> Le distinguer de la migration v1/v2 evite de rejouer inutilement tout le flux de conversion de
+> schema sur un projet qui n'en a pas besoin.
+
+---
+
+## Reinstallation des fichiers template (projet v3, fichiers manquants)
+
+Declenche quand `HAS_CONFIG=yes`, `HAS_TEMPLATE_DIR=no` et `HAS_TEMPLATE_VERSION=yes` (voir
+tableau de detection ci-dessus) — typiquement apres un `git clone`/`git pull` d'un projet deja
+initialise en v3, dont `TEMPLATE_claude/` et les commandes/agents deployes sont gitignores.
+
+```bash
+PINNED_TAG=$(jq -r '.template_version.tag' .claude/project-config.json)
+PINNED_COMMIT=$(jq -r '.template_version.commit' .claude/project-config.json)
+
+# Resoudre la derniere version disponible (etape 2 de la procedure de fetch ci-dessus,
+# sans encore fixer FETCH_TAG/FETCH_COMMIT)
+LATEST_TAG=$(gh api repos/$TEMPLATE_REPO/tags --jq '.[0].name // empty')
+LATEST_COMMIT=$(gh api repos/$TEMPLATE_REPO/tags --jq '.[0].commit.sha // empty')
+```
+
+Si `PINNED_COMMIT = LATEST_COMMIT` → aucun choix reel a proposer (reinstaller a l'identique
+*est* la derniere version) : fixer directement `FETCH_TAG=$PINNED_TAG`, `FETCH_COMMIT=$PINNED_COMMIT`
+et enchainer sur les etapes 3-5 de la procedure de fetch, sans poser de question.
+
+Sinon :
+
+```
+AskUserQuestion : "Les fichiers template (TEMPLATE_claude/, commandes, agents) sont absents de
+ce clone — ils sont gitignores et ne se recuperent pas avec git. Comment les restaurer ?"
+- Reinstaller a partir des templates <PINNED_TAG> (Recommande) — restaure exactement la version
+  deja utilisee par ce projet (celle enregistree dans project-config.json), aucun changement de
+  comportement, rien a revoir avant de continuer a travailler
+- Profiter pour mettre a jour les templates vers <LATEST_TAG> (derniere version) — equivalent a
+  une synchronisation complete (option "Appliquer les mises a jour detectees"), peut introduire
+  des changements de comportement a relire avant de continuer
+```
+
+- **Reinstaller a l'identique** → `FETCH_TAG=$PINNED_TAG`, `FETCH_COMMIT=$PINNED_COMMIT`, puis
+  etapes 3-5 de la procedure de fetch. `template_version` dans `project-config.json` ne change
+  pas (deja a cette valeur).
+- **Mettre a jour** → `FETCH_TAG=$LATEST_TAG`, `FETCH_COMMIT=$LATEST_COMMIT`, puis etapes 3-5 —
+  strictement equivalent a une reinitialisation normale (Option d), `template_version` est mis
+  a jour vers la nouvelle version.
+
+Dans les deux cas, enchainer ensuite sur le deploiement standard (etape 4 de la procedure de
+fetch) et la detection de doublons/conflits (d5b/d5c) si des fichiers compagnons `*.md` existent
+deja localement (customisations projet preservees, jamais ecrasees).
+
+---
+
+## Migration du schema `infrastructure` (deploy → environments[])
+
+Independante de la migration de structure ci-dessus (v1/v2 → v3) — s'applique des que
+`HAS_CONFIG=yes`, quel que soit le chemin emprunte ensuite (Reinitialisation ou Migration
+v1/v2 → v3). Avant l'introduction du modele BUILD/PUBLISH/DEPLOY a 3 phases (voir
+`TEMPLATE_claude/agents/deploy.md`), `infrastructure` portait un seul mecanisme de deploiement
+(`infrastructure.deploy`, string) commun a tous les environnements. Il est remplace par
+`infrastructure.environments[]` (tableau ordonne, mecanisme publish/deploy propre a chaque
+environnement — voir Etape 8). Detecter et convertir automatiquement :
+
+```bash
+OLD_DEPLOY=$(jq -r '.infrastructure.deploy // empty' .claude/project-config.json 2>/dev/null)
+HAS_ENVIRONMENTS=$(jq -e '.infrastructure.environments' .claude/project-config.json >/dev/null 2>&1 && echo yes || echo no)
+
+# Normaliser vers l'enum utilise par la generation des fichiers d'environnement (section
+# "3bis. Fichiers d'environnement") — l'ancien champ etait du texte libre (ex: "docker").
+case "$OLD_DEPLOY" in
+  docker|docker-compose) MECH=docker-compose ;;
+  kubernetes|k8s|helm)   MECH=kubernetes ;;
+  serverless)            MECH=serverless ;;
+  vps|bare-metal)        MECH=vps ;;
+  paas)                  MECH=paas ;;
+  cloud-run|cloudrun|app-engine) MECH=cloud-run ;;
+  *)                     MECH=docker-compose ;;  # repli par defaut, signale a l'utilisateur ci-dessous
+esac
+```
+
+Si `OLD_DEPLOY` non vide ET `HAS_ENVIRONMENTS=no` → config au format precedent, informer et convertir :
+
+```
+Configuration de deploiement au format precedent detectee (infrastructure.deploy: "<OLD_DEPLOY>").
+Le nouveau modele separe BUILD (compilation) / PUBLISH (mise a disposition, mecanisme par
+environnement) / DEPLOY (installation) — voir TEMPLATE_claude/agents/deploy.md.
+
+Conversion automatique proposee :
+  QUALIF : publish.mode = promote      (reutilise l'artefact tel quel, zero rebuild)
+  PROD   : publish.mode = rebuild-ci   (merge + tag officiel, rebuild deterministe via CI)
+  deploy.mechanism (les deux environnements) = "<MECH>" (normalise depuis "<OLD_DEPLOY>")
+
+AskUserQuestion : "Convertir maintenant vers le nouveau modele ?"
+- Oui, convertir automatiquement (Recommande) — applique QUALIF=promote / PROD=rebuild-ci /
+  deploy.mechanism="<MECH>" ; /build, /publish, /deploy fonctionnent immediatement apres
+- Non, laisser en l'etat — infrastructure.deploy reste tel quel ; /build, /publish <env>,
+  /deploy <env> nouvellement synchronisees ne fonctionneront pas correctement tant que la
+  conversion n'est pas faite
+```
+
+Si confirme :
+
+```bash
+jq --arg mech "$MECH" '
+  .infrastructure.environments = [
+    { "name": "QUALIF", "order": 1,
+      "publish": { "mode": "promote", "target": "build/qualif_v{X.Y.Z}/" },
+      "deploy":  { "mechanism": $mech } },
+    { "name": "PROD", "order": 2,
+      "publish": { "mode": "rebuild-ci", "trigger": "git-tag", "pipeline": ".github/workflows/release.yml" },
+      "deploy":  { "mechanism": $mech } }
+  ] | del(.infrastructure.deploy)
+' .claude/project-config.json > /tmp/project-config.json.tmp \
+  && mv /tmp/project-config.json.tmp .claude/project-config.json
+
+echo "✓ infrastructure.environments genere depuis infrastructure.deploy=\"$OLD_DEPLOY\" (mecanisme normalise : $MECH)."
+echo "  Verifier/ajuster manuellement les cibles (docker-compose.*.yml, chart Helm, pipeline CI) si besoin."
+
+# Generer les fichiers d'environnement correspondants (sinon agents/deploy.md reference des
+# fichiers inexistants) — meme logique que la section "3bis. Fichiers d'environnement"
+# ci-dessous, executee ici immediatement apres la conversion de schema.
+```
+
+> Executer ensuite la generation des fichiers d'environnement (section "3bis. Fichiers
+> d'environnement" ci-dessous) pour ces deux environnements — indispensable, `agents/deploy.md`
+> reference desormais `.claude/agents/environments/{publish,deploy}.{qualif,prod}.template.md`
+> a chaque tache PUBLISH/DEPLOY.
+
+> Cette conversion ne devine que le mecanisme de deploiement (repris tel quel pour les deux
+> environnements) et le mecanisme de publication par defaut (`promote` QUALIF /
+> `rebuild-ci` PROD) — elle ne peut pas deviner des cibles specifiques (fichier
+> docker-compose different par environnement, chemin Helm...) : les signaler comme a
+> verifier manuellement dans le rapport de fin d'execution (Option d, Etape d8, ou message de
+> fin en flux Migration v1/v2 → v3).
 
 ---
 
@@ -213,7 +409,11 @@ Architecture v3 (cible) :
   TEMPLATE_claude/ a la racine — fetche depuis GitHub, gitignore
   .claude/ contient uniquement les fichiers PROJET
 
-Migration requise. Continuer ? [O/n]
+AskUserQuestion : "Migration vers l'architecture v3 requise — continuer ?"
+- Oui, migrer maintenant (Recommande) — deplace les fichiers template vers TEMPLATE_claude/
+  gitignore ; .claude/ ne garde que les fichiers projet
+- Non, annuler l'initialisation — le projet reste sur l'architecture v1/v2, aucune commande
+  synchronisee depuis TEMPLATE_claude/ ne sera disponible
 ```
 
 ### Etape M1 — Fetch de TEMPLATE_claude/ depuis GitHub
@@ -253,14 +453,33 @@ Si `CUSTOMIZED_COMMANDS[]` non vide → informer l'utilisateur :
 Pour rétablir le template, supprimer le fichier .claude/commands/[nom].md et relancer /init-project.
 ```
 
+### Etape M1c — Migration : renommer les contextes legacy `context/X.md` → `context/X.template.md`
+
+> ⚠ **SCOPE STRICT** : uniquement les fichiers directement dans `.claude/agents/context/` et
+> `.claude/commands/context/` — ne renomme jamais un fichier qui est déjà un compagnon `.template.md`.
+
+Avant l'introduction du pattern template/compagnon pour `context/`, ces fichiers étaient déployés
+en `context/X.md` (gitignorés en bloc, sans compagnon). Les renommer en `context/X.template.md` —
+sauf si un `.template.md` existe déjà pour ce nom (déjà migré).
+
+```bash
+for f in .claude/agents/context/*.md .claude/commands/context/*.md; do
+  [[ -f "$f" ]] || continue
+  dest="${f%.md}.template.md"
+  [[ -f "$dest" ]] && continue   # déjà migré
+  mv "$f" "$dest"
+  echo "  ✓ migration contexte : $(basename $f) → $(basename $dest)"
+done
+```
+
 ### Etape M2 — Nettoyer .claude/ des anciens fichiers template
 
 ```bash
 git rm --cached .claude/commands/*.template.md 2>/dev/null || true
 git rm --cached .claude/commands/*.md 2>/dev/null || true
 # Note : après migration v3, les commandes sont en *.md (gitignored)
-git rm --cached -r .claude/agents/context/ 2>/dev/null || true
-git rm --cached -r .claude/commands/context/ 2>/dev/null || true
+git rm --cached .claude/agents/context/*.template.md 2>/dev/null || true
+git rm --cached .claude/commands/context/*.template.md 2>/dev/null || true
 git rm --cached .claude/agents/*.template.md 2>/dev/null || true
 git rm --cached .claude/agents/*.md 2>/dev/null || true
 git rm --cached -r .claude/templates/ 2>/dev/null || true
@@ -270,17 +489,29 @@ git rm --cached .claude/CLAUDE_TEMPLATE.md 2>/dev/null || true
 git rm --cached .claude/gitignore-for-projects 2>/dev/null || true
 ```
 
+> Seuls les `*.template.md` de `context/` sont désindexés — les compagnons `context/*.md`
+> (issus de la migration M1c ou déjà présents) restent/redeviennent trackés, comme pour les
+> compagnons `agents/*.md`.
+
 ### Etape M3 — Appliquer le .gitignore
 
 ```bash
-cp TEMPLATE_claude/gitignore-for-projects .gitignore
-# (merger avec le .gitignore existant si necessaire)
+# Fusion non destructive : conserver les lignes du projet, ajouter uniquement les lignes template absentes
+if [ -f .gitignore ]; then
+  grep -vE '^\s*(#|$)' TEMPLATE_claude/gitignore-for-projects | while IFS= read -r l; do
+    grep -qxF "$l" .gitignore || echo "$l" >> .gitignore
+  done
+else
+  cp TEMPLATE_claude/gitignore-for-projects .gitignore
+fi
 ```
+
+Puis appliquer la section **"Site marketing — worktree `gh-pages`"** (migration d'un `MARKETING/` suivi).
 
 ### Etape M4 — Commiter la migration
 
 M2 a désindexé les `*.md` agents via `git rm --cached`. Re-tracker les fichiers compagnons agents
-qui existent sur disque (customisations projet à préserver) avant de commiter.
+et contextes qui existent sur disque (customisations projet à préserver) avant de commiter.
 
 ```bash
 git add .gitignore TEMPLATE_claude/.template-source.json
@@ -291,12 +522,17 @@ for f in .claude/agents/*.md; do
   [[ "$name" == dev-*.md ]] && continue  # dev-* gérés séparément
   git add "$f" 2>/dev/null && echo "  ✓ re-tracking companion agent : $name"
 done
+# Re-tracker les companions context/ (issus de M1c ou déjà présents), hors *.template.md
+for f in .claude/agents/context/*.md .claude/commands/context/*.md; do
+  [[ -f "$f" ]] || continue
+  git add "$f" 2>/dev/null && echo "  ✓ re-tracking companion contexte : $(basename $f)"
+done
 git commit -m "chore(claude): Migrate to v3 template architecture (TEMPLATE_claude/)
 
 - TEMPLATE_claude/ fetched from GitHub, gitignored at root
 - .claude/ now contains only project-specific files
 - Untracked legacy template files from .claude/
-- Agent companion files re-tracked after cache cleanup"
+- Agent and context companion files re-tracked after cache cleanup"
 ```
 
 ### Etape M5 — Rapport
@@ -307,13 +543,53 @@ Migration → v3 terminee.
   TEMPLATE_claude/ fetche depuis CCoupel/claude_project_template
   Commandes deployees dans .claude/commands/
   Agents template deployes dans .claude/agents/
+  Contextes partages deployes dans .claude/agents/context/ et .claude/commands/context/
 
   Fichiers PROJET preserves :
     ✓ .claude/CLAUDE.md
-    ✓ .claude/project-config.json
+    ✓ .claude/project-config.json (hors migration ponctuelle du schema `infrastructure`, voir
+      section "Migration du schema `infrastructure`" — appliquee avant cette etape si besoin)
     ✓ .claude/memory/
     ✓ .claude/agents/dev-*.md (si presents)
+    ✓ .claude/agents/*.md et context/*.md compagnons (si presents)
 ```
+
+---
+
+## Site marketing — worktree `gh-pages`
+
+Regle : le site marketing vit **uniquement sur `gh-pages`**, jamais commite sur la branche de code (`main`,
+`milestone/*`, `hotfix/*`). `MARKETING/` est le **worktree git de `gh-pages`**, exclu par le `.gitignore`
+(ligne `MARKETING/` de `gitignore-for-projects`, fusionnee sans ecraser les lignes du projet — voir
+Finalisation). Ce n'est pas une publication de `main`.
+
+Applique a l'init, a la migration v1/v2 → v3 et a la reinitialisation (option d) :
+
+```bash
+# Garde-fou : exclusion presente meme si le .gitignore du projet est personnalise
+grep -qxF 'MARKETING/' .gitignore 2>/dev/null || echo 'MARKETING/' >> .gitignore
+
+# Detecter un MARKETING/ suivi par la branche de code (doublon avec gh-pages)
+TRACKED=$(git ls-files MARKETING | wc -l)
+```
+
+- `TRACKED` = 0 → rien a migrer. Le worktree sera cree par l'agent `marketing` (`git worktree add MARKETING gh-pages`)
+  quand il en aura besoin.
+- `TRACKED` > 0 → AskUserQuestion : "`MARKETING/` est suivi par la branche de code (N fichiers) alors que le site
+  doit vivre uniquement sur `gh-pages`. Migrer ?"
+  - Migrer (Recommande) — comparer d'abord `MARKETING/` a `origin/gh-pages` (fichier par fichier :
+    `git show origin/gh-pages:<fichier> | diff - MARKETING/<fichier>`) ; si le contenu local diverge de
+    `gh-pages`, l'afficher et demander lequel garder AVANT toute suppression. Puis :
+    `git rm -r --cached MARKETING/` (les fichiers restent sur disque), deplacer le dossier
+    (`mv MARKETING /tmp/MARKETING.bak`), `git worktree add MARKETING gh-pages`, recopier les eventuelles
+    differences retenues dans le worktree et les commiter **sur `gh-pages`** (`git -C MARKETING ...`).
+    Commit de migration sur la branche de code : `chore(site): MARKETING/ devient le worktree de gh-pages`
+    (contient uniquement le `git rm --cached` et le `.gitignore`).
+  - Ignorer — ne rien changer (le doublon subsiste ; l'agent `marketing` refusera de publier tant que
+    `MARKETING/` est suivi).
+  - Annuler.
+
+Les release notes et posts ne font pas partie du site : ils restent sur la branche de code, dans `docs/releases/`.
 
 ---
 
@@ -371,10 +647,12 @@ Technologies detectees :
 - CI/CD : GitHub Actions (.github/workflows/)
 - Tests : Vitest, Playwright
 
-Voulez-vous :
-a) Initialiser avec cette configuration (recommande)
-b) Initialiser manuellement (questionnaire complet)
-c) Annuler
+AskUserQuestion : "Comment veux-tu initialiser le projet ?"
+- Initialiser avec cette configuration (Recommande) — utilise directement les technologies
+  detectees ci-dessus, aucune question supplementaire
+- Initialiser manuellement — reprend chaque technologie via le questionnaire complet (etapes
+  2 a 10), utile si une detection est incorrecte ou incomplete
+- Annuler — n'initialise rien, quitte /init-project
 ```
 
 **Si projet vide :**
@@ -384,12 +662,12 @@ Ce projet ne contient pas encore de code.
 
 Comment souhaitez-vous initialiser le projet ?
 
-a) Workshop de cadrage (recommande)
-   → Entretien guide pour definir vision, objectifs, stack et contraintes
-   → Genere un CLAUDE.md complet et project-config.json
-b) Questionnaire rapide
-   → Questions directes sur la stack technique
-c) Annuler
+AskUserQuestion : "Comment souhaites-tu initialiser le projet ?"
+- Workshop de cadrage (Recommande) — entretien guide en 6 phases pour definir vision,
+  objectifs, stack et contraintes ; genere un CLAUDE.md complet et project-config.json
+- Questionnaire rapide — questions directes sur la stack technique uniquement, sans phase de
+  cadrage produit
+- Annuler — n'initialise rien, quitte /init-project
 ```
 
 ### Option a : Workshop de Cadrage
@@ -460,16 +738,13 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 2 : Stack Backend
 
 ```
-3. Quelle technologie backend utilises-tu ?
-   a) Go
-   b) Node.js (JavaScript/TypeScript)
-   c) Python (FastAPI/Django/Flask)
-   d) Java / Kotlin (Spring)
-   e) C# / .NET
-   f) PHP (Laravel/Symfony)
-   g) Ruby (Rails)
-   h) Rust (Actix/Axum)
-   i) Aucun backend
+AskUserQuestion : "Quelle technologie backend utilises-tu ?"
+- Node.js (JavaScript/TypeScript) — Express, Fastify, NestJS... genere les agents et templates
+  dev-backend-node
+- Python (FastAPI/Django/Flask) — genere les agents et templates dev-backend-python
+- Go — genere les agents et templates dev-backend-go
+- Aucun backend — projet frontend/mobile/firmware seul, pas d'agent dev-backend genere
+(Autre technologie — Java/Kotlin, C#/.NET, PHP, Ruby, Rust... — saisie libre via "Autre")
 ```
 
 ---
@@ -477,15 +752,14 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 3 : Stack Frontend
 
 ```
-4. Quelle technologie frontend utilises-tu ?
-   a) React (Vite/CRA)
-   b) React (Next.js)
-   c) Vue.js (Vite)
-   d) Vue.js (Nuxt)
-   e) Angular
-   f) Svelte / SvelteKit
-   g) HTML/CSS/JS vanilla
-   h) Aucun frontend
+AskUserQuestion : "Quelle technologie frontend utilises-tu ?"
+- React (Vite/CRA) — SPA classique, genere les agents et templates dev-frontend-react
+- React (Next.js) — SSR/routing integre, genere les agents et templates dev-frontend-react
+  (variante Next.js)
+- Vue.js (Vite ou Nuxt — preciser lequel via "Autre" si besoin) — genere les agents et
+  templates dev-frontend-vue
+- Aucun frontend — backend/API seul ou mobile/firmware seul, pas d'agent dev-frontend genere
+(Autre technologie — Angular, Svelte/SvelteKit, HTML/CSS/JS vanilla... — saisie libre via "Autre")
 ```
 
 ---
@@ -493,13 +767,12 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 4 : Mobile (optionnel)
 
 ```
-5. As-tu une application mobile ?
-   a) React Native
-   b) Flutter
-   c) iOS natif (Swift/SwiftUI)
-   d) Android natif (Kotlin)
-   e) Capacitor/Ionic
-   f) Pas de mobile
+AskUserQuestion : "As-tu une application mobile ?"
+- React Native — partage du code avec le frontend React eventuel
+- Flutter — stack Dart independante, cross-platform
+- Natif (iOS Swift/SwiftUI ou Android Kotlin — preciser lequel via "Autre" si besoin)
+- Pas de mobile — aucun agent mobile genere
+(Autre techno — Capacitor/Ionic... — saisie libre via "Autre")
 ```
 
 ---
@@ -507,13 +780,11 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 5 : Firmware/Hardware (optionnel)
 
 ```
-6. As-tu du code firmware ou embarque ?
-   a) ESP32 (Arduino/PlatformIO)
-   b) ESP8266
-   c) Raspberry Pi
-   d) Arduino (AVR)
-   e) STM32
-   f) Pas de firmware
+AskUserQuestion : "As-tu du code firmware ou embarque ?"
+- ESP32 (Arduino/PlatformIO) — genere l'agent dev-firmware-esp32
+- Raspberry Pi — carte complete, souvent Linux embarque plutot que firmware bas niveau
+- Pas de firmware — aucun agent firmware genere
+(Autre carte/microcontroleur — ESP8266, Arduino AVR, STM32... — saisie libre via "Autre")
 ```
 
 ---
@@ -521,13 +792,11 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 5b : Plugin (optionnel)
 
 ```
-6b. Ton projet inclut-il un plugin pour une plateforme existante ?
-    a) VS Code Extension
-    b) Obsidian Plugin
-    c) WordPress Plugin
-    d) Browser Extension (Chrome/Firefox)
-    e) Plugin applicatif maison (preciser la plateforme)
-    f) Pas de plugin
+AskUserQuestion : "Ton projet inclut-il un plugin pour une plateforme existante ?"
+- VS Code Extension — genere les agents/templates plugin cibles VS Code
+- Browser Extension (Chrome/Firefox) — genere les agents/templates plugin navigateur
+- Pas de plugin — aucun agent plugin genere
+(Autre plateforme — Obsidian, WordPress, plugin applicatif maison... — preciser via "Autre")
 ```
 
 ---
@@ -535,16 +804,13 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 6 : Base de Donnees
 
 ```
-7. Quelle base de donnees utilises-tu ?
-   a) PostgreSQL
-   b) MySQL / MariaDB
-   c) MongoDB
-   d) SQLite
-   e) Redis
-   f) Firebase / Firestore
-   g) Supabase
-   h) Plusieurs (preciser)
-   i) Aucune
+AskUserQuestion : "Quelle base de donnees utilises-tu ?"
+- PostgreSQL — relationnel, choix par defaut pour la plupart des stacks backend generees
+- MySQL / MariaDB — relationnel, alternative a PostgreSQL
+- MongoDB — document, pour un modele de donnees non relationnel
+- Aucune — pas de persistance geree par le template
+(Autre — SQLite, Redis, Firebase/Firestore, Supabase, ou plusieurs bases combinees —
+preciser via "Autre")
 ```
 
 ---
@@ -552,39 +818,68 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 7 : CI/CD
 
 ```
-8. Quel systeme CI/CD utilises-tu ?
-   a) GitHub Actions
-   b) GitLab CI
-   c) Jenkins
-   d) CircleCI
-   e) Azure DevOps
-   f) Bitbucket Pipelines
-   g) Aucun
+AskUserQuestion : "Quel systeme CI/CD utilises-tu ?"
+- GitHub Actions — audite le workflow de release existant, sinon le genere selon la stack et les livrables
+- GitLab CI — meme demarche avec `.gitlab-ci.yml`
+- Aucun — pas de pipeline CI/CD genere, /build et /publish resteront manuels
+(Autre — Jenkins, CircleCI, Azure DevOps, Bitbucket Pipelines... — preciser via "Autre")
 ```
 
 ---
 
-## Etape 8 : Deploiement
+## Etape 8 : Environnements et Deploiement
 
 ```
-9. Comment deploies-tu ton application ?
-   a) Docker / Docker Compose
-   b) Kubernetes
-   c) Serverless (AWS Lambda, Vercel, Netlify)
-   d) VPS / Bare metal
-   e) PaaS (Heroku, Railway, Render)
-   f) Cloud Run / App Engine
+AskUserQuestion : "Comment deploies-tu ton application ?" (mecanisme d'installation par defaut)
+- Docker / Docker Compose — genere le template environments/docker-compose
+- Kubernetes / Helm — genere le template environments/kubernetes-helm
+- Serverless (AWS Lambda, Vercel, Netlify) — genere le template environments/serverless
+- VPS / Bare metal — genere le template environments/vps
+(Autre mecanisme — PaaS type Heroku/Railway/Render, Cloud Run/App Engine... — preciser via
+"Autre")
+
+AskUserQuestion : "Quels environnements de release utilises-tu, dans l'ordre de promotion ?"
+- QUALIF puis PROD (Recommande) — chaine standard, seule cablee dans l'orchestration CDP
+  automatisee (GATE 1 a 4)
+- DEV puis QUALIF puis PROD — ajoute un environnement DEV manuel (hors flux CDP automatise)
+  avant QUALIF
+- QUALIF puis PRE-PROD puis PROD — ajoute un environnement PRE-PROD manuel (hors flux CDP
+  automatise) entre QUALIF et PROD
+(Autre chaine personnalisee — lister les noms dans l'ordre de promotion — via "Autre")
 ```
+
+Chaque environnement declare dans `infrastructure.environments[]` recoit un mecanisme
+`publish.mode` :
+- **`promote`** (defaut pour tout environnement sauf le dernier) — reutilise tel quel
+  l'artefact du BUILD (ou de l'environnement precedent), zero rebuild.
+- **`rebuild-ci`** (defaut pour le dernier environnement de la chaine, generalement PROD) —
+  merge + tag officiel, declenche un rebuild deterministe via la CI choisie a l'Etape 7.
+
+Le mecanisme `deploy.mechanism` de chaque environnement reprend par defaut la reponse a la
+question 9 (docker-compose / helm / serverless / vps / paas / cloud-run) — proposer a
+l'utilisateur de le personnaliser par environnement uniquement s'il le demande explicitement.
+
+> Seule la chaine QUALIF -> PROD est cablee dans l'orchestration CDP (voir
+> `agents/cdp.template.md`, section "Points de Validation Utilisateur"). Un environnement
+> supplementaire (DEV, PRE-PROD...) est genere dans la config mais se publie/deploie
+> manuellement via `/publish <env>` et `/deploy <env>`, hors flux CDP automatise — le signaler
+> a l'utilisateur s'il en ajoute.
+>
+> Cette etape ne cree que la configuration et les procedures generiques (section 3bis) — jamais
+> les artefacts d'infra eux-memes (Dockerfile, `docker-compose.<env>.yml`, chart Helm...). Ceux-ci
+> sont scaffoldes a la demande par l'agent `infra`, au premier deploiement sur chaque
+> environnement (voir `agents/infra.md` section "Mode Validation", etape 0) — pas a l'init.
 
 ---
 
 ## Etape 9 : Tests
 
 ```
-10. Quels frameworks de tests utilises-tu ?
-    Tests unitaires backend: ___
-    Tests unitaires frontend: ___
-    Tests E2E: ___
+10. Quels frameworks de tests utilises-tu ? (propositions par defaut selon la stack choisie
+    aux etapes 2/3 — preciser si different)
+    a) Tests unitaires backend : [defaut deduit, ex. `go test` pour Go, Jest/Vitest pour Node]
+    b) Tests unitaires frontend : [defaut deduit, ex. Vitest/Jest pour React/Vue]
+    c) Tests E2E : Playwright (recommande)
 ```
 
 ---
@@ -592,13 +887,14 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
 ## Etape 10 : Securite
 
 ```
-11. Quels aspects securite sont importants ?
-    [ ] Authentification utilisateurs
-    [ ] API publique
-    [ ] Donnees sensibles (RGPD, sante, finance)
-    [ ] Paiements (PCI-DSS)
-    [ ] Multi-tenant
-    [ ] Aucun aspect particulier
+AskUserQuestion (`multiSelect: true`) : "Quels aspects securite sont importants pour ce projet ?"
+- Authentification utilisateurs — active les checks de gestion de session/mots de passe pour
+  l'agent security
+- Donnees sensibles (RGPD, sante, finance) — active les checks de protection des donnees
+  personnelles/sensibles
+- Paiements (PCI-DSS) — active les checks specifiques au traitement de paiements
+- Aucun aspect particulier — n'active aucun check securite specifique (base uniquement)
+(Autre aspect — API publique, multi-tenant... — preciser via "Autre" ; plusieurs choix possibles)
 ```
 
 ---
@@ -617,6 +913,9 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
   "version": "0.1.0",
   "initialized_at": "<TIMESTAMP>",
   "initialized_from": "analysis|manual|workshop",
+  "template_version": { "tag": "<LATEST_TAG>", "commit": "<LATEST_COMMIT>" },
+  "src_dir": "<SRC_DIR>",
+  "version_file": "<VERSION_FILE>",
   "stack": {
     "backend": { "language": "go", "framework": null },
     "frontend": { "language": "typescript", "framework": "react" },
@@ -627,12 +926,31 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
   },
   "infrastructure": {
     "cicd": "github-actions",
-    "deploy": "docker"
+    "environments": [
+      {
+        "name": "QUALIF",
+        "order": 1,
+        "publish": { "mode": "promote", "target": "build/qualif_v{X.Y.Z}/" },
+        "deploy":  { "mechanism": "docker-compose", "target": "docker-compose.qualif.yml" }
+      },
+      {
+        "name": "PROD",
+        "order": 2,
+        "publish": { "mode": "rebuild-ci", "trigger": "git-tag", "pipeline": ".github/workflows/release.yml" },
+        "deploy":  { "mechanism": "docker-compose", "target": "docker-compose.prod.yml" }
+      }
+    ]
   },
   "testing": {
     "backend": ["go-test"],
     "frontend": ["vitest"],
-    "e2e": ["playwright"]
+    "e2e": ["playwright"],
+    "components": { "<composant>": ["<glob des sources du composant>"] },
+    "regression_at_qa": "gated",
+    "full_regression_at": "qualif",
+    "coverage_min": 70,
+    "lot_max_tests": 50,
+    "perf": { "p95_ms": 200, "p99_ms": 500, "error_rate_max": 0.001 }
   },
   "security": {
     "concerns": ["auth", "api-public"]
@@ -642,7 +960,17 @@ A la fin du workshop, generer `CLAUDE.md` complet, `project-config.json`, et les
     "test": "<TEST_CMD>",
     "lint": "<LINT_CMD>",
     "audit": "<AUDIT_CMD>",
-    "typecheck": "<TYPECHECK_CMD>"
+    "typecheck": "<TYPECHECK_CMD>",
+    "coverage": "<COVERAGE_CMD>",
+    "test_fast": "<TEST_FAST_CMD>",
+    "test_targeted": "<TEST_TARGETED_CMD avec {TARGETS}>",
+    "smoke": "<SMOKE_CMD optionnel>"
+  },
+  "docs": {
+    "mockup_dir": "docs/mockup"
+  },
+  "marketing": {
+    "site": "auto"
   },
   "agents": {
     "idle_ttl_minutes": 15,
@@ -655,6 +983,7 @@ Valeurs a deriver si elles ne sont pas fournies explicitement :
 
 | Champ | Derivation |
 |-------|-----------|
+| `template_version` | `{tag, commit}` du template effectivement deploye (`$LATEST_TAG`/`$LATEST_COMMIT` resolus en section "Fetch du Template depuis GitHub"). Ecrit/mis a jour a **chaque** fetch (init, sync, reinstallation) — seule copie durable (trackee git) de cette info, `TEMPLATE_claude/.template-source.json` etant gitignore avec le reste de `TEMPLATE_claude/`. Sert a detecter et reinstaller a l'identique si les fichiers template disparaissent (clone frais) sans forcer une mise a jour — voir section "Reinstallation des fichiers template" |
 | `team_name` | `<PROJECT_NAME>-team` (minuscules, tirets) |
 | `org` | `git remote get-url origin` → extraire l'organisation GitHub |
 | `project` | `git remote get-url origin` → extraire le nom du repo (sans `.git`) |
@@ -663,28 +992,60 @@ Valeurs a deriver si elles ne sont pas fournies explicitement :
 | `commands.lint` | Stack : `golangci-lint run` / `npm run lint` / `ruff check .` |
 | `commands.audit` | Stack : `govulncheck ./...` / `npm audit` / `pip-audit` |
 | `commands.typecheck` | Frontend TS : `npm run typecheck` / `tsc --noEmit` — vide sinon |
+| `commands.coverage` | Stack : `go test -cover ./...` / `npm run test -- --coverage` / `pytest --cov` |
+| `marketing.site` | Defaut `"auto"` : un site marketing est attendu (branche `gh-pages`, uniquement — `MARKETING/` en est le worktree git, jamais un dossier de la branche de code) ; s'il n'existe pas, l'agent marketing declenche une initialisation (questions de cadrage + maquette). `false` = ordre direct de ne pas avoir de site (le CDP dispatche `PREPARE ... — SANS SITE`) |
+| `docs.mockup_dir` | Defaut `docs/mockup` (dossier des maquettes validees — voir `context/COMMON.md` §14) |
+| `commands.test_fast` | Boucle DEV : tests hors tag `slow`. Stack : `go test -short ./...` / `npx vitest run --exclude "**/*.slow.*"` / `pytest -m "not slow"` — vide sinon (les dev-* retombent sur `commands.test_targeted`) |
+| `commands.test_targeted` | Tests d'un sous-ensemble, `{TARGETS}` = fichiers ou dossiers. Stack : `go test {TARGETS}` / `npx vitest run {TARGETS}` / `pytest {TARGETS}` |
+| `commands.smoke` | Optionnel : tests tagues `smoke` (verification post-deploy). Absent → `curl /health` |
+| `testing.components` | Composant → globs de sources (ex. `"http_server": ["server-go/internal/server/**"]`) — sert a selectionner les NR impactees (`context/COMMON.md` 15.3). Derive de l'arborescence detectee (Etape 0) ; a defaut, un composant par dossier de premier niveau de `src_dir` |
+| `testing.regression_at_qa` | Defaut `gated` (`gated` \| `parallel` \| `none`) — `context/COMMON.md` 15.3 |
+| `testing.full_regression_at` | Defaut `qualif` (`qualif` \| `build` \| `prod`) — `context/COMMON.md` 15.4 |
+| `testing.coverage_min` | Defaut `70` (seuil minimal de couverture, en %) |
+| `testing.lot_max_tests` | Defaut `50` (nombre max de cas de test par lot ; QA execute et rapporte lot par lot) |
+| `src_dir` | Detection Etape 0 (repertoire source principal) ou stack par defaut : `src`, `cmd`... |
+| `version_file` | Fichier source de verite de la version (ex: `package.json`, `config.json`, `VERSION`) |
+| `infrastructure.environments` | Defaut `[QUALIF, PROD]` (Etape 8, question 9bis) ; `publish.mode` = `promote` pour tous sauf le dernier (`rebuild-ci`) ; `deploy.mechanism` reprend la reponse a la question 9 pour chaque environnement, sauf personnalisation explicite |
+| Nom de fichier des environnements | `infrastructure.environments[].name` normalise : minuscules, espaces/underscores → tirets (ex. `PRE-PROD` → `pre-prod`) — utilise pour `.claude/agents/environments/{publish,deploy}.<nom>.template.md` (section 3bis) |
 
 ### 2. Agents dev-*
 
 | Stack | Template Source | Destination |
 |-------|-----------------|-------------|
-| Go | `TEMPLATE_claude/templates/dev-backend-go.md` | `.claude/agents/dev-backend.md` |
-| Node.js | `TEMPLATE_claude/templates/dev-backend-node.md` | `.claude/agents/dev-backend.md` |
-| Python | `TEMPLATE_claude/templates/dev-backend-python.md` | `.claude/agents/dev-backend.md` |
-| React | `TEMPLATE_claude/templates/dev-frontend-react.md` | `.claude/agents/dev-frontend.md` |
-| Vue.js | `TEMPLATE_claude/templates/dev-frontend-vue.md` | `.claude/agents/dev-frontend.md` |
-| ESP32 | `TEMPLATE_claude/templates/dev-firmware-esp32.md` | `.claude/agents/dev-firmware.md` |
-| Plugin (toute plateforme) | `TEMPLATE_claude/templates/dev-plugin.md` | `.claude/agents/dev-plugin.md` |
+| Go | `TEMPLATE_claude/templates/dev-backend-go.md` | `.claude/agents/dev-backend.template.md` |
+| Node.js | `TEMPLATE_claude/templates/dev-backend-node.md` | `.claude/agents/dev-backend.template.md` |
+| Python | `TEMPLATE_claude/templates/dev-backend-python.md` | `.claude/agents/dev-backend.template.md` |
+| React | `TEMPLATE_claude/templates/dev-frontend-react.md` | `.claude/agents/dev-frontend.template.md` |
+| Vue.js | `TEMPLATE_claude/templates/dev-frontend-vue.md` | `.claude/agents/dev-frontend.template.md` |
+| ESP32 | `TEMPLATE_claude/templates/dev-firmware-esp32.md` | `.claude/agents/dev-firmware.template.md` |
+| Plugin (toute plateforme) | `TEMPLATE_claude/templates/dev-plugin.md` | `.claude/agents/dev-plugin.template.md` |
+
+> Même convention que les agents génériques (§ précédent) : déployé en `.template.md`,
+> avec un compagnon `.md` optionnel pour les adaptations projet.
 
 ### 3. Workflow CI/CD
 
-Copier depuis `TEMPLATE_claude/templates/workflows/` vers `.github/workflows/release.yml`
-et remplacer les placeholders :
+Le pipeline de release n'est plus copie d'un modele : il est **audite s'il existe, genere sinon**, selon le
+contrat de `TEMPLATE_claude/agents/infra.md` section 3bis (exigences C1 a C9). Si l'utilisateur a repondu
+« Aucun » a l'Etape 7, ne rien faire.
 
-| Stack | Template |
-|-------|----------|
-| Go + React/Vue | `TEMPLATE_claude/templates/workflows/release-go-react.yml` |
-| Autres | Generer un workflow minimal adapte |
+1. **Detecter** : `.github/workflows/*.y*ml`, `.gitlab-ci.yml`.
+2. **Pipeline existant → audit** : evaluer C1-C9 (verdict `CONFORME` / `ECART` / `NON APPLICABLE`, fichier et ligne
+   cites), afficher le tableau, puis AskUserQuestion :
+   - Corriger les ecarts (Recommande) — patch minimal, diff affiche et valide avant ecriture
+   - Garder tel quel — ecarts consignes dans le rapport final (un ecart C1/C5 reste signale comme bloquant
+     pour le mode `rebuild-ci`)
+   - Regenerer — remplace le pipeline apres sauvegarde (`.bak`)
+   Ne jamais ecraser ni modifier sans reponse.
+3. **Aucun pipeline → generation** : composer le pipeline a partir de `project-config.json` (stack, livrables,
+   `version_file`, `commands.*`) en suivant le contrat, l'afficher, le faire valider (AskUserQuestion :
+   Ecrire / Modifier / Annuler), l'ecrire a `infrastructure.environments[].publish.pipeline`
+   (par defaut `.github/workflows/release.yml`), puis le valider syntaxiquement (`actionlint` si present).
+   `TEMPLATE_claude/templates/workflows/release-go-react.yml` sert de **reference de niveau**, pas de modele.
+4. Les evolutions ulterieures (nouveau livrable, changement de stack) passent par l'agent `infra`
+   (Mode Modification) ; son Mode Validation rejoue l'audit avant `PUBLISH PROD`.
+
+Placeholders de l'exemple de reference (informatif) :
 
 | Placeholder | Exemple |
 |-------------|---------|
@@ -698,6 +1059,150 @@ et remplacer les placeholders :
 | `{GO_VERSION}` | `1.22` |
 | `{NODE_VERSION}` | `20` |
 | `{MIN_BINARY_SIZE}` | `5242880` |
+
+### 3bis. Fichiers d'environnement (publish/deploy par environnement)
+
+Pour chaque entree d'`infrastructure.environments[]` (generee a l'Etape 8 ou par la migration
+de schema, voir section "Migration du schema `infrastructure`") : copier la source generique
+correspondante depuis `TEMPLATE_claude/templates/environments/` vers
+`.claude/agents/environments/{publish,deploy}.<env>.template.md`, ou `<env>` est le nom de
+l'environnement normalise (minuscules, espaces/underscores → tirets — ex. `PRE-PROD` →
+`pre-prod`).
+
+Selection de la source, par mecanisme (pas par nom d'environnement) :
+
+| Champ | Valeur | Source |
+|-------|--------|--------|
+| `publish.mode` | `promote` | `TEMPLATE_claude/templates/environments/publish-promote.md` |
+| `publish.mode` | `rebuild-ci` | `TEMPLATE_claude/templates/environments/publish-rebuild-ci.md` |
+| `deploy.mechanism` | `docker-compose` | `TEMPLATE_claude/templates/environments/deploy-docker-compose.md` |
+| `deploy.mechanism` | `kubernetes` ou `helm` | `TEMPLATE_claude/templates/environments/deploy-kubernetes-helm.md` |
+| `deploy.mechanism` | `serverless` | `TEMPLATE_claude/templates/environments/deploy-serverless.md` |
+| `deploy.mechanism` | `vps` | `TEMPLATE_claude/templates/environments/deploy-vps.md` |
+| `deploy.mechanism` | `paas` | `TEMPLATE_claude/templates/environments/deploy-paas.md` |
+| `deploy.mechanism` | `cloud-run` | `TEMPLATE_claude/templates/environments/deploy-cloud-run.md` |
+
+Detection best-effort des variables deja referencees dans les fichiers existants du projet
+(noms uniquement — **aucune valeur n'est jamais lue ni copiee**, seuls les motifs `${VAR}` et
+`secrets.VAR` sont extraits) :
+
+```bash
+scan_var_names() {
+  [ "$#" -eq 0 ] && return
+  grep -ohE '\$\{[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*|secrets\.[A-Za-z_][A-Za-z0-9_]*' "$@" 2>/dev/null \
+    | sed -E 's/^\$\{?//; s/^secrets\.//' | sort -u
+}
+# Ajoute les noms absents a un .env.example existant (touch si absent), jamais de valeur,
+# jamais de ligne existante touchee. Ecrit un en-tete seulement si au moins un nom est ajoute.
+merge_env_example() {
+  local file="$1" header="$2"; shift 2
+  touch "$file"
+  local added=0
+  for v in "$@"; do
+    [ -n "$v" ] || continue
+    grep -q "^${v}=" "$file" 2>/dev/null && continue
+    if [ "$added" -eq 0 ]; then printf '\n%s\n' "$header" >> "$file"; fi
+    echo "${v}=" >> "$file"
+    added=$((added + 1))
+  done
+  echo "$added"
+}
+
+# Global (fichiers sans suffixe d'environnement) -> .env.example a la racine
+GLOBAL_FILES=$(ls docker-compose.yml docker-compose.yaml Dockerfile .github/workflows/*.y*ml 2>/dev/null)
+GLOBAL_VARS=$(scan_var_names $GLOBAL_FILES)
+if [ -n "$GLOBAL_VARS" ]; then
+  N=$(merge_env_example .env.example \
+    "# Variables detectees dans les fichiers existants du projet (docker-compose.yml, workflows...) — a verifier manuellement, aucune valeur lue ni copiee :" \
+    $GLOBAL_VARS)
+  [ "$N" -gt 0 ] && echo "  ✓ .env.example (racine) enrichi de $N variable(s) detectee(s) — a verifier manuellement"
+fi
+```
+
+```bash
+mkdir -p .claude/agents/environments
+jq -c '.infrastructure.environments[]' .claude/project-config.json | while read -r ENV; do
+  NAME=$(echo "$ENV" | jq -r '.name')
+  ENV_LOWER=$(echo "$NAME" | tr '[:upper:] _' '[:lower:]--')
+  PUB_MODE=$(echo "$ENV" | jq -r '.publish.mode')
+  DEP_MECH=$(echo "$ENV" | jq -r '.deploy.mechanism')
+  PUB_TARGET=$(echo "$ENV" | jq -r '.publish.target // .publish.trigger // ""')
+  CI_PIPELINE=$(echo "$ENV" | jq -r '.publish.pipeline // ""')
+  DEP_TARGET=$(echo "$ENV" | jq -r '.deploy.target // ""')
+
+  case "$PUB_MODE" in
+    promote)     PUB_SRC="TEMPLATE_claude/templates/environments/publish-promote.md" ;;
+    rebuild-ci)  PUB_SRC="TEMPLATE_claude/templates/environments/publish-rebuild-ci.md" ;;
+  esac
+  case "$DEP_MECH" in
+    docker-compose)        DEP_SRC="TEMPLATE_claude/templates/environments/deploy-docker-compose.md" ;;
+    kubernetes|helm)       DEP_SRC="TEMPLATE_claude/templates/environments/deploy-kubernetes-helm.md" ;;
+    serverless)            DEP_SRC="TEMPLATE_claude/templates/environments/deploy-serverless.md" ;;
+    vps)                   DEP_SRC="TEMPLATE_claude/templates/environments/deploy-vps.md" ;;
+    paas)                  DEP_SRC="TEMPLATE_claude/templates/environments/deploy-paas.md" ;;
+    cloud-run)             DEP_SRC="TEMPLATE_claude/templates/environments/deploy-cloud-run.md" ;;
+  esac
+
+  sed -e "s|{ENV_NAME_LOWER}|${ENV_LOWER}|g" -e "s|{ENV_NAME}|${NAME}|g" \
+      -e "s|{PUBLISH_TARGET}|${PUB_TARGET}|g" -e "s|{CI_PIPELINE}|${CI_PIPELINE}|g" \
+      "$PUB_SRC" > ".claude/agents/environments/publish.${ENV_LOWER}.template.md"
+  sed -e "s|{ENV_NAME_LOWER}|${ENV_LOWER}|g" -e "s|{ENV_NAME}|${NAME}|g" \
+      -e "s|{PUBLISH_TARGET}|${PUB_TARGET}|g" -e "s|{DEPLOY_TARGET}|${DEP_TARGET}|g" \
+      "$DEP_SRC" > ".claude/agents/environments/deploy.${ENV_LOWER}.template.md"
+  echo "  ✓ fichiers d'environnement generes pour $NAME (publish: $PUB_MODE, deploy: $DEP_MECH)"
+
+  # Variables attendues (union publish + deploy) -> <env>.env.example, committe, valeurs vides.
+  # Le <env>.env reel (valeurs completees) n'est jamais genere automatiquement — voir
+  # agents/deploy.md section "Fichiers d'Environnement".
+  case "$PUB_MODE" in
+    promote)     PUB_VARS="REGISTRY_USER REGISTRY_PASSWORD" ;;
+    rebuild-ci)  PUB_VARS="" ;;  # secrets geres cote CI, pas dans .env local
+  esac
+  case "$DEP_MECH" in
+    docker-compose) DEP_VARS="REGISTRY_USER REGISTRY_PASSWORD SSH_KEY_PATH" ;;
+    kubernetes|helm) DEP_VARS="KUBE_CONTEXT KUBECONFIG" ;;
+    serverless)     DEP_VARS="AWS_PROFILE VERCEL_TOKEN NETLIFY_AUTH_TOKEN" ;;
+    vps)            DEP_VARS="SSH_KEY_PATH" ;;
+    paas)           DEP_VARS="HEROKU_API_KEY RAILWAY_TOKEN RENDER_API_KEY" ;;
+    cloud-run)      DEP_VARS="GCP_PROJECT GOOGLE_APPLICATION_CREDENTIALS" ;;
+  esac
+
+  ENV_EXAMPLE=".claude/agents/environments/${ENV_LOWER}.env.example"
+  {
+    echo "# Variables specifiques a $NAME — voir agents/deploy.md section \"Fichiers d'Environnement\"."
+    echo "# Copier en ${ENV_LOWER}.env (jamais commite) et completer les valeurs."
+    for v in $(echo "$PUB_VARS $DEP_VARS" | tr ' ' '\n' | sort -u); do
+      [ -n "$v" ] && echo "$v="
+    done
+  } > "$ENV_EXAMPLE"
+  echo "  ✓ $ENV_EXAMPLE genere"
+
+  # Detection par environnement — fichiers dont le nom contient <env> (docker-compose.prod.yml,
+  # values-prod.yaml...), meme regles que la detection globale ci-dessus.
+  PER_ENV_FILES=$(find . -maxdepth 3 \( -iname "*${ENV_LOWER}*.yml" -o -iname "*${ENV_LOWER}*.yaml" \) \
+    -not -path "*/node_modules/*" -not -path "*/TEMPLATE_claude/*" -not -path "*/.git/*" \
+    -not -path "*/build/*" 2>/dev/null)
+  PER_ENV_VARS=$(scan_var_names $PER_ENV_FILES)
+  if [ -n "$PER_ENV_VARS" ]; then
+    N=$(merge_env_example "$ENV_EXAMPLE" \
+      "# Variables detectees dans les fichiers existants pour $NAME — a verifier manuellement, aucune valeur lue ni copiee :" \
+      $PER_ENV_VARS)
+    [ "$N" -gt 0 ] && echo "  ✓ $ENV_EXAMPLE enrichi de $N variable(s) detectee(s) pour $NAME"
+  fi
+done
+```
+
+> Compagnons optionnels `publish.<env>.md` / `deploy.<env>.md` : jamais generes automatiquement,
+> crees manuellement par le projet pour ses propres adaptations (memes conventions que les
+> compagnons d'agents, voir § precedent).
+>
+> `<env>.env.example` est committe (noms de variables, valeurs vides) ; `<env>.env` (valeurs
+> reelles) est gitignore et n'est jamais cree automatiquement — le projet le cree manuellement
+> a partir du `.example`. Meme convention pour `.env`/`.env.example` a la racine (variables
+> globales, applicatif ET infra, communes a tous les environnements) : `/init-project` le
+> cree/enrichit uniquement s'il detecte des variables referencees dans des fichiers existants
+> (ci-dessus) — jamais un fichier vide invente sans raison — et ne gere jamais `.env` (valeurs
+> reelles), a la charge du projet.
 
 ### 4. Application des placeholders dans les commandes et agents deployes
 
@@ -715,7 +1220,11 @@ TEST_CMD=$(jq -r '.commands.test      // ""'         .claude/project-config.json
 LINT_CMD=$(jq -r '.commands.lint      // ""'         .claude/project-config.json)
 AUDIT_CMD=$(jq -r '.commands.audit    // ""'         .claude/project-config.json)
 TYPECHECK_CMD=$(jq -r '.commands.typecheck // ""'    .claude/project-config.json)
+COVERAGE_CMD=$(jq -r '.commands.coverage // ""'      .claude/project-config.json)
 PLUGIN_PLATFORM=$(jq -r '.stack.plugin.platform // ""' .claude/project-config.json)
+SRC_DIR=$(jq -r '.src_dir // ""'                     .claude/project-config.json)
+VERSION_FILE=$(jq -r '.version_file // ""'           .claude/project-config.json)
+REPO_URL=$(git remote get-url origin 2>/dev/null | sed -E 's#^git@([^:]+):#https://\1/#; s#\.git$##')
 ```
 
 Echapper les caracteres speciaux sed (`&`, `\`, `|`) dans les valeurs de commandes
@@ -728,12 +1237,14 @@ TEST_CMD_ESC=$(escape_sed "$TEST_CMD")
 LINT_CMD_ESC=$(escape_sed "$LINT_CMD")
 AUDIT_CMD_ESC=$(escape_sed "$AUDIT_CMD")
 TYPECHECK_CMD_ESC=$(escape_sed "$TYPECHECK_CMD")
+COVERAGE_CMD_ESC=$(escape_sed "$COVERAGE_CMD")
 ```
 
-Appliquer la substitution sur les fichiers deployes (commandes + agents generiques) :
+Appliquer la substitution sur les fichiers deployes (commandes + agents generiques + contextes partages) :
 
 ```bash
-for f in .claude/commands/*.md .claude/agents/*.template.md; do
+for f in .claude/commands/*.md .claude/agents/*.template.md .claude/commands/context/*.template.md .claude/agents/context/*.template.md .claude/agents/environments/*.template.md; do
+  [[ -f "$f" ]] || continue
   name=$(basename "$f")
   [[ "$name" == "init-project.md" ]] && continue  # contient des {VAR} d'exemple — ne pas substituer
   sed -i \
@@ -746,7 +1257,11 @@ for f in .claude/commands/*.md .claude/agents/*.template.md; do
     -e "s|{LINT_CMD}|${LINT_CMD_ESC}|g"          \
     -e "s|{AUDIT_CMD}|${AUDIT_CMD_ESC}|g"        \
     -e "s|{TYPECHECK_CMD}|${TYPECHECK_CMD_ESC}|g" \
+    -e "s|{COVERAGE_CMD}|${COVERAGE_CMD_ESC}|g"  \
     -e "s|{PLUGIN_PLATFORM}|${PLUGIN_PLATFORM}|g" \
+    -e "s|{SRC_DIR}|${SRC_DIR}|g"                \
+    -e "s|{VERSION_FILE}|${VERSION_FILE}|g"      \
+    -e "s|{REPO_URL}|${REPO_URL}|g"              \
     "$f"
   echo "  ✓ placeholders appliques dans $name"
 done
@@ -769,9 +1284,87 @@ sed \
   TEMPLATE_claude/CLAUDE_TEMPLATE.md > CLAUDE.md
 echo "✓ CLAUDE.md généré"
 
-# .gitignore projet
-cp TEMPLATE_claude/gitignore-for-projects .gitignore
+# .gitignore projet — jamais ecrase : s'il existe deja, fusion non destructive
+# (les lignes ajoutees par le projet sont conservees, seules les lignes template absentes sont ajoutees)
+if [ -f .gitignore ]; then
+  grep -vE '^\s*(#|$)' TEMPLATE_claude/gitignore-for-projects | while IFS= read -r l; do
+    grep -qxF "$l" .gitignore || echo "$l" >> .gitignore
+  done
+else
+  cp TEMPLATE_claude/gitignore-for-projects .gitignore
+fi
 ```
+
+Puis appliquer la section **"Site marketing — worktree `gh-pages`"** (detection d'un `MARKETING/` deja suivi).
+
+#### Dossier des maquettes
+
+Creer le squelette du dossier des maquettes (idempotent — ne jamais ecraser un fichier existant ;
+egalement execute a la reinitialisation d'un projet existant qui n'a pas encore `docs.mockup_dir`
+ni `INDEX.md`) :
+
+```bash
+MOCKUP_DIR=$(jq -r '.docs.mockup_dir // "docs/mockup"' .claude/project-config.json)
+mkdir -p "$MOCKUP_DIR"
+
+[ -f "$MOCKUP_DIR/INDEX.md" ] || cat > "$MOCKUP_DIR/INDEX.md" <<'INDEX_EOF'
+# Index des maquettes
+
+> Tenu exclusivement par le CDP — convention : `context/COMMON.md` section 14.
+
+## Actives
+| Composant | Feature | Fichier | Version | Relation |
+|-----------|---------|---------|---------|----------|
+
+## Obsolètes
+| Fichier | Remplacée par | Version |
+|---------|---------------|---------|
+INDEX_EOF
+
+[ -f "$MOCKUP_DIR/DECISIONS.md" ] || cat > "$MOCKUP_DIR/DECISIONS.md" <<'DECISIONS_EOF'
+# Contraintes de conception
+
+> Contraintes durables issues des refus/corrections de l'utilisateur, par composant.
+> Le planner les respecte, QA les vérifie. Tenu par le CDP.
+DECISIONS_EOF
+```
+
+Si `docs.mockup_dir` est absent de `project-config.json` (projet existant), l'ajouter avec la valeur par defaut
+(migration additive, sans autre modification du fichier).
+
+#### Index des tests
+
+Creer `tests/INDEX.md` et `tests/METRICS.md` (idempotent — ne jamais ecraser un fichier existant ;
+egalement execute a la reinitialisation d'un projet existant) :
+
+```bash
+mkdir -p tests
+
+[ -f tests/INDEX.md ] || cat > tests/INDEX.md <<'TESTS_INDEX_EOF'
+# Index des tests
+
+> Tests de specification ecrits par le test-writer, ranges en lots `<famille>/<theme>/<lot>/` ; statuts tenus par le CDP.
+> Le chemin porte l'identite ; cet index ne porte que l'etat : une ligne par lot (chemin termine par `/`),
+> plus des lignes fichier pour les exceptions (quarantaine). Lot sans ligne = `feature`.
+> Convention : `context/COMMON.md` section 15. Statuts : `feature` | `regression` | `quarantaine`.
+> Tags : `smoke`, `critical`, `slow`.
+
+| Chemin | Niveau | Composant | Feature | Statut | Tags |
+|--------|--------|-----------|---------|--------|------|
+TESTS_INDEX_EOF
+
+[ -f tests/METRICS.md ] || cat > tests/METRICS.md <<'TESTS_METRICS_EOF'
+# Metriques de tests
+
+> Une ligne par verdict QA (tenu par le CDP) — sert a mesurer le taux de retours dus a la regression.
+
+| Date | Milestone | Feature | Cycle | Verdict | feature | regression | quarantaine | environnement | flaky |
+|------|-----------|---------|-------|---------|---------|------------|-------------|---------------|-------|
+TESTS_METRICS_EOF
+```
+
+Si `testing.regression_at_qa`, `testing.full_regression_at`, `testing.coverage_min` ou `testing.lot_max_tests` sont absents de
+`project-config.json` (projet existant), les ajouter avec leurs valeurs par defaut (migration additive).
 
 #### Labels GitHub de suivi de phase
 
@@ -811,20 +1404,20 @@ fi
 Projet "<PROJECT_NAME>" initialise avec succes !
 
 Configuration :
-- Backend  : <BACKEND>
-- Frontend : <FRONTEND>
-- Database : <DATABASE>
-- CI/CD    : <CICD>
-- Deploy   : <DEPLOY>
+- Backend      : <BACKEND>
+- Frontend     : <FRONTEND>
+- Database     : <DATABASE>
+- CI/CD        : <CICD>
+- Environnements : <ENVIRONMENTS>  (ex: QUALIF -> PROD)
 
 Agents generes :
-- .claude/agents/dev-backend.md
-- .claude/agents/dev-frontend.md
+- .claude/agents/dev-backend.template.md
+- .claude/agents/dev-frontend.template.md
 
 Commandes disponibles :
 - /feature, /bugfix, /hotfix, /refactor
 - /review, /qa, /secu
-- /deploy qualif, /deploy prod
+- /build, /publish qualif|prod, /deploy qualif|prod
 - /milestone new/status/close
 - /backlog, /marketing
 - /progression, /context-audit
@@ -867,18 +1460,32 @@ Changements disponibles :
 
   → Aucun changement detecte            ← afficher si tout est INCHANGE
 
-Voulez-vous :
-a) Reconfigurer completement (ecrase la config)
-b) Modifier certains parametres
-c) Re-analyser le code (detecter les changements)
-d) Appliquer les mises a jour detectees
-e) Annuler
+AskUserQuestion : "Le projet est deja initialise — que veux-tu faire ?"
+- Appliquer les mises a jour detectees (Recommande si seuls des [+]/[~]/[!] sont listes) —
+  synchronise commandes/agents/contextes depuis TEMPLATE_claude/, conserve project-config.json
+- Reconfigurer completement — relance tout le questionnaire/workshop, ecrase project-config.json
+  existant
+- Re-analyser le code — relance la detection automatique de stack pour rafraichir le diagnostic
+  avant de choisir
+- Annuler — ne modifie rien
+(Pour modifier un seul parametre precis sans tout reconfigurer — preciser via "Autre")
 ```
 
 ### Option d : Appliquer les mises a jour detectees
 
 > Le fetch GitHub a deja ete effectue au pre-menu — `TEMPLATE_claude/` est a jour.
 > Cette option calcule le diff precis et deploie les changements dans `.claude/`.
+
+#### Etape d1c — Audit du pipeline CI/CD de release
+
+Appliquer l'etape "3. Workflow CI/CD" (sections Generation de la Configuration) en mode audit : detecter le
+pipeline, evaluer C1-C9 (`agents/infra.md` section 3bis), proposer corrections ou generation si absent. Ne rien
+modifier sans reponse de l'utilisateur ; ne pas re-poser l'Etape 7 si le systeme CI/CD est deja connu.
+
+#### Etape d1a — Site marketing : worktree `gh-pages`
+
+Appliquer la section **"Site marketing — worktree `gh-pages`"** (ajout de `MARKETING/` au `.gitignore` et
+proposition de migration si `MARKETING/` est suivi par la branche de code).
 
 #### Etape d1b — Migration : renommer les commandes legacy *.template.md → *.md
 
@@ -915,6 +1522,54 @@ Si `CUSTOMIZED_COMMANDS[]` non vide → informer l'utilisateur avant de continue
 Pour rétablir le template, supprimer le fichier .claude/commands/[nom].md et relancer l'option d.
 ```
 
+#### Etape d1c — Migration : renommer les contextes legacy `context/X.md` → `context/X.template.md`
+
+Même migration que l'étape M1c (v1/v2 → v3), applicable ici à un projet déjà en v3 mais synchronisé
+avant l'introduction du pattern template/compagnon pour `context/`. Sans effet si déjà migré.
+
+```bash
+for f in .claude/agents/context/*.md .claude/commands/context/*.md; do
+  [[ -f "$f" ]] || continue
+  dest="${f%.md}.template.md"
+  [[ -f "$dest" ]] && continue   # déjà migré
+  mv "$f" "$dest"
+  echo "  ✓ migration contexte : $(basename $f) → $(basename $dest)"
+done
+```
+
+#### Etape d1d — Vérification des fichiers d'environnement
+
+> ⚠ **SCOPE STRICT** : cette étape **crée uniquement les fichiers manquants** — comme
+> `dev-backend.template.md` (jamais resynchronisé automatiquement par l'option d, voir note
+> d3b), les fichiers `.claude/agents/environments/*.template.md` déjà présents ne sont **jamais**
+> modifiés ici, même si leur source `TEMPLATE_claude/templates/environments/` a changé. C'est un
+> filet de sécurité (éviter qu'`agents/deploy.md` référence un fichier inexistant), pas une
+> synchronisation complète — limitation assumée, à signaler dans le rapport si applicable.
+
+```bash
+if jq -e '.infrastructure.environments' .claude/project-config.json >/dev/null 2>&1; then
+  MISSING_ENV_FILES=()
+  jq -c '.infrastructure.environments[]' .claude/project-config.json | while read -r ENV; do
+    NAME=$(echo "$ENV" | jq -r '.name')
+    ENV_LOWER=$(echo "$NAME" | tr '[:upper:] _' '[:lower:]--')
+    for TASK in publish deploy; do
+      f=".claude/agents/environments/${TASK}.${ENV_LOWER}.template.md"
+      [[ -f "$f" ]] || MISSING_ENV_FILES+=("$TASK.$ENV_LOWER")
+    done
+  done
+fi
+```
+
+Si `MISSING_ENV_FILES[]` non vide → exécuter pour ces seules entrées manquantes la génération
+décrite en section "3bis. Fichiers d'environnement" (Génération de la Configuration), puis
+informer :
+
+```
+⚠ Fichiers d'environnement manquants générés : publish.qualif, deploy.qualif
+  (project-config.json déclare ces environnements mais les fichiers n'existaient pas encore —
+   vérifier/ajuster les cibles générées, voir "Fichiers d'Environnement" dans agents/deploy.md)
+```
+
 #### Etape d2 — Calculer les noms deployes attendus
 
 ```bash
@@ -949,12 +1604,12 @@ DEPLOYED_COMMANDS=$(
 DEPLOYED_AGENTS=$(ls .claude/agents/*.template.md 2>/dev/null \
   | xargs -I{} basename {} .template.md)
 
-# Contextes partagés (agents/context/ et commands/context/)
+# Contextes partagés (agents/context/ et commands/context/) — déployés en *.template.md
 # Comparer chaque fichier source avec le fichier déployé
 for src in TEMPLATE_claude/agents/context/*.md TEMPLATE_claude/commands/context/*.md; do
   [ -f "$src" ] || continue
   subdir=$(echo "$src" | grep -o 'agents/context\|commands/context')
-  dest=".claude/${subdir}/$(basename $src)"
+  dest=".claude/${subdir}/$(basename $src .md).template.md"
   if [ ! -f "$dest" ]; then
     statut="NOUVEAU"
   elif ! cmp -s "$src" "$dest"; then
@@ -974,6 +1629,48 @@ Pour chaque fichier compare, determiner le statut :
 | `MODIFIE` | Present dans les deux, contenu different |
 | `INCHANGE` | Present dans les deux, contenu identique |
 | `RELIQUAT` | Present dans DEPLOYED, absent de EXPECTED |
+
+#### Etape d3b — Comparer la table "Agents Disponibles" (teammates)
+
+> ⚠ **SCOPE STRICT** : cette comparaison (et sa mise à jour en d5d) ne porte que sur le
+> *texte* de la table `## Agents Disponibles` dans `CLAUDE.md`. Elle ne crée, ne supprime
+> et ne modifie **jamais** `.claude/agents/*.md` ni `.claude/agents/*.template.md` — la liste
+> réelle des agents déployés pour le projet n'est jamais changée par cette étape. Un
+> `RELIQUAT` ou un `NOUVEAU` ici signale un écart de *documentation*, pas une action sur
+> les agents eux-mêmes.
+
+**Calculer les lignes attendues**, selon la stack déjà configurée dans `project-config.json`
+(les agents génériques sont toujours attendus, les agents `dev-*` seulement si la stack
+correspondante est configurée) :
+
+```bash
+BACKEND_LANG=$(jq -r '.stack.backend.language // ""'   .claude/project-config.json)
+FRONTEND_LANG=$(jq -r '.stack.frontend.language // ""' .claude/project-config.json)
+FRONTEND_FW=$(jq -r '.stack.frontend.framework // ""'  .claude/project-config.json)
+PLUGIN_PLATFORM=$(jq -r '.stack.plugin.platform // ""' .claude/project-config.json)
+BACKEND_TECH="$BACKEND_LANG"
+FRONTEND_TECH="${FRONTEND_FW:-$FRONTEND_LANG}"
+
+# Toujours attendus, independants de la stack
+EXPECTED_TEAMMATES=(planner test-writer code-reviewer qa doc-updater deployer security infra)
+[[ -n "$BACKEND_LANG"    ]] && EXPECTED_TEAMMATES+=(dev-backend)
+[[ -n "$FRONTEND_LANG"   ]] && EXPECTED_TEAMMATES+=(dev-frontend)
+[[ -n "$PLUGIN_PLATFORM" ]] && EXPECTED_TEAMMATES+=(dev-plugin)
+```
+
+**Lire la table courante** dans le `CLAUDE.md` du projet (section entre `## Agents Disponibles`
+et le prochain `---`) et la table source dans `TEMPLATE_claude/CLAUDE_TEMPLATE.md` (même
+section, avec `{BACKEND_TECH}`/`{FRONTEND_TECH}`/`{PLUGIN_PLATFORM}` substitués par les
+valeurs ci-dessus).
+
+Pour chaque agent, determiner le statut :
+
+| Statut | Critere |
+|--------|---------|
+| `NOUVEAU` | Dans `EXPECTED_TEAMMATES`, absent de la table du projet |
+| `MODIFIE` | Present dans les deux, mais Rôle/Fichier/Spawn different de l'attendu |
+| `INCHANGE` | Present dans les deux, ligne identique |
+| `RELIQUAT` | Present dans la table du projet, absent de `EXPECTED_TEAMMATES` (stack retiree, ou agent qui n'existe plus dans le template) |
 
 #### Etape d4 — Presenter le rapport
 
@@ -1001,15 +1698,23 @@ Synchronisation depuis github.com/<repo>
   [~] TEAMMATES_PROTOCOL — <explication courte>   ← modifie
   [=] COMMON, DEV_COMMON, GITHUB, VALIDATION_COMMON, CDP_WORKFLOWS, DEVELOPMENT, QUALITY (7 inchangés)
 
+  Teammates (table "Agents Disponibles" — documentation uniquement, agents non touchés) :
+  [+] dev-plugin                          ← nouveau (stack plugin configurée, absente de la table)
+  [~] dev-backend  — tech passée de Node.js à Go
+  [!] dev-firmware                        ← RELIQUAT (stack firmware retirée du projet)
+  [=] planner, test-writer, code-reviewer, qa, doc-updater, deployer, security, infra (8 inchangés)
+
   Nouveaux   : N
   Modifies   : N
   Inchanges  : N
   Reliquats  : N  ← a supprimer
 
-Actions :
-  [A] Tout appliquer (nouveaux + modifies) et supprimer les reliquats
-  [B] Appliquer uniquement les nouveaux et modifies (garder les reliquats)
-  [C] Annuler
+AskUserQuestion : "Comment appliquer cette synchronisation ?"
+- Tout appliquer et supprimer les reliquats (Recommande) — deploie nouveaux/modifies, supprime
+  les fichiers reliquats listes ci-dessus
+- Appliquer uniquement les nouveaux et modifies — deploie sans toucher aux reliquats (a nettoyer
+  manuellement plus tard)
+- Annuler — ne deploie rien, la synchronisation s'arrete ici
 ```
 
 #### Etape d5 — Appliquer selon le choix
@@ -1039,24 +1744,25 @@ for src in TEMPLATE_claude/agents/*.md; do
   fi
 done
 
-# Contextes partagés — copier fichier par fichier pour reporter les changements
+# Contextes partagés — copier fichier par fichier pour reporter les changements, déployé en *.template.md
 for src in TEMPLATE_claude/agents/context/*.md TEMPLATE_claude/commands/context/*.md; do
   [ -f "$src" ] || continue
   subdir=$(echo "$src" | grep -o 'agents/context\|commands/context')
-  dest=".claude/${subdir}/$(basename $src)"
+  dest=".claude/${subdir}/$(basename $src .md).template.md"
   mkdir -p ".claude/${subdir}"
   if ! cmp -s "$src" "$dest" 2>/dev/null; then
     cp "$src" "$dest"
-    echo "  ✓ ${subdir}/$(basename $src) mis a jour"
+    echo "  ✓ ${subdir}/$(basename $dest) mis a jour"
   fi
 done
 ```
 
 **Etape systematique — Appliquer les placeholders sur TOUS les fichiers deployes :**
 
-Scanner l'integralite de `.claude/commands/*.md`, `.claude/commands/context/*.md`, `.claude/agents/*.template.md` et `.claude/agents/context/*.md` et appliquer
+Scanner l'integralite de `.claude/commands/*.md`, `.claude/commands/context/*.template.md`, `.claude/agents/*.template.md` et `.claude/agents/context/*.template.md` et appliquer
 la procedure "Application des placeholders" (section 4 ci-dessus) sur tous les fichiers,
-en lisant les valeurs depuis `.claude/project-config.json` existant.
+en lisant les valeurs depuis `.claude/project-config.json` existant. Les compagnons `context/*.md`
+et `agents/*.md` ne sont pas scannés — ce sont des fichiers projet sans `{VAR}` a substituer.
 
 > **Exclure `init-project.md`** de cette substitution (contient des `{VAR}` d'exemple
 > dans ses blocs de code — les remplacer le corromprait).
@@ -1068,9 +1774,9 @@ Le fetcher depuis la racine du repo GitHub pour que les projets existants reçoi
 les mises à jour (Message de Fin, corrections de bugs, etc.) :
 
 ```bash
-gh api repos/$TEMPLATE_REPO/contents/init-project.md \
+gh api "repos/$TEMPLATE_REPO/contents/init-project.md?ref=$LATEST_COMMIT" \
   --jq '.content' | base64 -d > .claude/commands/init-project.md
-echo "  ✓ .claude/commands/init-project.md mis à jour (depuis racine repo)"
+echo "  ✓ .claude/commands/init-project.md mis à jour (depuis le tag $LATEST_TAG)"
 ```
 
 **Option A uniquement — Supprimer les reliquats :**
@@ -1094,16 +1800,19 @@ for name in $DEPLOYED_AGENTS; do
 done
 ```
 
-#### Etape d5b — Détection de dérive template/projet
+#### Etape d5b — Détection de doublons (règles identiques ou couvertes)
 
-Exécutée à **chaque sync** pour détecter les dérives dans les deux sens.
-Silencieuse si aucun `*.md` compagnon n'existe ou si tout est propre.
+Exécutée à **chaque sync** sur les fichiers compagnons `*.md`. Détecte les règles d'un
+compagnon devenues redondantes avec le template — un fichier entier ou certaines règles
+seulement — pour proposer leur retrait. Ne traite que la redondance ; les règles qui
+disent autre chose que le template sur un même sujet relèvent de l'étape d5c (conflits).
 
 **Détection des fichiers compagnons :**
 
 ```bash
 COMPANIONS=()
-for tmpl in .claude/agents/*.template.md; do
+for tmpl in .claude/agents/*.template.md .claude/agents/context/*.template.md .claude/commands/context/*.template.md; do
+  [[ -f "$tmpl" ]] || continue
   base=$(basename "$tmpl" .template.md)
   dir=$(dirname "$tmpl")
   companion="$dir/$base.md"
@@ -1111,49 +1820,53 @@ for tmpl in .claude/agents/*.template.md; do
 done
 ```
 
-Si `COMPANIONS` est vide → sauter cette étape silencieusement.
+Si `COMPANIONS` est vide → sauter d5b et d5c silencieusement.
 
-**Analyse de chaque fichier compagnon :**
+**Analyse de chaque fichier compagnon, à la granularité de la règle/section :**
 
-Pour chaque `xxx.md`, lire les deux fichiers et détecter les dérives dans les **deux sens** :
+Pour chaque `xxx.md`, comparer avec `xxx.template.md` :
 
 | Statut | Critère | Signal |
 |--------|---------|--------|
 | `IDENTIQUE` | `xxx.md` quasiment identique au template | Duplication inutile — peut être supprimé |
 | `DERIVE-TEMPLATE` | Contenu de `xxx.md` couvert par le nouveau template | Template a rattrapé le projet — simplification possible |
-| `DERIVE-PROJET` | Contenu ajouté dans `xxx.md` non présent dans le template | Dérive projet — vérifier que c'est intentionnel |
-| `PROPRE` | `xxx.md` contient uniquement du contenu spécifique, sans overlap | Aucune action requise |
+| `MIXTE` | `xxx.md` mélange des règles désormais couvertes par le template et des règles propres au projet | Retirer uniquement les règles redondantes, conserver le reste |
+| `PROPRE` | `xxx.md` contient uniquement du contenu spécifique, sans overlap | Rien à retirer ici — passer à l'étape d5c |
 
-> **`DERIVE-TEMPLATE`** : une mise à jour du template intègre nativement ce que le projet
-> avait customisé → la règle dans `xxx.md` est devenue redondante.
->
-> **`DERIVE-PROJET`** : `xxx.md` a grossi depuis la dernière sync → vérifier que les ajouts
-> sont intentionnels et non des duplications accidentelles.
+> La détection opère à la granularité de la règle/section, pas seulement du fichier
+> entier : dès qu'une règle présente dans `xxx.md` se retrouve (littéralement ou en
+> substance, **en disant la même chose**) dans `xxx.template.md`, elle peut être retirée
+> du compagnon — même si le reste du fichier reste `PROPRE`. Une règle qui traite du même
+> sujet mais dit autre chose n'est **pas** un doublon : c'est un conflit potentiel,
+> laissé à l'étape d5c.
 
 **Rapport (affiché uniquement si au moins un fichier non-PROPRE) :**
 
 ```
-Analyse drift template/projet :
+Analyse doublons template/projet :
 
   Commandes :
   [=] feature.md      — identique au template → peut être supprimé
   [↓] bugfix.md       — le template couvre maintenant "règle X" → simplification possible
-  [↑] deploy.md       — 2 sections ajoutées depuis la dernière sync → vérifier intentionnel
-  [*] backlog.md      — propre (contenu projet uniquement)
 
   Agents :
   [↓] cdp.md          — le template couvre maintenant "phase CLARIFICATION" → simplification possible
-  [↑] qa.md           — 1 section ajoutée → vérifier intentionnel
+  [~] marketing-release.md — règle "diff origin/gh-pages" désormais couverte, reste propre sinon
 
-  [=] N identiques  [↓] N simplifiables  [↑] N à vérifier  [*] N propres
+  Contextes (agents/context/ et commands/context/) :
+  [*] COMMON.md (commands) — propre (rien de redondant)
+
+  [=] N identiques  [↓] N simplifiables  [~] N mixtes  [*] N propres (→ d5c)
 ```
 
 **Actions proposées :**
 
 ```
-  [N] Nettoyer automatiquement (supprimer IDENTIQUES, extraire DERIVE-PROJET vers xxx.md épuré)
-  [I] Inspecter fichier par fichier
-  [S] Ignorer — continuer sans modification
+AskUserQuestion : "Comment traiter les doublons détectés entre template et fichiers projet ?"
+- Nettoyer automatiquement (Recommandé) — supprime les fichiers IDENTIQUES, retire les règles
+  couvertes des fichiers DERIVE-TEMPLATE/MIXTE, conserve le reste tel quel
+- Inspecter fichier par fichier — décide au cas par cas, fichier par fichier (voir Option I)
+- Ignorer — continue sans rien modifier, les doublons resteront signalés à la prochaine sync
 ```
 
 **Option N — Nettoyage automatique :**
@@ -1164,31 +1877,122 @@ rm "$companion"
 echo "  ✗ $(basename $companion) supprimé (identique au template)"
 ```
 
-Pour chaque fichier `DERIVE-PROJET` ou `MIXTE` :
-- Lire `xxx.md` (agent projet) et `xxx.template.md` (agent template)
-- Identifier les blocs présents dans `xxx.md` mais absents du template
-  (diff sémantique : sections ajoutées, règles supplémentaires, surcharges)
-- Réécrire `xxx.md` avec uniquement ces blocs
-- Confirmer : `"  ✓ $(basename $companion) — N blocs projet conservés"`
-
-Pour chaque fichier `DERIVE-TEMPLATE` :
-- Afficher la règle/section devenue redondante
-- Proposer de la retirer de `xxx.md` avec confirmation
+Pour chaque fichier `DERIVE-TEMPLATE` ou `MIXTE` :
+- Lire `xxx.md` et `xxx.template.md`
+- Identifier les règles de `xxx.md` qui disent la même chose qu'une règle du template
+- Retirer uniquement ces règles redondantes, conserver le reste tel quel
+- Confirmer : `"  ✓ $(basename $companion) — N règles redondantes retirées"`
 
 **Option I — Fichier par fichier :**
 
 Pour chaque fichier non-PROPRE, afficher le diff annoté et proposer l'action :
 ```
-[xxx.md] — dérive détectée
+[xxx.md] — doublons détectés
 
   [↓] Section "Règle X" — couverte par le template mis à jour → retirer ?
-  [↑] Section "Règle Y" — ajout projet non présent dans le template → conserver ?
 
-  [R] Retirer les redondances  [C] Conserver tel quel  [E] Editer manuellement
+AskUserQuestion : "Cette section est couverte par le template mis à jour — que faire ?"
+- Retirer les redondances (Recommandé) — supprime la section du compagnon, le template
+  s'applique seul désormais
+- Conserver tel quel — garde la section dans le compagnon malgré le recouvrement (sera
+  re-signalée aux prochaines sync)
+- Éditer manuellement — n'applique rien automatiquement, ouvre le fichier pour édition
 ```
 
 > Le système fonctionne correctement quelle que soit l'action choisie.
-> La dérive est un signal de maintenance, pas une erreur bloquante.
+> Un doublon est un signal de maintenance, pas une erreur bloquante.
+
+#### Etape d5c — Détection de conflits (règles incohérentes)
+
+Exécutée après d5b, sur le contenu restant des compagnons (fichiers `PROPRE` en entier,
+et la part non redondante des fichiers `DERIVE-TEMPLATE`/`MIXTE` une fois les doublons
+retirés). Contrairement à d5b (même règle en double), d5c cherche des règles qui portent
+sur le **même sujet** que le template mais disent **autre chose** — une incohérence, pas
+une simple règle spécifique au projet.
+
+**Analyse de chaque règle restante :**
+
+Pour chaque règle du compagnon, chercher si le template contient une règle sur le même
+sujet (même commande, même mécanisme, même chemin, même convention...) :
+
+| Statut | Critère | Signal |
+|--------|---------|--------|
+| `CONFLIT` | Le compagnon et le template traitent du même sujet mais se contredisent | Incohérence — nécessite un arbitrage |
+| `COHERENT` | Le compagnon ajoute du contenu spécifique sans contredire le template | Aucune action requise |
+
+> Exemple de `CONFLIT` : le template fixe le chemin qualif à `build/qualif_v<X.Y.Z>/`,
+> le compagnon documente encore `build/qualif/<X.Y.Z>/`. Exemple de `COHERENT` : le
+> compagnon ajoute une règle de nommage de branche propre au projet, absente du template
+> et qui ne le contredit pas.
+
+**Rapport (affiché uniquement si au moins un conflit détecté) :**
+
+```
+Analyse conflits template/projet :
+
+  [X] deploy.md — chemin qualif : template "build/qualif_v<ver>/" vs compagnon "build/qualif/<ver>/"
+  [X] cdp.md     — ordonnancement : template "QA parallèle à Review" vs compagnon "QA après Review"
+
+  2 conflits détectés — nécessitent un arbitrage.
+```
+
+Si aucun conflit → passer directement à l'étape d5d, sans afficher de rapport.
+
+**Arbitrage — un conflit à la fois :**
+
+```
+[deploy.md] Conflit détecté :
+
+  Template  (nouveau)  : "build/qualif_v<X.Y.Z>/"
+  Compagnon (projet)   : "build/qualif/<X.Y.Z>/"
+
+AskUserQuestion : "Lequel fait foi pour ce projet ?"
+- Le template (nouveau) — adapte/retire la règle du compagnon, le template s'applique seul
+- Le compagnon (projet) — dérogation projet assumée, conserve la règle telle quelle (sera
+  re-signalée en CONFLIT aux prochaines sync, c'est attendu)
+- Éditer manuellement — n'applique rien automatiquement, ouvre le fichier pour édition
+```
+
+- **[T]** : retirer ou réécrire la règle du compagnon pour qu'elle ne contredise plus le
+  template — le template s'applique alors sans override.
+- **[P]** : conserver la règle du compagnon telle quelle — dérogation projet volontaire,
+  pas une erreur. Elle sera re-signalée en `CONFLIT` aux prochaines sync tant qu'elle
+  diffère du template ; c'est attendu pour une dérogation assumée.
+- **[E]** : ouvrir le fichier pour édition manuelle, ne rien appliquer automatiquement.
+
+Confirmer chaque arbitrage : `"  ✓ $(basename $companion) — conflit '<sujet>' résolu ([T]/[P]/[E])"`
+
+> Un conflit non tranché (utilisateur ferme sans choisir) reste en l'état — il sera
+> re-signalé à la prochaine sync.
+
+#### Etape d5d — Mettre à jour la table "Agents Disponibles" dans CLAUDE.md
+
+> ⚠ **SCOPE STRICT** : identique au rappel de l'étape d3b — cette étape réécrit uniquement
+> le texte de la table `## Agents Disponibles` dans `CLAUDE.md`. Elle ne touche jamais
+> `.claude/agents/*.md` ni `.claude/agents/*.template.md`.
+
+Exécutée quand l'utilisateur choisit **A** ou **B** en d4 (jamais sous **C — Annuler**),
+à partir du statut calculé en d3b :
+
+- `NOUVEAU` → ajouter la ligne dans la table (Rôle/Fichier/Spawn attendus)
+- `MODIFIE` → remplacer la ligne existante par la version attendue
+- `INCHANGE` → ne rien faire
+- `RELIQUAT` → retirer la ligne uniquement sous **Option A** ; la conserver sous **Option B**
+
+```bash
+# Extraire la table courante (entre le titre et le prochain "---")
+awk '/^## Agents Disponibles/,/^---$/' CLAUDE.md > .claude/.teammates-table.tmp
+```
+
+Reconstruire la table ligne par ligne selon les statuts ci-dessus, puis réinjecter le
+résultat dans `CLAUDE.md` à la même position (même mécanique que l'étape d6 pour le bloc
+`TEAMLEADER_PROTOCOL`, mais bornée par le titre `## Agents Disponibles` et le `---` suivant
+plutôt que par des marqueurs HTML) :
+
+```bash
+rm -f .claude/.teammates-table.tmp
+echo "✓ CLAUDE.md — table Agents Disponibles mise à jour"
+```
 
 #### Etape d6 — Mettre à jour le bloc TEAMLEADER_PROTOCOL dans CLAUDE.md
 
@@ -1247,12 +2051,17 @@ Synchronisation terminee.
   Commandes mises a jour            : N
   Agents mis a jour                 : N
   Reliquats supprimes               : N
+  Doublons compagnons retires       : N (etape d5b)
+  Conflits compagnons arbitres      : N (etape d5c)
   CLAUDE.md bloc TEAMLEADER_PROTOCOL : mis à jour
+  CLAUDE.md table Agents Disponibles : mis à jour (N lignes — documentation uniquement)
   Labels GitHub                     : vérifiés (PLANNING, EN COURS, EN REVIEW, EN QA, DONE)
+  Schema infrastructure             : [convertit vers environments[] | deja a jour | inchange (refuse)]
 
   Fichiers PROJET preserves (non touches) :
-    ✓ CLAUDE.md (hors bloc TEAMLEADER_PROTOCOL)
-    ✓ .claude/project-config.json
+    ✓ CLAUDE.md (hors bloc TEAMLEADER_PROTOCOL et hors table Agents Disponibles)
+    ✓ .claude/project-config.json (hors migration ponctuelle du schema `infrastructure`, voir
+      section "Migration du schema `infrastructure`" — champs projet non touches sinon)
     ✓ .claude/memory/
-    ✓ .claude/agents/dev-*.md
+    ✓ .claude/agents/dev-*.md   (jamais modifiés par la sync de la table Agents Disponibles)
 ```

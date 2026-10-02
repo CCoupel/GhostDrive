@@ -330,3 +330,33 @@ Utilise `GetLogicalDrives()` (syscall Windows) pour déterminer les lettres occu
 Sur plateforme non-Windows, retourne `null`.
 
 Utilisation typique : alimenter le sélecteur de lettre de lecteur dans la page Paramètres.
+
+---
+
+## Fichiers
+
+### GetFileState
+
+```
+Signature : GetFileState(backendID string, localPath string) string
+Frontend  : window.go.App.GetFileState(backendID, localPath)
+Retour    : string — "L" | "P" | "U" | "S" | "C" | "E" | "X" | "" (inconnu)
+Erreur    : –
+```
+
+Retourne l'état de synchronisation d'un fichier pour un backend donné.
+
+| Code | Signification |
+|------|---------------|
+| `"L"` | Local seulement — jamais synchronisé |
+| `"P"` | Pending — en attente de synchronisation |
+| `"U"` | Uploading — transfert en cours |
+| `"S"` | Synced — fichier synchronisé (local == remote) |
+| `"C"` | Conflict — conflit détecté (résolu automatiquement par last-write-wins) |
+| `"E"` | Error — erreur de synchronisation |
+| `"X"` | Excluded — exclu explicitement |
+| `""` | Unknown — chemin non suivi ou backend inexistant |
+
+**Utilisation typique** : badges d'état dans l'explorateur UI ou vue de liste de fichiers.
+**Source** : `Engine.fileStates` (`sync.Map` maintenu par le moteur de synchronisation).
+**Issue** : #136

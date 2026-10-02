@@ -268,6 +268,47 @@ func (b *Backend) Delete(ctx context.Context, remote string) error {
 	return nil
 }
 
+// Rename performs an atomic rename of oldPath to newPath via os.Rename (#139).
+// Delegates to Move since both operations use os.Rename internally.
+func (b *Backend) Rename(ctx context.Context, oldPath, newPath string) error {
+	return b.Move(ctx, oldPath, newPath)
+}
+
+// Copy duplicates the local file at srcPath to dstPath using io.Copy (#140).
+func (b *Backend) Copy(ctx context.Context, srcPath, dstPath string) error {
+	absSrc, err := b.absPath(srcPath)
+	if err != nil {
+		return fmt.Errorf("local: copy %s → %s: %w", srcPath, dstPath, err)
+	}
+	absDst, err := b.absPath(dstPath)
+	if err != nil {
+		return fmt.Errorf("local: copy %s → %s: %w", srcPath, dstPath, err)
+	}
+
+	src, err := os.Open(absSrc)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("local: copy %s: %w", srcPath, ErrFileNotFound)
+		}
+		return fmt.Errorf("local: copy %s → %s: open src: %w", srcPath, dstPath, err)
+	}
+	defer src.Close()
+
+	if err := os.MkdirAll(filepath.Dir(absDst), 0755); err != nil {
+		return fmt.Errorf("local: copy %s → %s: mkdir: %w", srcPath, dstPath, err)
+	}
+	dst, err := os.Create(absDst)
+	if err != nil {
+		return fmt.Errorf("local: copy %s → %s: create dst: %w", srcPath, dstPath, err)
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("local: copy %s → %s: %w", srcPath, dstPath, err)
+	}
+	return nil
+}
+
 // Move renames or moves the entry at oldPath to newPath (both relative to
 // rootPath).  Returns ErrFileNotFound (wrapped) when oldPath does not exist.
 func (b *Backend) Move(ctx context.Context, oldPath, newPath string) error {

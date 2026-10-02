@@ -196,6 +196,72 @@ N'émet que si `Watch()` est disponible sur le backend — la dégradation graci
 
 ---
 
+## sync:conflict
+
+Émis quand un conflit est détecté entre la version locale et distante d'un fichier.
+Le conflit est auto-résolu (last-write-wins V1) — l'événement est informatif, non-bloquant.
+
+```
+Nom     : "sync:conflict"
+Payload : ConflictEvent
+Fréquence : Sur chaque conflit détecté lors de la réconciliation
+```
+
+**Payload** :
+```json
+{
+  "backendID":     "uuid-abc",
+  "path":          "documents/rapport.docx",
+  "localModTime":  "2026-05-23T10:00:00Z",
+  "remoteModTime": "2026-05-23T10:05:00Z",
+  "resolution":    "local-wins"
+}
+```
+
+**Champs** :
+| Champ | Type | Description |
+|-------|------|-------------|
+| `backendID` | `string` | UUID du backend concerné |
+| `path` | `string` | Chemin relatif du fichier en conflit |
+| `localModTime` | `string` | ISO-8601 — date de modification locale |
+| `remoteModTime` | `string` | ISO-8601 — date de modification distante |
+| `resolution` | `string` | `"local-wins"` ou `"remote-wins"` |
+
+**Usage frontend** : afficher un toast non-bloquant (auto-dismiss 5s) indiquant le conflit résolu.
+**Issue** : #144
+
+---
+
+## sync:file-state-changed
+
+Émis quand l'état d'un fichier change dans le cache `Engine.fileStates` (optionnel v2.2).
+
+```
+Nom     : "sync:file-state-changed"
+Payload : FileStateChangedEvent
+Fréquence : Sur chaque transition d'état (P→U→S, U→E, etc.)
+```
+
+**Payload** :
+```json
+{
+  "backendID": "uuid-abc",
+  "localPath": "C:\\GhostDrive\\MonNAS\\documents\\rapport.docx",
+  "state":     "U"
+}
+```
+
+**Champs** :
+| Champ | Type | Description |
+|-------|------|-------------|
+| `backendID` | `string` | UUID du backend |
+| `localPath` | `string` | Chemin local absolu du fichier |
+| `state` | `string` | Nouvel état — voir `GetFileState` pour les valeurs |
+
+**Issue** : #136 (optionnel v2.2 — implémentation du toast uniquement si temps disponible)
+
+---
+
 ## Tableau Récapitulatif
 
 | Événement | Émetteur | Consommateur | Fréquence |
@@ -204,6 +270,8 @@ N'émet que si `Watch()` est disponible sur le backend — la dégradation graci
 | `sync:progress` | SyncEngine | StatusPanel | Max 10/s |
 | `sync:file-event` | SyncEngine / Watcher | StatusPanel | Sur événement |
 | `sync:error` | SyncEngine | StatusPanel, TrayIcon | Sur erreur |
+| `sync:conflict` | SyncEngine (Reconciler) | StatusPanel, Toast | Sur conflit auto-résolu |
+| `sync:file-state-changed` | SyncEngine | Badges UI | Sur transition état fichier |
 | `backend:status-changed` | BackendManager | SettingsPanel, TrayIcon | Sur changement |
 | `placeholder:hydration-started` | PlaceholderManager | StatusPanel | Sur ouverture |
 | `placeholder:hydration-done` | PlaceholderManager | StatusPanel | Sur complétion |

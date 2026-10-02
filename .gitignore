@@ -126,3 +126,6 @@ TEMPLATE_claude/
 .claude/templates/
 # POC env (credentials)
 poc/.env
+
+# Site marketing : MARKETING/ = worktree git de gh-pages, jamais commite sur la branche de code
+MARKETING/

@@ -53,8 +53,14 @@ GhostDrive est un client Windows libre qui transforme n'importe quel backend de 
 - **Badges shell Windows** : états CF natifs ☁️ ✓✓ ⟳ ⚡ via CfSetInSyncState/CfSetPinState
 - **8 CF API bugs fixes** : normalisation chemins, BaseDirectoryPath, ALREADY_EXISTS, CfConvertToPlaceholder
 
-### V2.2/V2.3/V2.4 — 🔜 Roadmap
-- **V2.2** : Workflow Objets (rename/move natif, copier état complet, data-loss bugs, avertissement Conflict)
+### V2.2 — ✅ Livré (2026-05-23)
+- **Workflow Objets** : renommage/copie natif sur le backend, détection automatique via watcher avec fallback
+- **FileState enrichi** : états L (Local), C (Conflict), X (Excluded) avec badges CF API associés
+- **Notifications conflits** : Toast non-intrusive avec debounce, affichage contextualisé
+- **Guard L-state** : protection contre suppression accidentelle de fichiers non-syncés
+- **7 fixes** : race condition dans le watcher, badge CF manquant après copie, optimisation PinFile
+
+### V2.3/V2.4 — 🔜 Roadmap
 - **V2.3** : Sync bidirectionnelle complète (badges complets avec sparse MSIX, UI conflits, cache états)
 - **V2.4** : Cache avancé & Offline (à détailler)
 

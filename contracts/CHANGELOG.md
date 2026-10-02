@@ -5,6 +5,28 @@ Les changements **BREAKING** doivent être validés par le CDP avant implémenta
 
 ---
 
+## [20260523] — v2.2 Workflow Objets (#136 #139 #140 #141 #142 #143 #144)
+
+- **[BREAKING]** `StorageBackend` interface — ajout `Rename(ctx, oldPath, newPath string) error`
+  Tout plugin tiers doit l'implémenter. Fallback: retourner `plugins.ErrNotSupported`.
+- **[BREAKING]** `StorageBackend` interface — ajout `Copy(ctx, srcPath, dstPath string) error`
+  Tout plugin tiers doit l'implémenter. Fallback: retourner `plugins.ErrNotSupported`.
+- **[NEW]**  `plugins.ErrNotSupported` — nouveau sentinel error pour opérations non supportées
+- **[NEW]**  `rpc Rename(MoveRequest) returns (MoveResponse)` — RPC gRPC (réutilise types Move)
+- **[NEW]**  `rpc Copy(CopyRequest) returns (CopyResponse)` — RPC gRPC (nouveaux types)
+- **[NEW]**  `ActionRename`, `ActionCopy` — nouveaux types d'action dans `internal/sync/`
+- **[NEW]**  `SyncAction.SrcLocalPath`, `SyncAction.SrcRemotePath` — champs source pour rename/copy
+- **[NEW]**  `FileState` type + constantes `L/P/U/S/C/E/X` — dans `internal/types/`
+- **[NEW]**  `Engine.fileStates sync.Map` — cache d'état par chemin local (vivant dans Engine)
+- **[NEW]**  Wails binding `GetFileState(backendID, localPath string) string` (#136)
+- **[NEW]**  Wails event `sync:conflict` — `{backendID, path, localModTime, remoteModTime, resolution}` (#144)
+- **[NEW]**  Wails event `sync:file-state-changed` — `{backendID, localPath, state}` (optionnel v2.2)
+- **[NEW]**  `CFManager.intentions sync.Map` — file d'intentions pin/unpin par fichier (#143)
+- **[FIX]**  Suppression d'un fichier en état L → plus d'`ActionDelete` envoyé au remote (#141)
+- **[FIX]**  Unpin d'un fichier non synchronisé → upload d'abord, puis déépinglage CF (#142)
+
+---
+
 ## [20260520] — v2.1 Files On-Demand (#122 #123 #124 #129)
 
 - **[NEW]** `internal/cfapi.SyncProvider` — package CGO Windows wrappant Cloud Filter API (`CfRegisterSyncRoot`, `CfConnectSyncRoot`, `CfCreatePlaceholders`, `CfSetInSyncState`, `CfSetPinState`, `CfExecute`)

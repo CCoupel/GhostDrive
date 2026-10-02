@@ -42,7 +42,6 @@
   },
   "infrastructure": {
     "cicd": "github-actions",
-    "deploy": "binary-releases",
     "targets": [
       {
         "os": "windows",
@@ -52,9 +51,34 @@
     ],
     "versioning": "semantic",
     "version_sources": [
-      "server-go/config.json",
+      "config.json",
       "frontend/package.json",
       "git-tag"
+    ],
+    "environments": [
+      {
+        "name": "QUALIF",
+        "order": 1,
+        "publish": {
+          "mode": "promote",
+          "target": "build/qualif_v{X.Y.Z}/"
+        },
+        "deploy": {
+          "mechanism": "binary-releases"
+        }
+      },
+      {
+        "name": "PROD",
+        "order": 2,
+        "publish": {
+          "mode": "rebuild-ci",
+          "trigger": "git-tag",
+          "pipeline": ".github/workflows/build.yml"
+        },
+        "deploy": {
+          "mechanism": "binary-releases"
+        }
+      }
     ]
   },
   "testing": {
@@ -69,7 +93,11 @@
     "integration": [
       "webdav-in-memory"
     ],
-    "coverage_threshold": 70
+    "coverage_threshold": 70,
+    "regression_at_qa": "gated",
+    "full_regression_at": "qualif",
+    "coverage_min": 70,
+    "lot_max_tests": 50
   },
   "security": {
     "concerns": [
@@ -111,5 +139,12 @@
     "lint": "golangci-lint run",
     "audit": "govulncheck ./...",
     "typecheck": "cd frontend && npm run typecheck"
+  },
+  "template_version": {
+    "tag": "v3.9.0",
+    "commit": "cf187ca7904803728ca5f0828d85e5dec200b91a"
+  },
+  "docs": {
+    "mockup_dir": "docs/mockup"
   }
 }

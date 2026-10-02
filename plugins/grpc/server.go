@@ -177,6 +177,22 @@ func (s *GRPCBackendServer) Move(ctx context.Context, req *storagepb.MoveRequest
 	return &storagepb.MoveResponse{}, nil
 }
 
+// Rename implements the v2.2 atomic rename RPC (#139).
+func (s *GRPCBackendServer) Rename(ctx context.Context, req *storagepb.MoveRequest) (*storagepb.MoveResponse, error) {
+	if err := s.Impl.Rename(ctx, req.GetOldPath(), req.GetNewPath()); err != nil {
+		return nil, mapBackendError(err)
+	}
+	return &storagepb.MoveResponse{}, nil
+}
+
+// Copy implements the v2.2 server-side copy RPC (#140).
+func (s *GRPCBackendServer) Copy(ctx context.Context, req *storagepb.CopyRequest) (*storagepb.CopyResponse, error) {
+	if err := s.Impl.Copy(ctx, req.GetSrcPath(), req.GetDstPath()); err != nil {
+		return nil, mapBackendError(err)
+	}
+	return &storagepb.CopyResponse{}, nil
+}
+
 // ── Navigation ────────────────────────────────────────────────────────────────
 
 func (s *GRPCBackendServer) List(ctx context.Context, req *storagepb.ListRequest) (*storagepb.ListResponse, error) {
@@ -314,6 +330,8 @@ func mapBackendError(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, plugins.ErrNotConnected):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, plugins.ErrNotSupported):
+		return status.Error(codes.Unimplemented, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}

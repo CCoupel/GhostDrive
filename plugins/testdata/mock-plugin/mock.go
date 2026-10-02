@@ -65,6 +65,12 @@ func (m *MockPlugin) Delete(_ context.Context, _ string) error { return nil }
 // Move is a no-op that always returns nil (success).
 func (m *MockPlugin) Move(_ context.Context, _, _ string) error { return nil }
 
+// Rename is a no-op that always returns nil (success) (#139).
+func (m *MockPlugin) Rename(_ context.Context, _, _ string) error { return nil }
+
+// Copy is a no-op that always returns nil (success) (#140).
+func (m *MockPlugin) Copy(_ context.Context, _, _ string) error { return nil }
+
 // ── Navigation ────────────────────────────────────────────────────────────────
 
 // List returns an empty slice (no files). Never returns ErrFileNotFound.

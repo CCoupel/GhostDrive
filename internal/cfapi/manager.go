@@ -39,6 +39,24 @@ type providerEntry struct {
 	cancelFunc context.CancelFunc // cancels any in-flight OnFetchPlaceholders goroutine
 }
 
+// CompletionCallbacks holds optional sync-engine callbacks for CF completion events.
+// OnDeleteCompletion is called when Windows reports a successful local delete via CF API.
+// OnRenameCompletion is called when Windows reports a successful local rename via CF API.
+// Both are set by app.go after the sync engine starts, so the CF provider can propagate
+// remote CF operations (delete, rename) back to the backend (#v2.2-bugD).
+type CompletionCallbacks struct {
+	OnDeleteCompletion func(localPath string)
+	OnRenameCompletion func(oldPath, newPath string)
+}
+
+// PinIntent represents a deferred pin/unpin request for a file that is currently
+// being transferred.  Stored in CFManager.intentions until the transfer completes (#143).
+type PinIntent struct {
+	BackendID string
+	LocalPath string
+	Pin       bool
+}
+
 // CFManager manages one SyncProvider per enabled backend.
 // It is safe for concurrent use.
 type CFManager struct {
@@ -47,6 +65,10 @@ type CFManager struct {
 
 	mu       gosync.RWMutex
 	entries  map[string]*providerEntry // backendID → entry
+
+	// intentions holds deferred PinIntents keyed by localPath (#143).
+	// sync.Map is used for lock-free concurrent access from Engine goroutines.
+	intentions gosync.Map
 }
 
 // NewCFManager creates a CFManager.
@@ -141,6 +163,20 @@ func (m *CFManager) Start(bc BackendEntry, backend plugins.StorageBackend, ch ca
 	return nil
 }
 
+// SetCompletionCallbacks injects delete and rename completion handlers for the given backend.
+// These handlers are invoked when Windows CF API fires NOTIFY_DELETE_COMPLETION or
+// NOTIFY_RENAME_COMPLETION — i.e. when an operation on GhD: (the CF sync root) completes.
+// Must be called after Start(backendID) and before user interactions (#v2.2-bugD).
+func (m *CFManager) SetCompletionCallbacks(backendID string, cbs CompletionCallbacks) {
+	m.mu.RLock()
+	e, ok := m.entries[backendID]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	e.provider.SetCompletionCallbacks(cbs.OnDeleteCompletion, cbs.OnRenameCompletion)
+}
+
 // Stop disconnects and deregisters the CF sync root for a backend.
 // It cancels any in-flight OnFetchPlaceholders goroutine before disconnecting
 // to prevent calls on an already-deregistered provider (MAJEUR-3).
@@ -203,6 +239,29 @@ func (m *CFManager) StopAll() error {
 	return nil
 }
 
+// ConvertToPlaceholder converts the regular local file at localPath into a CF
+// placeholder before SetSyncState is called.  This satisfies the optional
+// sync.PlaceholderMaker interface (#151).
+//
+// Background: Download() writes files via os.Rename(tmp, dest) — neither the
+// temp file nor the renamed destination is a CF placeholder.  Calling
+// CfSetInSyncState on a non-placeholder writes invalid CF reparse-point data,
+// corrupting the parent directory's CF state and causing 0x80070781 /
+// 0x8007017c on subsequent user operations (New File, Rename).
+// Converting first makes the file a proper placeholder so CfSetInSyncState
+// operates correctly.
+func (m *CFManager) ConvertToPlaceholder(backendID, localPath string) error {
+	m.mu.RLock()
+	e, ok := m.entries[backendID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil // backend not registered — silent no-op
+	}
+
+	return e.provider.ConvertToPlaceholder(localPath)
+}
+
 // SetSyncState exposes SyncProvider.SetSyncState for app.go and the sync engine.
 // This method satisfies the sync.CFStateManager interface (backendID, localPath, state int).
 func (m *CFManager) SetSyncState(backendID, localPath string, state int) error {
@@ -239,6 +298,34 @@ func (m *CFManager) PinFile(backendID, localPath string, pin bool) error {
 		state = SyncStatePinned
 	}
 	return m.SetSyncState(backendID, localPath, int(state))
+}
+
+// ─── Pin Intent Queue (#143) ──────────────────────────────────────────────────
+
+// QueuePinIntent stores a deferred pin/unpin intention for a file that is
+// currently being transferred (state U or P).  Any existing intention for the
+// same localPath is overwritten (last-intent-wins).
+func (m *CFManager) QueuePinIntent(backendID, localPath string, pin bool) {
+	m.intentions.Store(localPath, &PinIntent{
+		BackendID: backendID,
+		LocalPath: localPath,
+		Pin:       pin,
+	})
+}
+
+// ConsumeIntent reads and removes the pending PinIntent for localPath.
+// Returns (backendID, pin, true) if an intent was found; ("", false, false) otherwise.
+// Safe for concurrent calls from Engine goroutines.
+func (m *CFManager) ConsumeIntent(localPath string) (backendID string, pin bool, ok bool) {
+	v, loaded := m.intentions.LoadAndDelete(localPath)
+	if !loaded {
+		return "", false, false
+	}
+	intent, _ := v.(*PinIntent)
+	if intent == nil {
+		return "", false, false
+	}
+	return intent.BackendID, intent.Pin, true
 }
 
 // syncStateString converts a SyncState to its JSON-friendly string.

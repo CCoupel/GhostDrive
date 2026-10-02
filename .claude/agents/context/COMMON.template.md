@@ -8,6 +8,21 @@
 
 ---
 
+## Objectifs Intrinseques (OBLIGATOIRE)
+
+Quel que soit son role, chaque agent DOIT rester attentif en permanence aux quatre axes suivants dans tout travail produit :
+
+| Axe | Attention portee |
+|-----|-------------------|
+| **Securite** | Prevenir la corruption des donnees, les intrusions (injection, XSS, secrets exposes...) et les atteintes a la disponibilite du service |
+| **Performance** | Eviter les regressions, les traitements inutilement couteux, les boucles/requetes non optimisees |
+| **Maintenabilite** | Code lisible, structure, coherent avec les conventions du projet |
+| **Mutualisation du code** | Reutiliser/factoriser l'existant plutot que dupliquer une logique deja presente ailleurs |
+
+Ces axes s'appliquent en continu pendant le travail (conception, implementation, revue), pas uniquement lors d'une revue dediee (`/code-review security`, `/code-review performance`, `/code-review rationalization`).
+
+---
+
 ## Gestion de la Todo List (OBLIGATOIRE)
 
 Vous DEVEZ utiliser le tool `TodoWrite` pour suivre votre progression de maniere visible.
@@ -96,7 +111,7 @@ Re-afficher le plan complet avec la progression :
 
 ### Au Demarrage de la Tache
 
-Envoyer immediatement via SendMessage au CDP :
+Envoyer immediatement via SendMessage au teamleader :
 
 ```
 [NOM-AGENT] EN COURS — 0% — demarrage [description courte]
@@ -119,9 +134,9 @@ Action requise : [ce dont j'ai besoin]
 ```
 
 > **REGLE** : Jamais de contenu de code, de diff, ni d'extraits de fichiers dans les messages SendMessage.
-> Les messages vers le CDP sont des metadonnees (statut, fichiers, SHA), pas des rapports techniques.
+> Les messages vers le teamleader sont des metadonnees (statut, fichiers, SHA), pas des rapports techniques.
 
-### Notifications Intermediaires (workflows longs uniquement)
+### Notifications Intermediaires (OBLIGATOIRES des que la tache compte plusieurs unites — voir `TEAMMATES_PROTOCOL.md` 4b)
 
 ```
 [NOM-AGENT] EN COURS — X% — [etape courante en < 10 mots]
@@ -169,7 +184,7 @@ Action requise : [ce dont j'ai besoin]
 
 1. **Documenter** l'erreur dans le rapport/summary
 2. **Proposer** une solution si possible
-3. **Signaler** au CDP/orchestrateur pour decision
+3. **Signaler** au teamleader/orchestrateur pour decision
 4. **Ne jamais rester bloque en silence**
 
 ### Format de Signalement
@@ -185,16 +200,35 @@ Action requise : [ce dont j'ai besoin]
 
 ---
 
+## Gestion des Versions (OBLIGATOIRE)
+
+> **Reference complete** (cycle de vie detaille, exemple, regle du milestone) : `commands/context/COMMON.md` section 5.
+> **Qui incremente quoi** (agents dev/deploy) : `context/DEV_COMMON.md`.
+
+Format : `X.Y.Z.a` en dev/qualif, `X.Y.Z` en prod (le `a` n'est jamais publie en prod).
+
+Le milestone GitHub actif est la SEULE source de verite pour `X.Y.Z` — fixe des sa creation, jamais recalcule par les agents. Aucun developpement ne se fait hors milestone.
+
+| Segment | Role |
+|---------|------|
+| `X` | Compatibilite des donnees (DB, fichiers). Fixe par le milestone |
+| `Y` | Compteur de milestone/livraison. Fixe par le milestone |
+| `Z` | Compteur de bugfix au sein de la ligne `X.Y`. Fixe par le milestone |
+| `a` | Compteur de build, gere exclusivement par `deploy` (tache BUILD, agnostique a l'environnement). Les agents `dev-*` ne le touchent jamais. Jamais visible en prod |
+
+---
+
 ## Coordination Inter-Agents
 
 ### Workflow Standard
 
 ```
-PLAN -> [validation] -> DEV -> [REVIEW ∥ TEST-WRITER] -> QA -> [validation] -> DOC -> DEPLOY -> [validation]
+PLAN -> [validation] -> DEV (TEST-WRITER en Batch 1) -> [REVIEW ∥ QA] -> DOC -> [DEPLOY QUALIF ∥ DOC finalize ∥ NR complete] -> [validation] -> PROD
 ```
 
 **[validation] = Points de validation utilisateur obligatoires**
-**[REVIEW ∥ TEST-WRITER] = executes en parallele apres DEV**
+**[REVIEW ∥ QA] = executes en parallele apres DEV** (repli sequentiel si `qa_parallelizable == false`, voir `context/QUALITY.md` section 12)
+**Plan de tests** : `context/COMMON.md` section 15
 
 ### Transmission de Contexte
 
@@ -223,6 +257,8 @@ Chaque agent `xxx.template.md` peut avoir un fichier compagnon `xxx.md` dans le 
 **Si ce fichier existe, le lire après le fichier `.template.md`** — il contient les règles et adaptations spécifiques au projet.
 Pour toute modification du comportement de cet agent, écrire dans `xxx.md` (jamais dans `xxx.template.md`).
 
+Les fichiers `context/` partagés (`context/COMMON.md`, `context/GITHUB.md`, `context/DEV_COMMON.md`...) suivent le même pattern : `context/X.template.md` (sync) + `context/X.md` compagnon optionnel (tracké git). Le lire après le `.template.md` s'il existe. Pour adapter une règle partagée au projet, écrire dans le compagnon `context/X.md`, jamais dans `context/X.template.md`.
+
 ---
 
 ## References Projet
@@ -235,5 +271,6 @@ Pour toute modification du comportement de cet agent, écrire dans `xxx.md` (jam
 |---------|-------------|
 | `CLAUDE.md` | Architecture complete |
 | `CHANGELOG.md` | Historique des versions |
-| `config.json` | Version actuelle |
+| `` | Version actuelle |
 | `contracts/*.md` | Contrats API |
+| `docs/mockup/INDEX.md`, `DECISIONS.md` | Maquettes actives et contraintes de conception (`commands/context/COMMON.md` section 14) |
