@@ -1,31 +1,10 @@
----
-name: dev-frontend
-description: "Developpeur frontend GhostDrive (Wails v2 + React + TypeScript). Implemente l'UI systray, les pages de configuration backends, la vue d'etat de synchronisation. Utilise les bindings Wails pour communiquer avec le backend Go. Contract-first : lit contracts/ sans les modifier. Demarre en mode IDLE."
-model: sonnet
-color: blue
----
+# dev-frontend — adaptations GhostDrive
 
-# Agent Dev Frontend — GhostDrive (Wails + React)
+Complete .claude/agents/dev-frontend.template.md ; en cas de divergence explicite ci-dessous, ce fichier fait foi.
 
-> **Protocole** : Voir `context/TEAMMATES_PROTOCOL.md`
+## Regles projet
 
-Agent specialise dans le developpement frontend GhostDrive (Wails v2 + React + TypeScript).
-
-## Mode Teammates
-
-Tu demarres en **mode IDLE**. Tu attends un ordre du CDP via SendMessage.
-L'ordre specifie les composants/pages/hooks a implementer et les contrats Wails a respecter.
-Apres l'implementation, tu envoies ton rapport au CDP :
-
-```
-SendMessage({ to: "cdp", content: "**DEV-FRONTEND TERMINE** — [N] fichiers modifies — commits effectues — [points importants]" })
-```
-
-**Regles** :
-- Lire `contracts/wails-bindings.md` AVANT d'implementer — tu CONSULTES uniquement
-- Attendre que le backend soit termine si la feature implique de nouveaux bindings Wails
 - Commits atomiques avec messages conventionnels (`feat(tray): ...`, `fix(settings): ...`)
-- Tu ne contactes jamais l'utilisateur directement
 
 ## Contexte Wails
 
@@ -43,6 +22,7 @@ export function GetSyncStatus(): Promise<SyncStatus>;
 **Regle absolue** : utiliser uniquement les fonctions disponibles dans `wailsjs/go/`.
 Ne jamais appeler `fetch` ou `axios` — tout passe par les bindings Wails.
 
+<!-- Derogation projet : structure projet (frontend/src GhostDrive vs src/ typique) -->
 ## Structure Projet
 
 ```
@@ -85,6 +65,7 @@ frontend/
 └── vite.config.ts
 ```
 
+<!-- Derogation projet : couche services (wrapper bindings Wails vs fetch + VITE_API_URL) -->
 ## Service Wails (wrapper type)
 
 ```typescript
@@ -103,65 +84,6 @@ export const ghostdriveApi = {
 
 ## Conventions
 
-### Composants React
-
-```tsx
-// Functional component avec TypeScript
-interface BackendCardProps {
-  backend: BackendInfo;
-  onConnect?: (backend: BackendInfo) => void;
-  onDisconnect?: (backend: BackendInfo) => void;
-}
-
-export function BackendCard({ backend, onConnect, onDisconnect }: BackendCardProps) {
-  const isConnected = backend.status === 'connected';
-
-  return (
-    <div className={`backend-card ${isConnected ? 'connected' : 'disconnected'}`}>
-      <h3>{backend.name}</h3>
-      <span className="status">{backend.status}</span>
-      {isConnected
-        ? <button onClick={() => onDisconnect?.(backend)}>Deconnecter</button>
-        : <button onClick={() => onConnect?.(backend)}>Connecter</button>
-      }
-    </div>
-  );
-}
-```
-
-### Custom Hooks (avec bindings Wails)
-
-```tsx
-// hooks/useBackends.ts
-export function useBackends() {
-  const [backends, setBackends] = useState<BackendInfo[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
-
-  useEffect(() => {
-    let mounted = true;
-
-    async function load() {
-      try {
-        const data = await ghostdriveApi.getBackends();
-        if (mounted) setBackends(data);
-      } catch (err) {
-        if (mounted) setError(err as Error);
-      } finally {
-        if (mounted) setLoading(false);
-      }
-    }
-
-    load();
-    // Polling toutes les 5s pour l'etat de connexion
-    const interval = setInterval(load, 5000);
-    return () => { mounted = false; clearInterval(interval); };
-  }, []);
-
-  return { backends, loading, error, reload: () => {} };
-}
-```
-
 ### Events Wails (runtime)
 
 ```tsx
@@ -176,6 +98,7 @@ useEffect(() => {
 }, []);
 ```
 
+<!-- Derogation projet : commandes dev/build (wails dev/build vs npm run dev/build) -->
 ## Commandes
 
 ```bash
@@ -210,32 +133,7 @@ L'UI doit etre **sobre et fonctionnelle** — similaire a OneDrive :
 
 **Tray UI** : fenetre flottante compacte (400x300px max), sombre ou claire selon theme systeme.
 
-## Formulaires (react-hook-form + zod)
-
-```tsx
-const backendSchema = z.object({
-  url: z.string().url("URL WebDAV invalide"),
-  username: z.string().min(1, "Requis"),
-  password: z.string().min(1, "Requis"),
-});
-
-type BackendFormData = z.infer<typeof backendSchema>;
-
-export function AddBackendForm({ onSubmit }: { onSubmit: (data: BackendFormData) => void }) {
-  const { register, handleSubmit, formState: { errors } } = useForm<BackendFormData>({
-    resolver: zodResolver(backendSchema),
-  });
-
-  return (
-    <form onSubmit={handleSubmit(onSubmit)}>
-      <input {...register('url')} placeholder="https://mon-nas/webdav" />
-      {errors.url && <span className="error">{errors.url.message}</span>}
-      {/* ... */}
-    </form>
-  );
-}
-```
-
+<!-- Derogation projet : framework de test (vitest/vi.fn vs jest.fn) -->
 ## Tests (vitest + testing-library)
 
 ```tsx
@@ -259,6 +157,7 @@ describe('BackendCard', () => {
 });
 ```
 
+<!-- Derogation projet : checklist implementation (types/services Wails, vitest vs checklist generique) -->
 ## Checklist Implementation
 
 - [ ] Types TypeScript dans `types/ghostdrive.ts`

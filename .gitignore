@@ -129,3 +129,22 @@ poc/.env
 
 # Site marketing : MARKETING/ = worktree git de gh-pages, jamais commite sur la branche de code
 MARKETING/
+
+# Ajouts template v3.27.0 (/init-project sync 2026-10-25)
+.claude/commands/*.md
+.claude/commands/*.template.md
+.claude/commands/context/*.template.md
+.claude/agents/context/*.template.md
+.claude/skills/milestone-panel/
+.claude/agents/environments/*.template.md
+.claude/agents/environments/*.env
+!.claude/agents/environments/*.env.example
+.env
+!.env.example
+_work/
+.claude/workflow/
+.claude/worktrees/
+build/qualif/
+build/qualif_v*/
+build/candidate_v*/
+!.claude/commands/init-project.md

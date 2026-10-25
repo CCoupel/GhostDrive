@@ -1,0 +1,41 @@
+name: CI branch (pre-validation)
+
+# Pre-validation sans publier (contrat infra C10) : verdict utilise pour fermer les issues DONE
+# et comme barriere de deploy avant merge/tag. Ne publie ni ne deploie rien.
+on:
+  push:
+    branches: ['milestone/*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.24'
+  NODE_VERSION: '18'
+
+jobs:
+  ci:
+    name: CI_CMD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '25.1'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install toolchain (versions pinnees PROD)
+        run: |
+          grep -v '^#' .ci-versions.env | grep -v '^$' >> $GITHUB_ENV
+          set -a; . ./.ci-versions.env; set +a
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_PIN}
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${PROTOC_GEN_GO_GRPC_PIN}
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: bash scripts/ci.sh

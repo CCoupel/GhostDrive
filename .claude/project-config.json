@@ -27,6 +27,9 @@
         "moosefs"
       ],
       "pattern": "go-interface-compiled"
+    },
+    "plugin": {
+      "platform": "GhostDrive StorageBackend (Go, gRPC)"
     }
   },
   "platform": {
@@ -61,7 +64,7 @@
         "order": 1,
         "publish": {
           "mode": "promote",
-          "target": "build/qualif_v{X.Y.Z}/"
+          "target": "build/qualif/{X.Y.Z}/"
         },
         "deploy": {
           "mechanism": "binary-releases"
@@ -138,13 +141,138 @@
     "test": "go test ./... -v -cover",
     "lint": "golangci-lint run",
     "audit": "govulncheck ./...",
-    "typecheck": "cd frontend && npm run typecheck"
+    "typecheck": "cd frontend && npm run typecheck",
+    "coverage": "go test -cover ./...",
+    "test_fast": "go test -short ./...",
+    "test_targeted": "go test {TARGETS}",
+    "ci": "scripts/ci.sh"
   },
   "template_version": {
-    "tag": "v3.9.1",
-    "commit": "dc3d230f01188ea698f3eab3e7805cbaca9b0260"
+    "tag": "v3.27.0",
+    "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf"
   },
   "docs": {
     "mockup_dir": "docs/mockup"
-  }
+  },
+  "agents": {
+    "registry": [
+      {
+        "name": "cdp",
+        "source": "agents/cdp.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "30da29c70a547aae940c27e00604f5806964ab05498c8ad380a095e353247e25"
+      },
+      {
+        "name": "code-reviewer",
+        "source": "agents/code-reviewer.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "6db56bbdc6483602b9284348bb1f2653fa1bc541ef31681697b6bbf98920b5fe"
+      },
+      {
+        "name": "deploy",
+        "source": "agents/deploy.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "8060486767f4ba0d4536c9cc195ac6f38554a35dde7ded76d68ff4245b895f27"
+      },
+      {
+        "name": "dev-backend",
+        "source": "templates/dev-backend-go.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "6fa0b4812a59d4c53cfb2afbd808052214dcf793cd5a66da51351a27fcc47332",
+        "role": "Backend (Go + moteur sync + plugins)"
+      },
+      {
+        "name": "dev-frontend",
+        "source": "templates/dev-frontend-react.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "33093553669105572dc7be79b18f8d79404f9e94a19c35567cf9b55c0759aadd",
+        "role": "Frontend (Wails + React + TypeScript)"
+      },
+      {
+        "name": "dev-plugin",
+        "source": "templates/dev-plugin.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "93e072b9f7ca8c185a1b1eb3e91b41486b89f61d44b2640a0e0c2d8da33791a1",
+        "role": "Plugins backends (StorageBackend : WebDAV, MooseFS...)"
+      },
+      {
+        "name": "doc-updater",
+        "source": "agents/doc-updater.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "dd2b57b3cdba9c649295d5bd86bea4539728aadce0416c5bfb40275f223baab8"
+      },
+      {
+        "name": "generic",
+        "source": "agents/generic.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "4157f75529762528a54afbfcc50630d772ca8734c8ab693c913bb0d8933f6be7"
+      },
+      {
+        "name": "implementation-planner",
+        "source": "agents/implementation-planner.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "aaa506eddb0a237da081ec9735f7ef42e616a5bac27479326c8f75bce3f26261"
+      },
+      {
+        "name": "infra",
+        "source": "agents/infra.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "81f8f8de43a2b331e7e1266fce60ac35ef97bbc2f1e62eee6a807d7613f533e7"
+      },
+      {
+        "name": "marketing-release",
+        "source": "agents/marketing-release.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "d73e32b7001792a9829f5cafc66175a807a564593425b0f13a66e21ac887be9a"
+      },
+      {
+        "name": "pr-reviewer",
+        "source": "agents/pr-reviewer.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "399fb28b4180b86be96dbb6dab0c483c287a2a660c403adc0a357977d2acb24b"
+      },
+      {
+        "name": "qa",
+        "source": "agents/qa.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "0e22c6afb97c592cf8b0c561d1978371963a61a51929deb22130fda62cf56c6c"
+      },
+      {
+        "name": "security",
+        "source": "agents/security.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "c92fc9d89ba987149dee4e7a7442cae784267ff15e43100bc0e357e21547bc54"
+      },
+      {
+        "name": "teamleader",
+        "source": "agents/teamleader.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "98d0f3b9c9a9661dc2d32599a9237fb9eeba83bd35afa286c0ae2b37f0a3b223"
+      },
+      {
+        "name": "test-writer",
+        "source": "agents/test-writer.md",
+        "tag": "v3.27.0",
+        "commit": "2ca467df6ab3786c4e6949c1bce43f25c869a5bf",
+        "sha256": "5b4b6fc94d68be1f4c6e050c801afdbdac21fe77c7ea87a37a98440cd074f53c"
+      }
+    ]
+  },
+  "version_file": "config.json",
+  "src_dir": "."
 }

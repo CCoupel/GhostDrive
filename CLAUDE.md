@@ -173,9 +173,9 @@ La source des donnees — varie selon le plugin :
 | Nom | Rôle | Fichier | Spawn |
 |-----|------|---------|-------|
 | `planner` | Plans d'implémentation + contrats API | `.claude/agents/implementation-planner.template.md` | permanent |
-| `dev-backend` | Backend (Go + moteur sync + plugins) | `.claude/agents/dev-backend.md` | permanent |
-| `dev-frontend` | Frontend (Wails + React + TypeScript) | `.claude/agents/dev-frontend.md` | permanent |
-| `dev-plugin` | Plugins backends (StorageBackend : WebDAV, MooseFS...) | `.claude/agents/dev-plugin.md` | permanent |
+| `dev-backend` | Backend (Go + moteur sync + plugins) | `.claude/agents/dev-backend.template.md` | permanent |
+| `dev-frontend` | Frontend (Wails + React + TypeScript) | `.claude/agents/dev-frontend.template.md` | permanent |
+| `dev-plugin` | Plugins backends (StorageBackend : WebDAV, MooseFS...) | `.claude/agents/dev-plugin.template.md` | permanent |
 | `test-writer` | Scripts de tests + procédures QA | `.claude/agents/test-writer.template.md` | permanent |
 | `code-reviewer` | Revue de code | `.claude/agents/code-reviewer.template.md` | permanent |
 | `qa` | Exécution des tests et validation | `.claude/agents/qa.template.md` | permanent |
@@ -300,7 +300,7 @@ La source des donnees — varie selon le plugin :
 ### Versioning
 
 Format dev : `X.Y.Z.a` — Format prod : `X.Y.Z` (le `a` n'est jamais publie en prod).
-Regles completes (les 5 operations, regle d'or bug remonte, milestone comme source de la version cible) : voir `.claude/commands/context/COMMON.md` section 5.
+Regles completes (les 5 operations, regle d'or bug remonte, milestone comme source de la version cible) : voir `.claude/commands/context/COMMON.template.md` section 5.
 
 | Segment | Role |
 |---------|------|
@@ -379,12 +379,14 @@ Tu **coordonnes et dispatches**. Tu n'exécutes aucune tâche technique toi-mêm
 
 | Outil interdit | Déléguer à |
 |---------------|-----------|
-| `Edit`, `Write`, `MultiEdit` | `dev-*`, `doc-updater` |
+| `Edit`, `Write`, `MultiEdit` (sauf `Write` d'un ordre dans `_work/tasks/*.md` et de l'état `.claude/workflow-state.json`, `.claude/workflow/*`) | `dev-*`, `doc-updater` |
 | `Bash` (build / test / git) | `qa`, `deployer`, `dev-*` |
 | `Read` (code applicatif) | `code-reviewer`, `planner` |
 | `Glob`, `Grep` (recherche code) | `planner`, `dev-*` |
 
-**`Read` autorisé uniquement pour** : `CLAUDE.md`, `MEMORY.md`, `project-config.json`, `_work/handoff/*.md`, `_work/reports/*.md`, `contracts/CHANGELOG.md`
+**`Read` autorisé uniquement pour** : `CLAUDE.md`, `MEMORY.md`, `project-config.json`, `_work/tasks/*.md`, `_work/handoff/*.md`, `_work/reports/*.md`, `contracts/CHANGELOG.md`
+
+**`Write` autorisé uniquement pour** : `_work/tasks/*.md` (ordres aux teammates, création seule — jamais `Edit`/`MultiEdit`) et l'état d'orchestration `.claude/workflow-state.json` / `.claude/workflow/plan-<version>.md` (reprise après interruption) — jamais un autre chemin
 
 **Ne jamais** exécuter une tâche technique soi-même — spawner l'agent approprié.
 
@@ -397,6 +399,12 @@ Tous les teammates sont spawned au démarrage (`/start-session`) et sont en IDLE
 SendMessage({ to: "<nom-canonique>", content: "<tâche complète>" })
 → Attendre ACTIF (confirmation) + DONE (références fichiers)
 ```
+
+**Ordre de plus de 3 lignes → fichier** : `Write` dans `_work/tasks/<agent>-<YYYYMMDD-HHmmss>.md` (un fichier par ordre,
+jamais réécrit), puis `SendMessage` avec le seul chemin + un résumé d'une ligne :
+`Tâche : _work/tasks/<agent>-<timestamp>.md — <résumé>`. Le fichier liste périmètre, fichiers à lire et livrables
+attendus. Restent inline : ordre ≤ 3 lignes, `/clear`, réponses à un `BLOQUE`, correction de rapport invalide.
+Relire l'ordre (`_work/tasks/*.md`) pour contrôler le `DONE` par rapport à la demande.
 
 Plusieurs agents en parallèle — même tour :
 ```
@@ -417,16 +425,22 @@ test-writer, code-reviewer, qa, doc-updater, deployer, security, infra
 
 ### Questions à l'utilisateur
 
-Quand tu as besoin d'une information, décision ou validation de l'utilisateur (y compris via un `BLOQUE` /
-`BLOCKED` / `BESOIN CADRAGE` d'un teammate), **présente-le toujours sous forme de questions numérotées**,
-fermées si possible, avec ta valeur par défaut recommandée, regroupées dans un seul message.
-Jamais de demande ouverte ni implicite. Les teammates ne parlent jamais à l'utilisateur : ils t'envoient
-leurs questions (adresse `SendMessage` du teamleader : `main`) et tu les reformules.
+**Règle absolue** : toute information, décision ou validation attendue de l'utilisateur (y compris les `BLOQUE` /
+`FAILED` remontés par un teammate) passe **par l'outil `AskUserQuestion`** — jamais en texte dans le chat (pas de
+liste numérotée, « OUI/NON », `[O/n]`). Les teammates ne parlent jamais à l'utilisateur : tu convertis leurs
+questions en `AskUserQuestion`, puis tu leur renvoies les réponses via `SendMessage`.
+Procédure, format et checklist : `.claude/agents/teamleader.template.md`, section « Questions à l'utilisateur ».
 
 ### Relayer l'avancement
 
 Chaque jalon `[NOM] EN COURS — …` d'un teammate (ex. `QA EN COURS — lot 3/12 …`) est relayé à l'utilisateur en
-une ligne, sans attendre le DONE. Un jalon n'est pas un DONE : ne pas enchaîner avant le DONE.
+une ligne, sans attendre le DONE. Un jalon n'est pas un DONE : ne pas enchaîner avant le DONE. Si un jalon signale des échecs, les nommer dans le relais.
+
+### Labels d'issues — à chaque changement de phase
+
+Mettre à jour les labels de **toutes** les issues suivies (`ISSUE_NUMS[]`) **avant** d'envoyer l'ordre suivant, **et dès l'événement** (retour de fin de tâche d'un teammate `DONE`/`FAILED`/`BLOQUE`, validation d'un GATE — `GITHUB.md` §9.12), avant de le relayer. L'état dit ce qui **reste à faire** (ex. `PRET` = plan validé, DEV pas lancé), pas ce qu'un teammate fait à cet instant :
+`SendMessage` à `deployer` (`gh issue edit --add-label … --remove-label …`, `.claude/commands/context/GITHUB.template.md` §9).
+La clôture du milestone reste soumise à la validation utilisateur.
 
 ### Validation des rapports DONE
 

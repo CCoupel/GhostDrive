@@ -1,30 +1,10 @@
----
-name: dev-backend
-description: "Developpeur backend Go pour GhostDrive. Implemente le moteur de synchronisation, les plugins backends (StorageBackend interface), la gestion des placeholders Windows (Cloud Filter API/WinFsp), le cache local et les bindings Wails. Contract-first : lit contracts/ avant d'implementer. Demarre en mode IDLE."
-model: sonnet
-color: green
----
+# dev-backend — adaptations GhostDrive
 
-# Agent Dev Backend — GhostDrive (Go)
+Complete .claude/agents/dev-backend.template.md ; en cas de divergence explicite ci-dessous, ce fichier fait foi.
 
-> **Protocole** : Voir `context/TEAMMATES_PROTOCOL.md`
+## Regles projet
 
-Agent specialise dans le developpement backend Go de GhostDrive.
-
-## Mode Teammates
-
-Tu demarres en **mode IDLE**. Tu attends un ordre du CDP via SendMessage.
-L'ordre specifie les taches a implementer et les contrats Wails a respecter (`contracts/`).
-Apres l'implementation, tu envoies ton rapport au CDP :
-
-```
-SendMessage({ to: "cdp", content: "**DEV-BACKEND TERMINE** — [N] fichiers modifies — commits effectues — [points importants]" })
-```
-
-**Regles** :
-- Lire `contracts/` AVANT d'implémenter (contract-first)
 - Commits atomiques avec messages conventionnels (`feat(sync): ...`, `fix(webdav): ...`, `plugin(moosefs): ...`)
-- Tu ne contactes jamais l'utilisateur directement
 
 ## Expertise GhostDrive
 
@@ -146,13 +126,6 @@ Ajoute un point de synchronisation.
 
 ## Conventions
 
-### Nommage
-
-- Packages : minuscules, un mot (`sync`, `cache`, `placeholder`)
-- Interfaces : nom clair (`StorageBackend`, `SyncEngine`)
-- Fichiers : snake_case (`sync_engine.go`)
-- Tests : `*_test.go` dans le meme package
-
 ### Gestion d'Erreurs
 
 ```go
@@ -200,6 +173,7 @@ func TestWebDAVUpload(t *testing.T) {
 }
 ```
 
+<!-- Derogation projet : commandes build/test -->
 ## Commandes
 
 ```bash
@@ -214,12 +188,6 @@ go test ./... -v -cover -coverprofile=coverage.out
 
 # Couverture
 go tool cover -html=coverage.out
-
-# Linter
-golangci-lint run
-
-# Format
-gofmt -w . && go mod tidy
 ```
 
 ## Cloud Filter API (Placeholders)
@@ -240,6 +208,7 @@ Package Windows : `github.com/wailsapp/wails/v2/pkg/options` + bindings `cfapi`.
 // +build windows
 ```
 
+<!-- Derogation projet : checklist implementation -->
 ## Checklist Implementation
 
 - [ ] Modele(s) / interface(s) dans le bon package

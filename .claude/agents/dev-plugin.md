@@ -1,31 +1,13 @@
----
-name: dev-plugin
-description: "Developpeur de plugins GhostDrive (Go). Implemente les backends de stockage en respectant l'interface StorageBackend et le transport gRPC. Support: WebDAV, MooseFS, S3, CephFS. Contract-first: lit contracts/ et plugins/plugin.go avant d'implementer. Demarre en mode IDLE."
-model: sonnet
-color: blue
----
+# dev-plugin — adaptations GhostDrive
 
-# Agent Dev Plugin — GhostDrive (Go)
+Complete .claude/agents/dev-plugin.template.md ; en cas de divergence explicite ci-dessous, ce fichier fait foi.
 
-> **Protocole** : Voir `context/TEAMMATES_PROTOCOL.md`
+## Regles projet
 
-Agent specialise dans le developpement des plugins de backends de stockage pour GhostDrive.
-
-## Mode Teammates
-
-Tu demarres en **mode IDLE strict**. Tu attends un ordre du CDP via SendMessage.
-L'ordre specifie le plugin a implementer, le backend cible (WebDAV, S3, CephFS...), et les contrats a respecter.
-Apres l'implementation, tu envoies ton rapport au CDP :
-
-```
-SendMessage({ to: "cdp", content: "**DEV-PLUGIN TERMINE** — [plugin] — [N] fichiers modifies — commits effectues — [points importants]" })
-```
-
-**Regles** :
 - Lire `plugins/plugin.go` et `contracts/` AVANT d'implémenter (contract-first)
 - Scope limité à `plugins/<nom>/` — ne jamais modifier `internal/` ni `frontend/`
+<!-- Derogation projet : format des commits -->
 - Commits atomiques avec messages conventionnels (`plugin(webdav): ...`, `plugin(moosefs): ...`)
-- Tu ne contactes jamais l'utilisateur directement
 
 ## Expertise GhostDrive
 
@@ -41,6 +23,7 @@ SendMessage({ to: "cdp", content: "**DEV-PLUGIN TERMINE** — [plugin] — [N] f
 - `testify` — assertions et mocks pour tests unitaires
 - gRPC Go (`google.golang.org/grpc`) — serveur/client
 
+<!-- Derogation projet : structure projet (plugins/<nom>/ Go) -->
 ## Structure Projet (scope plugin)
 
 ```
@@ -156,6 +139,7 @@ type ParamSpec struct {
 - Documenter config et params dans `docs/plugins/<nom>.md`
 - Support multi-instance : loader spawne un subprocess par `plugins.Get()`
 
+<!-- Derogation projet : point d entree (subprocess gRPC main.go vs activate()/deactivate()) -->
 ## Transport gRPC
 
 Chaque plugin est un **subprocess** qui expose une interface gRPC.
@@ -206,6 +190,7 @@ func main() {
 }
 ```
 
+<!-- Derogation projet : patterns de test (fake server Go / webdav.NewMemFS vs mock API hote TypeScript) -->
 ## Patterns de Test
 
 ### Fake Server In-Memory
@@ -285,6 +270,7 @@ func TestWebDAVUpload(t *testing.T) {
 - Fichiers : snake_case (`webdav.go`, `moosefs_test.go`)
 - Tests : `*_test.go` dans le meme package
 
+<!-- Derogation projet : gestion d erreurs (fmt.Errorf %w + erreurs sentinelles vs PluginError TypeScript) -->
 ### Gestion d'Erreurs
 
 ```go
@@ -333,6 +319,7 @@ func (b *WebDAVBackend) Describe() PluginDescriptor {
 }
 ```
 
+<!-- Derogation projet : commandes build/test/lint/package (go build .ghdp + golangci-lint vs wails build + npm run lint/package) -->
 ## Commandes
 
 ```bash
@@ -352,6 +339,7 @@ golangci-lint run ./plugins/moosefs/...
 gofmt -w ./plugins/moosefs && go mod tidy
 ```
 
+<!-- Derogation projet : checklist implementation (StorageBackend/gRPC vs activate/manifest/subscriptions) -->
 ## Checklist Implementation
 
 - [ ] Interface `StorageBackend` entierement implementee
