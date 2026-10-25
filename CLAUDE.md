@@ -44,7 +44,7 @@
 | UI framework | Wails v2 |
 | Frontend | React + TypeScript |
 | Placeholders Windows | Cloud Filter API + WinFsp |
-| Plugins backends | Interface Go (compile) |
+| Plugins backends | Binaires Go out-of-process (gRPC, `.ghdp`) implementant `StorageBackend` |
 | CI/CD | GitHub Actions — versions outils gérées via `.ci-versions.env` (QUALIF @latest → PROD pinnée) |
 | Distribution | Binaires GitHub Releases (Win AMD64) |
 
@@ -84,7 +84,7 @@ ghostdrive/
 
 ### Architecture Plugin
 
-Les backends de stockage sont implementes comme des plugins Go (interfaces compilees) :
+Les backends de stockage sont implementes comme des plugins Go **out-of-process** : chaque plugin est un binaire `.ghdp` (place a cote de l'exe) lance en sous-processus et pilote via gRPC (`plugins/grpc`, `plugins/loader`, `plugins/sdk`), qui implemente l'interface `StorageBackend` :
 
 ```go
 type StorageBackend interface {
@@ -154,15 +154,8 @@ La source des donnees — varie selon le plugin :
 
 ## Configuration Projet
 
-| Parametre | Valeur |
-|-----------|--------|
-| Nom | GhostDrive |
-| Backend | Go 1.21 + Wails v2 |
-| Frontend | React + TypeScript |
-| Database | Aucune (fichiers locaux + config JSON) |
-| CI/CD | GitHub Actions |
-| Deploiement | Binaires GitHub Releases |
-| Backends V1 | WebDAV + MooseFS |
+Stack : voir « Architecture Technique » ci-dessus ; configuration complete (commandes, environnements, registre des
+agents) : `.claude/project-config.json`. Database : aucune (fichiers locaux + config JSON).
 
 ---
 
@@ -180,7 +173,7 @@ La source des donnees — varie selon le plugin :
 | `code-reviewer` | Revue de code | `.claude/agents/code-reviewer.template.md` | permanent |
 | `qa` | Exécution des tests et validation | `.claude/agents/qa.template.md` | permanent |
 | `doc-updater` | Documentation | `.claude/agents/doc-updater.template.md` | permanent |
-| `deploy` | Déploiement QUALIF/PROD | `.claude/agents/deploy.template.md` (+ `.claude/agents/deploy.md`) | permanent |
+| `deployer` | Build + Publication + Déploiement QUALIF/PROD | `.claude/agents/deploy.template.md` (+ `.claude/agents/deploy.md`) | permanent |
 | `security` | Audit sécurité | `.claude/agents/security.template.md` | ponctuel |
 | `infra` | Infrastructure (CI/CD, pipelines) | `.claude/agents/infra.template.md` | ponctuel |
 | `pr-reviewer` | Validation des PR externes | `.claude/agents/pr-reviewer.template.md` | ponctuel |
@@ -189,8 +182,6 @@ La source des donnees — varie selon le plugin :
 > **Fichier** pointe vers le `.template.md` — géré par sync, toujours présent. Un compagnon
 > `.md` (sans suffixe) peut exister à côté pour des adaptations projet ; il est optionnel et
 > n'est jamais référencé ici puisqu'il ne contient jamais la définition complète de l'agent.
-> Nom canonique `deploy` (pas `deployer` comme dans le template générique) — convention
-> ghostdrive-team, dérogation assumée au nom générique du template.
 
 > **permanent** = spawné au `/start-session`, reste en IDLE toute la session.
 > **ponctuel** = spawné à la demande par la commande dédiée, fermé après DONE.
@@ -203,8 +194,8 @@ La source des donnees — varie selon le plugin :
 
 | Commande | Description | Usage |
 |----------|-------------|-------|
-| `/feat` | Nouvelle fonctionnalite | `/feat <description>` |
-| `/bug` | Correction de bug | `/bug <description>` |
+| `/feature` | Nouvelle fonctionnalite | `/feature <description ou #issue>` |
+| `/bugfix` | Correction de bug | `/bugfix <description ou #issue>` |
 | `/hotfix` | Correction urgente prod | `/hotfix <description>` |
 | `/refactor` | Refactoring | `/refactor <description>` |
 
@@ -220,15 +211,21 @@ La source des donnees — varie selon le plugin :
 
 | Commande | Description |
 |----------|-------------|
-| `/deploy qualif` | Build + smoke test local |
-| `/deploy prod` | Merge main + tag + CI (binaires GitHub Release) |
+| `/build` | Compile l'artefact candidat (exe + plugins `.ghdp`) |
+| `/publish qualif` | Promeut le candidat vers `build/qualif/<X.Y.Z>/` |
+| `/publish prod` | Barriere `ci-branch.yml` + merge main + tag → CI (GitHub Release) |
+| `/deploy qualif` | Rapport de livraison + lancement de l'exe (test manuel Windows) |
+| `/deploy prod` | Verifie la GitHub Release du tag |
 
 ### Gestion de Projet
 
 | Commande | Description |
 |----------|-------------|
 | `/backlog` | Consulter / traiter les GitHub Issues |
-| `/pr <numero>` | Valider une PR externe |
+| `/milestone new/status/close` | Cycle de vie du milestone |
+| `/progression`, `/team-status` | Avancement de l'equipe |
+| `/context-audit [scope]` | Audit du contexte documentaire |
+| `/start-session`, `/end-session` | Ouverture / cloture de session |
 | `/marketing [version]` | Communication de release |
 
 ---
@@ -238,7 +235,7 @@ La source des donnees — varie selon le plugin :
 ### Workflow Standard (feat / bug)
 
 ```
-/feat ou /bug
+/feature ou /bugfix
        |
        v
    [PLAN] --> Plan + contrats Wails (contracts/)
@@ -262,20 +259,26 @@ La source des donnees — varie selon le plugin :
 ### Deploiement PROD
 
 ```
-/deploy prod
+/publish prod
        |
        v
-   Merge feat/* -> main (squash)
+   Barriere : ci-branch.yml (scripts/ci.sh) vert sur le SHA de milestone/vX.Y.Z
+       |
+       v
+   Merge --no-ff milestone/vX.Y.Z -> main (worktree detache)
        |
        v
    Tag vX.Y.Z
        |
        v
-   CI GitHub Actions:
-     - Verify versions (config.json, package.json, tag)
-     - npm ci && npm run build (Wails frontend)
-     - wails build (binaire Windows + Linux)
-     - gh release create
+   CI GitHub Actions (build.yml) :
+     - CI complete (ci.yml, versions PROD pinnees)
+     - Version extraite du tag -> config.json, package.json
+     - wails build (Windows AMD64) + plugins .ghdp
+     - GitHub Release (notes CHANGELOG.md)
+       |
+       v
+/deploy prod --> verification des assets de la Release
 ```
 
 ---

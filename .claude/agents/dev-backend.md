@@ -208,6 +208,13 @@ Package Windows : `github.com/wailsapp/wails/v2/pkg/options` + bindings `cfapi`.
 // +build windows
 ```
 
+### Cross-compile CF API (Linux → Windows)
+
+- `CGO_LDFLAGS=-lcldapi -lole32` ; `libcldapi.a` genere depuis `internal/cfapi/cldapi.def` (31 exports, bundle)
+  via `x86_64-w64-mingw32-dlltool` (`sudo` en CI) — le runner Linux n'a pas `cldapi.dll`.
+- `IID_IAsyncInfo` : ne pas lier `-lruntimeobject` de MinGW — definir `static const GUID IID_GHD_IAsyncInfo`
+  dans le `.c`.
+
 <!-- Derogation projet : checklist implementation -->
 ## Checklist Implementation
 
